@@ -85,6 +85,28 @@ def test_blank_key_draft_preserves_saved_key(config):
     assert config.get("llm.providers.fixture.provider_key_ref") == old_ref
 
 
+def test_remove_provider_deletes_profile_and_its_model_catalog(config):
+    result = ops.llm_config_set(config, remove_providers=["fixture"])
+
+    assert result["removed_providers"] == ["fixture"]
+    assert "fixture" not in (config.get("llm.providers") or {})
+    catalog = ModelCatalog(workspace=config.paths.root).load()
+    assert "fixture" not in catalog["providers"]
+    assert catalog["providers"]["other"][0]["id"] == "untouched"
+
+
+def test_remove_provider_rejects_a_provider_still_used_by_a_tier(config):
+    config.data["llm"]["tiers"] = {"medium": {"provider": "fixture", "model": "existing"}}
+    before_config = deepcopy(config.data)
+    before_catalog = ModelCatalog(workspace=config.paths.root).cache_path.read_bytes()
+
+    with pytest.raises(ValueError, match=r"provider in use: fixture \(medium\)"):
+        ops.llm_config_set(config, remove_providers=["fixture"])
+
+    assert config.data == before_config
+    assert ModelCatalog(workspace=config.paths.root).cache_path.read_bytes() == before_catalog
+
+
 def test_refresh_after_edit_uses_new_key_url_and_api_format(config, monkeypatch):
     ops.llm_config_set(config, providers=[{"provider": "fixture", "provider_key": "fixture-new-key", "base_url": "https://new.invalid", "kind": "anthropic_messages"}])
     calls = []

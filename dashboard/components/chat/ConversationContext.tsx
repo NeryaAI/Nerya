@@ -8,12 +8,16 @@ import { useState } from "react";
 import { useLocale } from "next-intl";
 import type { AssistantMessage, ChatAttachment } from "../../lib/chat";
 import { ReferenceSnapshot } from "./ReferenceSnapshot";
+import { terminalReplyDiagnostic } from "../../lib/chatResults";
+import { redactDiagnosticText } from "../../lib/conversationError";
 
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const number = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value >= 0 ? value : null;
 export function ConversationContext({ message }: { message: AssistantMessage }) {
   const zh = useLocale().startsWith("zh"), locale = zh ? "zh-CN" : "en-US";
   const [open, setOpen] = useState(false);
+  const [copied, setCopied] = useState(false);
+  const diagnostic = redactDiagnosticText(terminalReplyDiagnostic(message));
   const context = object(message.turn?.context_snapshot), budget = object(message.turn?.budget);
   const requested = object(context.requested_model), accepted = object(context.accepted_model), strategy = object(context.strategy_source);
   const response = object(context.interaction_response);
@@ -24,9 +28,13 @@ export function ConversationContext({ message }: { message: AssistantMessage }) 
   const original = typeof context.input_text === "string" ? context.input_text : "";
   const attachments = Array.isArray(context.attachments) ? context.attachments.map(object) : [];
   const format = (value: unknown) => number(value) === null ? (i18nCopy(zh, "copy.components_chat_ConversationContext.001")) : new Intl.NumberFormat(locale).format(Number(value));
-  if (!Object.keys(context).length && !Object.keys(budget).length && !attachmentReceipts.length) return null;
+  if (!Object.keys(context).length && !Object.keys(budget).length && !attachmentReceipts.length && !diagnostic) return null;
   return <Dialog.Root open={open} onOpenChange={setOpen}><Dialog.Trigger asChild><button type="button" aria-label={i18nCopy(zh, "copy.components_chat_ConversationContext.002")} title={i18nCopy(zh, "copy.components_chat_ConversationContext.003")} className="inline-flex h-8 w-8 items-center justify-center rounded text-[color:var(--text-muted)] hover:bg-[color:var(--panel-bg)]" data-testid="turn-context"><InfoIcon size={14}/></button></Dialog.Trigger><Dialog.Portal><Dialog.Overlay className="ui-modal-overlay"/><Dialog.Content className="ui-dialog max-h-[80vh] overflow-y-auto" aria-describedby={undefined}><div className="mb-3 flex items-center justify-between gap-3"><Dialog.Title className="text-sm font-semibold">{i18nCopy(zh, "copy.components_chat_ConversationContext.004")}</Dialog.Title><Dialog.Close className="ui-icon-button" aria-label={i18nCopy(zh, "copy.components_chat_ConversationContext.005")}><XIcon size={16}/></Dialog.Close></div>
     {open && <div className="space-y-3 border-t border-[color:var(--line)] py-3">
+      {diagnostic && <details data-testid="legacy-terminal-diagnostic"><summary className="cursor-pointer py-1">{i18nCopy(zh, "copy.components_chat_RecoveryErrorCard.005")}</summary>
+        <pre className="my-3 max-h-72 overflow-auto whitespace-pre-wrap break-all text-xs">{diagnostic}</pre>
+        <button type="button" className="btn btn-secondary text-xs" onClick={async () => { try { await navigator.clipboard.writeText(diagnostic); setCopied(true); } catch { setCopied(false); } }}>{i18nCopy(zh, copied ? "copy.components_chat_RecoveryErrorCard.007" : "copy.components_chat_RecoveryErrorCard.008")}</button>
+      </details>}
       {Object.keys(response).length > 0 && <div className="rounded border border-[color:var(--line)] p-3 text-sm"><p>{String(response.title || (i18nCopy(zh, "copy.components_chat_ConversationContext.006")))}</p><p className="mt-1 text-[color:var(--text-muted)]">{response.action === "revise" ? (i18nCopy(zh, "copy.components_chat_ConversationContext.007")) : response.action === "accept" || response.action === "answer" ? (i18nCopy(zh, "copy.components_chat_ConversationContext.008")) : String(response.action || "")}</p>{typeof response.text === "string" && response.text && <p className="mt-2 whitespace-pre-wrap">{response.text}</p>}</div>}
       <dl className="grid grid-cols-[minmax(100px,auto)_minmax(0,1fr)] gap-x-4 gap-y-2">
         <dt>{i18nCopy(zh, "copy.components_chat_ConversationContext.009")}</dt><dd className="break-words">{[accepted.provider, accepted.model].filter(value => typeof value === "string" && value).join(" · ") || (i18nCopy(zh, "copy.components_chat_ConversationContext.010"))}</dd>

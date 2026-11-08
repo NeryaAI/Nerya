@@ -28,6 +28,35 @@ def _json_part(result) -> dict:
     raise AssertionError("tool result did not contain a JSON part")
 
 
+def test_list_current_conversation_artifacts_before_first_write(tmp_path) -> None:
+    config = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
+    registry = ToolRegistry()
+    deps = build_native_tool_deps(
+        workspace_root=tmp_path, skill_roots=[tmp_path],
+        paths=config.paths, config=config,
+    )
+    deps.active_session_id = "taskchat_panel"
+    register_native_tools(registry, deps)
+    handler = registry.get("list_dir").handler
+    directory = "artifacts/conversations/taskchat_panel"
+    result = handler(ToolCall(name="list_dir", arguments={"path": directory}))
+    assert not result.is_error
+    assert _json_part(result) == {
+        "path": directory, "items": [], "truncated": False, "count": 0,
+    }
+    assert not (tmp_path / directory).exists()
+    for path in (directory + "/missing", "artifacts/conversations/other", "missing"):
+        missing = handler(ToolCall(name="list_dir", arguments={"path": path}))
+        assert missing.is_error and missing.error.kind is ToolErrorKind.NOT_FOUND
+    write_file_handler(
+        ToolCall(name="write_file", arguments={"path": "notes.md", "contents": "panel notes"}),
+        root=tmp_path, file_state=None, session_id=deps.active_session_id,
+    )
+    listed = handler(ToolCall(name="list_dir", arguments={"path": directory}))
+    assert not listed.is_error
+    assert [item["name"] for item in _json_part(listed)["items"]] == ["notes.md"]
+
+
 def test_new_conversation_file_is_rerouted_out_of_workspace_root(tmp_path) -> None:
     result = write_file_handler(
         ToolCall(
@@ -89,6 +118,26 @@ def test_proposal_staging_path_is_not_rerouted(tmp_path) -> None:
     assert result.is_error is False
     assert (tmp_path / relative).read_text(encoding="utf-8") == "proposal\n"
     assert result.metadata["placement"] == "canonical"
+    assert classify_file_mutation_risk({"path": relative, "contents": "proposal"}) is RiskLevel.WRITE
+
+
+def test_proposal_file_guidance_preserves_normal_lane_and_explicit_exception_gate():
+    from nerya.tools.native.bootstrap import _WRITE_FILE_SCHEMA
+    from nerya.tools.native.strategy_runtime import _draft_next_steps
+
+    description = _WRITE_FILE_SCHEMA["properties"]["allow_outside_conversation"]["description"]
+    assert "Omit this for existing files and proposal-staged files" in description
+    assert "evolution/proposals/" in description
+    steps = " ".join(_draft_next_steps("prp_fixture", {
+        "strategy_root": "evolution/proposals/prp_fixture/after/strategies/fixture",
+    }))
+    assert "omit allow_outside_conversation" in steps
+    # Guidance corrects the model's arguments; it never downgrades an explicit
+    # exception or changes a pending request's required authorization.
+    assert classify_file_mutation_risk({
+        "path": "evolution/proposals/prp_fixture/after/strategies/fixture/main.py",
+        "allow_outside_conversation": True,
+    }) is RiskLevel.DANGEROUS
 
 
 def test_new_file_can_use_an_explicit_audited_exception(tmp_path) -> None:

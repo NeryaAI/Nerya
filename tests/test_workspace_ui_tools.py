@@ -8,6 +8,7 @@ import pytest
 
 from nerya.core.config import DEFAULT_CONFIG, Config
 from nerya.core.paths import WorkspacePaths
+from nerya.evolution.patch_proposal import set_state
 from nerya.tools.native.bootstrap import build_native_tool_deps, register_native_tools
 from nerya.tools.native.workspace_ui import (
     workspace_ui_inspect_handler,
@@ -47,6 +48,8 @@ def test_workspace_ui_native_tools_are_registered_with_review_safe_profiles(tmp_
     assert inspect.is_concurrency_safe is True
     assert inspect.mutates_paths is False
     assert inspect.auto_approve is True
+    assert "panel / 面板" in inspect.description
+    assert "server data" in inspect.description
 
     propose = registry.get("workspace_ui_propose")
     assert propose.risk is RiskLevel.WRITE
@@ -56,6 +59,8 @@ def test_workspace_ui_native_tools_are_registered_with_review_safe_profiles(tmp_
     assert propose.mutates_paths is True
     assert propose.auto_approve is False
     assert "never changes the live dashboard" in propose.description
+    assert "standalone HTML" in propose.description
+    assert "approval/apply" in propose.description
 
 
 def test_workspace_ui_inspect_returns_layout_revision_and_catalog(tmp_path) -> None:
@@ -74,6 +79,33 @@ def test_workspace_ui_inspect_returns_layout_revision_and_catalog(tmp_path) -> N
         "chart", "market_ticker", "markdown", "skill_panel", "agent_panel",
     }
     assert data["manifest"]["version"] == 1
+
+
+def test_workspace_ui_inspect_hands_off_applied_page_hrefs(tmp_path) -> None:
+    config = _config(tmp_path)
+    proposal = workspace_ui_propose_handler(
+        ToolCall(name="workspace_ui_propose", arguments={
+            "summary": "Add market overview",
+            "operations": [{"op": "upsert_page", "page": {
+                "id": "market-overview", "title": "Market Overview",
+            }}],
+        }),
+        config=config,
+    )
+    assert not proposal.is_error, proposal.text()
+    proposal_id = proposal.content[0].data["proposal_id"]
+    from nerya.workspace import ui
+    assert set_state(config.paths, proposal_id, "approved") is not None
+    applied = ui.apply(config.paths, proposal_id)
+    assert applied["ok"] is True
+
+    result = workspace_ui_inspect_handler(
+        ToolCall(name="workspace_ui_inspect", arguments={}), config=config,
+    )
+    assert not result.is_error, result.text()
+    data = result.content[0].data
+    assert data["summary"]["pages"][0]["href"] == "/workspace/pages/market-overview"
+    assert data["manifest"]["pages"][0]["href"] == "/workspace/pages/market-overview"
 
 
 def test_workspace_ui_inspect_rejects_unknown_page(tmp_path) -> None:

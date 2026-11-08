@@ -1,4 +1,6 @@
 from pathlib import Path
+import pytest
+from nerya.tools.native import search
 
 from nerya.tools.native.search import glob_handler, grep_handler
 from nerya.tools.types import ToolCall, ToolErrorKind
@@ -55,3 +57,43 @@ def test_grep_honors_max_results(tmp_path: Path) -> None:
     assert not result.is_error
     assert result.metadata["count"] == 2
     assert result.content[1].data["truncated"] is True
+
+def test_python_fallback_skips_binary_database_without_whole_file_read(tmp_path, monkeypatch):
+    (tmp_path / 'nerya.db').write_bytes(b'SQLite format 3\0' + b'private needle' * 100)
+    (tmp_path / 'notes.md').write_text('public needle\n')
+    monkeypatch.setattr(search, '_have_rg', lambda: False)
+    monkeypatch.setattr(Path, 'read_text', lambda *a, **k: pytest.fail('whole-file read'))
+    result = grep_handler(ToolCall(name='grep', arguments={'pattern':'needle'}), root=tmp_path)
+    assert not result.is_error
+    assert result.content[1].data['matches'] == [{'path':'notes.md','line':1,'match':'public needle'}]
+
+def test_python_fallback_enforces_search_deadline(tmp_path, monkeypatch):
+    (tmp_path / 'notes.md').write_text('needle\n')
+    monkeypatch.setattr(search, '_have_rg', lambda: False)
+    clock = iter([0, 0, 16, 16, 16])
+    monkeypatch.setattr(search.time, 'monotonic', lambda: next(clock, 16))
+    result = grep_handler(ToolCall(name='grep', arguments={'pattern':'needle'}), root=tmp_path)
+    assert result.is_error and result.error.kind == ToolErrorKind.TIMEOUT
+
+def test_python_fallback_deadline_inside_file_is_not_swallowed(tmp_path, monkeypatch):
+    target = tmp_path / 'notes.md'
+    target.write_text('needle\n')
+    monkeypatch.setattr(search, '_have_rg', lambda: False)
+    clock = iter([0, 0, 0, 16])
+    monkeypatch.setattr(search.time, 'monotonic', lambda: next(clock, 16))
+    result = grep_handler(ToolCall(name='grep', arguments={'pattern':'needle','path':'notes.md'}), root=tmp_path)
+    assert result.is_error and result.error.kind == ToolErrorKind.TIMEOUT
+
+def test_python_fallback_preserves_lines_unicode_and_case(tmp_path, monkeypatch):
+    (tmp_path / 'notes.md').write_text('first\n行情 NEEDLE\nthird\n', encoding='utf-8')
+    monkeypatch.setattr(search, '_have_rg', lambda: False)
+    result = grep_handler(ToolCall(name='grep', arguments={'pattern':'needle','case_insensitive':True}), root=tmp_path)
+    assert result.content[1].data['matches'] == [{'path':'notes.md','line':2,'match':'行情 NEEDLE'}]
+
+def test_python_fallback_bounds_long_lines_and_reports_truncation(tmp_path, monkeypatch):
+    (tmp_path / 'generated.txt').write_text('x' * 100000 + 'needle')
+    monkeypatch.setattr(search, '_have_rg', lambda: False)
+    result = grep_handler(ToolCall(name='grep', arguments={'pattern':'needle'}), root=tmp_path)
+    assert not result.is_error
+    assert result.content[1].data['truncated'] is True
+    assert result.content[1].data['matches'] == []

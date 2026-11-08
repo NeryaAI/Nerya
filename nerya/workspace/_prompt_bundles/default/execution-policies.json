@@ -1,9 +1,6 @@
 {
   "subagent_policy_profiles": {
-    "bounded_research": {
-      "max_iterations": 8,
-      "max_wall_seconds": 360
-    },
+    "bounded_research": {},
     "expert_web_delegate": {
       "preload_skills": ["research"],
       "native_tools": {
@@ -19,12 +16,6 @@
     },
     "web_collector": {
       "preload_skills": ["research"],
-      "locked_tier": "light",
-      "model_override_scope": "tier_routes",
-      "max_iterations": 4,
-      "max_skill_calls": 6,
-      "max_wall_seconds": 180,
-      "llm_max_attempts": 1,
       "native_tools": {
         "allow": [
           "Skill",

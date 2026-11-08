@@ -68,6 +68,17 @@ def command_routes(run_turn):
         return reference_preview(manager.config.paths, query.get("uri"))
 
     @safe
+    def goal_control(manager, payload):
+        from ..agent.goals import control as change_goal, enqueue_if_idle
+        sid=payload.get("session_id")
+        goal=change_goal(manager.store,sid,payload.get("action"),payload.get("expected_revision"),
+            actor=str(payload.get("_auth_actor_id") or "local"))
+        if payload.get("action")=="resume":
+            enqueue_if_idle(manager.store,sid)
+            manager.kick(sid)
+        return {"ok":True,"goal":goal}
+
+    @safe
     def respond(manager, payload):
         from ..agent.interactions import respond as apply_response
         return apply_response(manager, payload)
@@ -80,4 +91,5 @@ def command_routes(run_turn):
 
     return [("POST", "/agent/commands", submit), ("GET", "/agent/commands", snapshot),
             ("GET", "/agent/commands/events", events), ("POST", "/agent/commands/control", control),
-            ("GET", "/agent/commands/reference", reference), ("POST", "/agent/commands/fork", fork), ("POST", "/agent/interactions/respond", respond)]
+            ("GET", "/agent/commands/reference", reference), ("POST", "/agent/commands/fork", fork), ("POST", "/agent/interactions/respond", respond),
+            ("POST", "/agent/goals/control", goal_control)]

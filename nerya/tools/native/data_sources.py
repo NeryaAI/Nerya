@@ -10,9 +10,32 @@ from ...data_sources import sync_contributors, sync_state
 from ..types import ToolCall, ToolError, ToolErrorKind, ToolResult
 
 
+_STATUS_GUIDANCE = (
+    "This is a historical sync ledger inventory, not a live endpoint probe. "
+    "ok means the inventory was read successfully, not that providers are healthy. "
+    "Observed providers/source IDs identify ledger rows only, including seeded rows. "
+    "stale and stale_count describe ledger freshness (including no recorded success), "
+    "not current provider availability. Never infer DefiLlama health from CCXT, "
+    "another source, or global stale counts. Provider health is not_checked by "
+    "this tool, even when matching ledger rows or recent events exist. An empty "
+    "provider match means no ledger coverage, not an unavailable provider. "
+    "Report a data_api transport failure only for the attempted provider/endpoint; "
+    "it does not establish the upstream cause or an outage. Do not fabricate health."
+)
+
+
 DATA_SOURCE_STATUS_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "description": _STATUS_GUIDANCE,
     "properties": {
+        "provider": {
+            "type": "string",
+            "description": (
+                "Optional provider identifier, e.g. defillama or ccxt, to identify "
+                "matching ledger rows (case-insensitive exact match). Does not "
+                "filter the inventory or probe the provider; health stays not_checked."
+            ),
+        },
         "include_events": {
             "type": "boolean",
             "default": False,
@@ -58,10 +81,27 @@ def data_source_status_handler(
     sync_contributors.install_default_contributors()
     sync_contributors.seed_additional_rows(client)
     summary = sync_state.summarize(client)
+    sources = summary.get("sources") or []
+    provider = str(args.get("provider") or "").strip().casefold()
     payload: dict[str, Any] = {
         "ok": True,
+        "interpretation_guidance": _STATUS_GUIDANCE,
+        "diagnostic_scope": {
+            "kind": "historical_sync_ledger",
+            "live_probe_performed": False,
+            "provider_health": "not_checked",
+            "observed_source_ids": sorted(row["source_id"] for row in sources),
+            "observed_providers": sorted({
+                row["provider"] for row in sources if row.get("provider")
+            }),
+            "requested_provider": provider or None,
+            "requested_provider_source_ids": [
+                row["source_id"] for row in sources
+                if provider and str(row.get("provider") or "").strip().casefold() == provider
+            ],
+        },
         "summary": summary,
-        "sources": summary.get("sources") or [],
+        "sources": sources,
         "total": summary.get("total") or 0,
         "stale_count": summary.get("stale_count") or 0,
     }

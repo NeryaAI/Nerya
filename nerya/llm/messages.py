@@ -327,6 +327,25 @@ def _reasoning_off_unsupported(provider: str, model: str) -> LLMError:
     )
 
 
+def _model_reasoning_wire(provider: str, model: str, effort: str | None) -> dict[str, Any]:
+    """Translate verified model capabilities; never guess from model prefixes."""
+    from .model_registry import lookup
+    from .provider_catalog import resolve_alias
+
+    meta = lookup(resolve_alias(provider), model)
+    if effort is None or meta.reasoning_wire_protocol != "thinking_type":
+        return {}
+    if effort == "none":
+        if not meta.supports_reasoning_disable:
+            raise _reasoning_off_unsupported(provider, model)
+        return {"thinking": {"type": "disabled"}}
+    # This protocol has an on/off switch, not graded effort levels. These
+    # ordinary positive settings enable thinking without sending an intensity.
+    if effort in {"low", "medium", "high"}:
+        return {"thinking": {"type": "enabled"}}
+    raise LLMError(f"reasoning_effort_unsupported: {provider}/{model}: {effort}")
+
+
 @dataclass
 class MessagesRequest:
     """Provider-agnostic request for the ``messages`` endpoint.
@@ -1023,9 +1042,18 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
     finish = str(choice.get("finish_reason") or "")
     content_blocks: list[dict[str, Any]] = []
 
+    reasoning_blob = (
+        msg.get("reasoning")
+        or msg.get("reasoning_content")
+        or msg.get("reasoning_details")
+    )
+    has_provider_reasoning = bool(reasoning_blob)
+
     text_payload = raw_msg if isinstance(raw_msg, str) else msg.get("content")
     if isinstance(text_payload, str) and text_payload:
         thinking_text, visible_text = _split_visible_thinking(text_payload)
+        if has_provider_reasoning:
+            visible_text = _strip_provider_reasoning_close(visible_text)
         if thinking_text:
             content_blocks.append({"type": "thinking", "thinking": thinking_text})
         if visible_text:
@@ -1038,6 +1066,8 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
                     thinking_text, visible_text = _split_visible_thinking(
                         str(p.get("text") or "")
                     )
+                    if has_provider_reasoning:
+                        visible_text = _strip_provider_reasoning_close(visible_text)
                     if thinking_text:
                         content_blocks.append({
                             "type": "thinking",
@@ -1062,11 +1092,6 @@ def _openai_parse_response(doc: dict[str, Any]) -> tuple[list[dict[str, Any]], s
                         "source_kind": "model",
                     })
 
-    reasoning_blob = (
-        msg.get("reasoning")
-        or msg.get("reasoning_content")
-        or msg.get("reasoning_details")
-    )
     if reasoning_blob:
         rtext = ""
         if isinstance(reasoning_blob, str):
@@ -1152,6 +1177,35 @@ def _split_visible_thinking(text: str) -> tuple[str, str]:
     return thinking, visible
 
 
+def _strip_provider_reasoning_close(text: str) -> str:
+    """Remove only a provider delimiter at the start of visible content."""
+
+    raw = str(text or "")
+    stripped = raw.lstrip()
+    if stripped.lower().startswith("</think>"):
+        return stripped[len("</think>"):].strip()
+    return raw
+
+
+def _tls_error_metadata(error: ssl.SSLError) -> dict[str, str]:
+    """Fixed TLS diagnostics only; exception text may contain URLs or secrets."""
+    error_class = next(cls.__name__ for cls in (
+        ssl.SSLCertVerificationError, ssl.SSLEOFError, ssl.SSLZeroReturnError,
+        ssl.SSLWantReadError, ssl.SSLWantWriteError, ssl.SSLSyscallError, ssl.SSLError,
+    ) if isinstance(error, cls))
+    reason = getattr(error, "reason", None)
+    if isinstance(error, ssl.SSLCertVerificationError) or reason == "CERTIFICATE_VERIFY_FAILED":
+        category = "cert_verify"
+    elif isinstance(error, ssl.SSLEOFError) or reason == "UNEXPECTED_EOF_WHILE_READING":
+        category = "eof"
+    elif reason in ("SSLV3_ALERT_HANDSHAKE_FAILURE", "TLSV1_ALERT_HANDSHAKE_FAILURE", "NO_SHARED_CIPHER"):
+        category = "handshake"
+    else:
+        # A generic SSLError alone does not establish a handshake failure.
+        category = "unknown"
+    return {"tls_error_class": error_class, "tls_error_category": category}
+
+
 def _openai_stream_event_error(provider: str, payload: Any) -> LLMError:
     """Preserve a provider's SSE error instead of treating it as a network flap."""
     details = payload if isinstance(payload, dict) else {"message": str(payload)}
@@ -1191,6 +1245,57 @@ def _openai_stream_event_error(provider: str, payload: Any) -> LLMError:
     return error
 
 
+class _ReasoningRepetitionGuard:
+    """Detect exact consecutive cycles, not merely long or similar input."""
+
+    _MIN_PERIOD = 128
+    _MAX_PERIOD = 8192
+    _MIN_REPEATS = 4
+    _MIN_SPAN = 2048
+    _CHECK_EVERY = 256
+    _ANCHOR = 64
+
+    def __init__(self, kind="reasoning"):
+        self.kind = kind
+        self.tail = ""
+        self.since_check = 0
+
+    def feed(self, text: str) -> None:
+        offset = 0
+        while offset < len(text):
+            size = min(self._CHECK_EVERY - self.since_check, len(text) - offset)
+            self.tail = (self.tail + text[offset:offset + size])[
+                -self._MAX_PERIOD * self._MIN_REPEATS:]
+            offset += size
+            self.since_check += size
+            if self.since_check < self._CHECK_EVERY:
+                continue
+            self.since_check = 0
+            if len(self.tail) < self._MIN_SPAN:
+                continue
+            # Locate possible periods cheaply, then verify every character of
+            # at least four copies. Neither hashes nor chunk boundaries decide.
+            end = len(self.tail) - self._ANCHOR
+            start = max(0, end - self._MAX_PERIOD)
+            limit = end - self._MIN_PERIOD + self._ANCHOR
+            anchor = self.tail[end:]
+            while (prior := self.tail.rfind(anchor, start, limit)) >= start:
+                period = end - prior
+                repeats = max(self._MIN_REPEATS,
+                              (self._MIN_SPAN + period - 1) // period)
+                span = period * repeats
+                if span <= len(self.tail):
+                    suffix = self.tail[-span:]
+                    if suffix[period:] == suffix[:-period]:
+                        error = LLMError(
+                            f"Model {self.kind.replace('_', ' ')} repeated an identical {period}-character "
+                            f"cycle {repeats} times; request stopped.")
+                        error.code = f"model_{self.kind}_repetition"
+                        error.retryable = False
+                        raise error
+                limit = prior + self._ANCHOR - 1
+
+
 class _OpenAIStream:
     """Accumulate transport deltas; only a complete response yields tool uses."""
 
@@ -1203,14 +1308,23 @@ class _OpenAIStream:
         self.finish_reason = None
         self.pending = ""
         self.content_mode = "prefix"
+        self.provider_reasoning_seen = False
+        self.reasoning_guard = _ReasoningRepetitionGuard()
+        self.tool_input_guards = {}
 
     @property
     def output_committed(self) -> bool:
-        """A model payload was received; replaying may duplicate streamed work."""
+        """A preview was emitted, not proof that a client tool was executed."""
         return bool(self.message["content"] or self.message["reasoning_content"] or self.tools)
 
     def emit(self, kind, **data):
         raise_if_cancelled(self.request.cancel_token, self.request.deadline)
+        if kind == "thinking_delta":
+            self.reasoning_guard.feed(data.get("text") or "")
+        elif kind in {"text_delta", "tool_input_delta"} and any(
+            str(data.get(key) or "").strip() for key in ("text", "partial_json", "name")
+        ):
+            self.reasoning_guard = _ReasoningRepetitionGuard()
         if self.request.on_event:
             self.request.on_event({"type": kind, "stream_mode": "stream", **data})
 
@@ -1218,12 +1332,15 @@ class _OpenAIStream:
         self.pending += delta
         if self.content_mode == "prefix":
             stripped = self.pending.lstrip()
-            if not final and (not stripped or "<think>".startswith(stripped.lower())):
+            prefixes = ("<think>", "</think>") if self.provider_reasoning_seen else ("<think>",)
+            if not final and (not stripped or any(tag.startswith(stripped.lower()) for tag in prefixes)):
                 return
             if stripped.lower().startswith("<think>"):
                 self.pending = stripped[7:]
                 self.content_mode = "thinking"
             else:
+                if self.provider_reasoning_seen and stripped.lower().startswith("</think>"):
+                    self.pending = stripped[8:]
                 self.content_mode = "text"
         if self.content_mode == "thinking":
             end = self.pending.lower().find("</think>")
@@ -1259,14 +1376,15 @@ class _OpenAIStream:
             if choice.get("index", 0) != 0:
                 continue
             delta = choice.get("delta") or {}
+            thinking = delta.get("reasoning_content") or delta.get("reasoning")
+            if isinstance(thinking, str) and thinking:
+                self.provider_reasoning_seen = True
+                self.message["reasoning_content"] += thinking
+                self.emit("thinking_delta", text=thinking)
             text = delta.get("content")
             if isinstance(text, str) and text:
                 self.message["content"] += text
                 self.content(text)
-            thinking = delta.get("reasoning_content") or delta.get("reasoning")
-            if isinstance(thinking, str) and thinking:
-                self.message["reasoning_content"] += thinking
-                self.emit("thinking_delta", text=thinking)
             for tool in delta.get("tool_calls") or []:
                 index = tool.get("index", 0)
                 target = self.tools.setdefault(index, {"id": "", "type": "function",
@@ -1275,6 +1393,10 @@ class _OpenAIStream:
                 function = tool.get("function") or {}
                 target["function"]["name"] += function.get("name") or ""
                 fragment = function.get("arguments") or ""
+                # Short cycles also repeat at integer-multiple periods; reuse
+                # the guard's existing minimum span and repeat count unchanged.
+                self.tool_input_guards.setdefault(
+                    index, _ReasoningRepetitionGuard("tool_argument")).feed(fragment)
                 target["function"]["arguments"] += fragment
                 self.emit("tool_input_delta", index=index, call_id=target["id"],
                           name=target["function"]["name"], partial_json=fragment)
@@ -1339,7 +1461,8 @@ class OpenAIMessagesBackend:
         eff = normalise_reasoning_effort(
             request.reasoning_effort if request.reasoning_effort is not None else self.reasoning_effort
         )
-        if eff == "none" and not minimax_compat:
+        model_reasoning_wire = _model_reasoning_wire(self.provider_name, self.model, eff)
+        if eff == "none" and not minimax_compat and not model_reasoning_wire:
             from .model_registry import lookup
             meta = lookup(self.provider_name, self.model)
             if _is_reasoning_model_id(self.model) or meta.source == "unknown" or meta.supports_reasoning:
@@ -1371,6 +1494,7 @@ class OpenAIMessagesBackend:
         else:
             body["max_tokens"] = request.max_tokens
             body["temperature"] = request.temperature
+        body.update(model_reasoning_wire)
 
         if request.tools:
             body["tools"] = _openai_render_tools(request.tools)
@@ -1415,17 +1539,24 @@ class OpenAIMessagesBackend:
                             timeout=_timeout_for_deadline(self.timeout, request.deadline),
                             on_event=accumulator.feed,
                         )
-                    if status < 400 and doc.get("stream_complete"):
+                    if status < 400 and ("stream_complete" in doc or accumulator.output_committed):
+                        # An incomplete SSE response is not a synchronous empty
+                        # answer. Some transports report EOF as a false terminal
+                        # marker instead of raising; preserve the same recovery
+                        # boundary in both cases, even after finish_reason.
+                        if doc.get("stream_complete") is not True:
+                            raise LLMError("provider stream ended before [DONE]")
                         stream_mode = "stream"
                         doc = accumulator.finish()
                     return status, doc, response_headers
                 except Exception as exc:
                     if isinstance(exc, CancelledError):
                         raise
-                    # ZCode uses the emitted-stream boundary: before any
-                    # model payload, a transient connection failure may use
-                    # the *turn-owned* bounded retry policy. After a text,
-                    # thinking or tool fragment, never replay the request.
+                    # Ordinary callers retain the conservative emitted-output
+                    # boundary. The native loop explicitly buffers function
+                    # calls until finish() succeeds, and can discard a failed
+                    # preview without repeating an executed tool. Upstream
+                    # capabilities have a different side-effect boundary.
                     committed = accumulator.output_committed
                     if isinstance(exc, LLMError):
                         error = exc
@@ -1454,6 +1585,10 @@ class OpenAIMessagesBackend:
                             else "model_stream_connection_failed" if eligible
                             else "model_stream_network_config_error"
                         ))
+                        setattr(error, "provider", str(self.provider_name or "")[:80])
+                        if isinstance(root_cause, ssl.SSLError):
+                            for key, value in _tls_error_metadata(root_cause).items():
+                                setattr(error, key, value)
                     else:
                         # A parser/programming error is not a transient network
                         # failure. Preserve its cause without a replay.
@@ -1462,9 +1597,17 @@ class OpenAIMessagesBackend:
                         eligible = False
                     setattr(error, "stream_interrupted", True)
                     setattr(error, "stream_output_committed", committed)
-                    # Retry only before output; native upstream capabilities
-                    # have independent effects and must never be replayed here.
-                    setattr(error, "retryable", bool(eligible) and not committed and not native_web_search.get("enabled"))
+                    buffered_client_tools = (
+                        request.metadata.get("tool_execution_boundary") == "response_complete"
+                        and not native_web_search.get("enabled")
+                    )
+                    setattr(error, "stream_request_replay_safe", bool(eligible) and buffered_client_tools)
+                    # The backend never retries itself. The turn owner must
+                    # discard the preview, enforce its shared attempt budget,
+                    # and keep all previously completed tool results intact.
+                    setattr(error, "retryable", bool(eligible)
+                            and (not committed or buffered_client_tools)
+                            and not native_web_search.get("enabled"))
                     if error is exc:
                         raise
                     raise error from exc

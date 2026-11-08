@@ -248,7 +248,14 @@ export function StrategyProposalApprovalCard({
     stringValue(normalized.strategy_id) ||
     strategyIdFromTarget(normalized.target);
   const files = stringArray(normalized.files);
-  const effectiveValidation = validationResult ?? normalized.validation;
+  const currentSnapshot = snapshot?.source.proposal_id === proposalId ? snapshot : null;
+  const fileCount = currentSnapshot?.source.file_count ?? files.length;
+  const currentReceipt = currentSnapshot?.validation_receipt;
+  // Transcript payloads describe the original tool event. The candidate card
+  // uses the read-only current-source projection once it is available.
+  const effectiveValidation = currentReceipt
+    ? currentReceipt.status === "current" ? currentReceipt.report : null
+    : validationResult ?? normalized.validation;
   const blockers = validationItems(effectiveValidation, "blockers");
   const warnings = validationItems(effectiveValidation, "warnings");
   const validation = recordOf(effectiveValidation);
@@ -265,12 +272,17 @@ export function StrategyProposalApprovalCard({
   const packageProposal = normalized.kind === "strategy_package_proposal";
   const shouldValidate =
     packageProposal && !!proposalId &&
-    !normalized.validation &&
+    !effectiveValidation &&
     !TERMINAL_STATES.has(state);
-  const validationPending = shouldValidate && !validationChecked;
+  const validationPending = shouldValidate && (!!currentReceipt || !validationChecked);
   const manifest = snapshot ? { ...recordOf(snapshot.manifest.extras), ...snapshot.manifest } : {};
-  const agentMode = recordOf(manifest.agent_task).enabled === true;
-  const gated = snapshot?.strategy.nodes.some(node => node.kind === "script" && node.control?.can_stop);
+  const scriptedAgent = snapshot?.strategy.edges?.some(edge =>
+    ["static", "manifest", "runtime"].includes(edge.origin) &&
+    ["calls", "dispatch", "conditional_dispatch", "parallel_dispatch"].includes(edge.relation) &&
+    snapshot.strategy.nodes.some(node => node.id === edge.source && node.kind === "script") &&
+    snapshot.strategy.nodes.some(node => node.id === edge.target && node.kind === "agent"));
+  const agentMode = recordOf(manifest.agent_task).enabled === true || scriptedAgent;
+  const gated = scriptedAgent || snapshot?.strategy.nodes.some(node => node.kind === "script" && node.control?.can_stop);
   const typeLabel = snapshot ? agentMode ? gated ? (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.001")) : (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.002")) : (i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.003")) : "";
   const displayTitle = stringValue(manifest.title) || stringValue(normalized.summary) || strategyId || proposalId;
   const states: Record<string, string> = { draft: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.004"), pending_review: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.005"), proposed: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.006"), approved: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.007"), applied: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.008"), rejected: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.009"), rolled_back: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.010"), superseded: i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.011") };
@@ -294,6 +306,10 @@ export function StrategyProposalApprovalCard({
       const report = out as StrategyValidationReport;
       setValidationResult(report);
       setValidationChecked(true);
+      if (strategyId) {
+        const view = await workflowApi.get(strategyId, proposalId);
+        setSnapshot(view);
+      }
       return report;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
@@ -315,11 +331,27 @@ export function StrategyProposalApprovalCard({
   useEffect(() => {
     let cancelled = false;
     setSnapshot(null);
-    if (strategyId && packageProposal) workflowApi.get(strategyId, proposalId).then(view => {
-      if (!cancelled) setSnapshot(view);
-    }).catch(() => { /* The saved receipt remains readable if its source is unavailable. */ });
-    return () => { cancelled = true; };
-  }, [proposalId, strategyId, packageProposal]);
+    if (!strategyId || !packageProposal) return;
+    let pending = false;
+    const refresh = async () => {
+      if (pending || document.visibilityState === "hidden") return;
+      pending = true;
+      try {
+        const view = await workflowApi.get(strategyId, proposalId);
+        if (!cancelled) setSnapshot(view);
+      } catch {
+        if (!cancelled) setSnapshot(previous => previous ? { ...previous, validation_receipt: { status: "unavailable", report: null } } : null);
+      } finally { pending = false; }
+    };
+    void refresh();
+    const timer = !TERMINAL_STATES.has(state) ? window.setInterval(refresh, 5000) : null;
+    document.addEventListener("visibilitychange", refresh);
+    return () => {
+      cancelled = true;
+      if (timer !== null) window.clearInterval(timer);
+      document.removeEventListener("visibilitychange", refresh);
+    };
+  }, [proposalId, strategyId, packageProposal, state]);
 
   async function approve() {
     if (!proposalId) return;
@@ -342,7 +374,7 @@ export function StrategyProposalApprovalCard({
     setLocalError(null);
     onError?.(null);
     try {
-      const checked = validationResult ?? (normalized.validation as StrategyValidationReport | undefined) ?? await validateProposal();
+      const checked = (effectiveValidation as StrategyValidationReport | undefined) ?? await validateProposal();
       const checkedBlockers = validationItems(checked, "blockers");
       if (!checked || checked.ok === false || checkedBlockers.length > 0) {
         throw new Error(t("validationBlockedNotice"));
@@ -445,6 +477,7 @@ export function StrategyProposalApprovalCard({
             {validationOk ? <span className="inline-flex items-center gap-1"><ShieldCheckIcon size={13}/>{i18nCopy(zh, "copy.components_strategies_StrategyProposalApprovalCard.014")}</span> : null}
             {validating ? <Pill tone="brand">{t("validating")}</Pill> : null}
             {hasBlockers ? <Pill tone="danger">{t("blocked")}</Pill> : null}
+            {currentReceipt && currentReceipt.status !== "current" ? <Pill tone="warn">{t("currentSourceNeedsValidation")}</Pill> : null}
           </div>
           <div className={cardStyles.facts} data-testid="strategy-card-facts">
             {Array.isArray(manifest.markets) && <span>{manifest.markets.map(String).join(" · ")}</span>}
@@ -453,7 +486,7 @@ export function StrategyProposalApprovalCard({
           </div>
           <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-[color:var(--text-muted)]">
             {normalized.ts ? <span>{formatTsShort(String(normalized.ts))}</span> : null}
-            {files.length ? <span>{t("files", { count: files.length })}</span> : null}
+            {fileCount ? <span>{t("files", { count: fileCount })}</span> : null}
             {/* Raw ids are reviewer/debug detail; keep them one click away. */}
             <details className="inline-block">
               <summary className="cursor-pointer list-none text-[color:var(--text-muted)] hover:text-[color:var(--text-base)] underline decoration-dotted underline-offset-2">

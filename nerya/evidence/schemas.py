@@ -32,6 +32,9 @@ class Provenance:
     session_id: str = ""
     artifact_refs: list[str] = field(default_factory=list)
     created_by: str = "runtime"  # "agent" | "operator" | "runtime"
+    source_locator: str = ""
+    as_of: str = ""
+    retrieved_at: str = ""
 
     def as_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -62,6 +65,8 @@ class EvidenceDoc:
     scope: str = "shared"  # "shared" | "strategy" | "session"
     strategy_id: Optional[str] = None
     session_id: Optional[str] = None
+    content_sha256: str = ""
+    previous_evidence_id: str = ""
 
     def __post_init__(self) -> None:
         if self.source_type not in VALID_SOURCE_TYPES:
@@ -85,4 +90,6 @@ class EvidenceDoc:
             "scope": self.scope,
             "strategy_id": self.strategy_id,
             "session_id": self.session_id,
+            "content_sha256": self.content_sha256,
+            "previous_evidence_id": self.previous_evidence_id,
         }

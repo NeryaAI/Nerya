@@ -83,14 +83,13 @@ test('a cached task keeps its title and navigation when refresh fails', () => {
   assert.doesNotMatch(html, /class="sr-only"/);
 });
 
-test('header exposes the waiting label, loading and stale idle state accurately', () => {
+test('task header stays quiet while keeping the conversation title and actions', () => {
   const { ChatTaskHeader } = component('ChatTaskHeader.tsx');
-  const props = { thread: { id: 'task-1', title: 'Research', messages: [] }, agents: [], results: [], sending: false, approvalCount: 1, showTabs: true, tab: '', canvasVisible: false, onSelect() {}, onToggleCanvas() {}, onOpenResult() {}, workStatus: status({ completion: 'external_reported' }) };
-  assert.ok(render(ChatTaskHeader, props).includes('class="statusLabel">Awaiting approval</span>'));
-  assert.ok(render(ChatTaskHeader, { ...props, approvalCount: 0, loading: true }).includes('class="statusLabel">Loading</span>'));
-  const offline = render(ChatTaskHeader, { ...props, approvalCount: 0, connection: 'offline', workStatus: status({ execution: 'idle' }) });
-  assert.match(offline, /data-idle="false"/);
-  assert.match(offline, /Ready · May be out of date/);
+  const props = { thread: { id: 'task-1', title: 'Research', messages: [] }, agents: [], results: [], showTabs: true, tab: '', canvasVisible: false, onSelect() {}, onToggleCanvas() {}, onOpenResult() {} };
+  const html = render(ChatTaskHeader, props);
+  assert.match(html, /data-testid="task-topbar"/);
+  assert.match(html, />Research</);
+  assert.doesNotMatch(html, /statusLabel|task-admitted-model|delivery-stage-rail|deliverySummary|Awaiting approval|Delivery incomplete/);
 });
 
 test('skill failures never report loaded or ready in either language', () => {

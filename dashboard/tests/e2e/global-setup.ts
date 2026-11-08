@@ -246,6 +246,10 @@ async function assertProxyPostHealthy(ui: string): Promise<void> {
     parsed = null;
   }
   const errLabel = parsed && typeof parsed.error === "string" ? parsed.error : "";
+  const commands = await fetch(`${new URL(url).origin}/api/proxy/agent/commands?session_id=e2e_channel_probe`, { signal: AbortSignal.timeout(10000) });
+  if ([res.status, commands.status].some(status => status === 401 || status === 403)) {
+    throw new Error("[setup] Dashboard and runtime command channel is unauthorized. Start both with PLAYWRIGHT_AUTOSTART=1 or configure their shared server-only internal token.");
+  }
   const brokenProxy = PROXY_ORIGIN_ERRORS.has(errLabel);
   const frameworkError = !parsed && res.status >= 500;
   if (brokenProxy || frameworkError) {

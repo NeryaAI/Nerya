@@ -138,6 +138,8 @@ class WorkspacePaths:
     def triggers_routes_file(self) -> Path: return self.triggers_dir / "routes.yml"
     @property
     def triggers_schedules_file(self) -> Path: return self.triggers_dir / "schedules.yml"
+    @property
+    def triggers_market_sources_file(self) -> Path: return self.triggers_dir / "market_sources.yml"
 
     # scripts
     @property

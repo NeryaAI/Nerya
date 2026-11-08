@@ -1,0 +1,22 @@
+.root { box-sizing:border-box; flex:none; min-width:0; width:100%; max-width:100%; padding:8px 16px; border-bottom:1px solid var(--line); color:var(--text-base); font-size:12px; overflow-wrap:anywhere; }
+.heading { display:flex; flex-wrap:wrap; align-items:center; gap:6px 10px; min-width:0; }
+.label { font-weight:600; }
+.status { min-width:0; color:var(--text-muted); }
+.root[data-state=complete] .status { color:var(--ok); }
+.root[data-state=blocked] .status,.root[data-state=usage_limited] .status,.root[data-state=budget_limited] .status { color:var(--warn); }
+.control { min-width:0; max-width:100%; min-height:32px; margin-left:auto; padding:4px 10px; border:1px solid var(--line); border-radius:6px; white-space:normal; overflow-wrap:anywhere; }
+.control:hover:not(:disabled) { background:var(--panel-bg); }
+.control:disabled { opacity:.5; cursor:not-allowed; }
+.control:focus-visible,.objective summary:focus-visible { outline:2px solid var(--violet); outline-offset:2px; }
+.objective { min-width:0; margin-top:4px; }
+.objective summary { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; cursor:pointer; }
+.objective p { margin:4px 0; max-height:8rem; overflow-y:auto; white-space:pre-wrap; overflow-wrap:anywhere; }
+.metrics { display:flex; flex-wrap:wrap; gap:2px 12px; min-width:0; margin-top:4px; color:var(--text-muted); font-size:11px; }
+.metrics > span { min-width:0; max-width:100%; }
+.note,.error { margin:4px 0 0; font-size:11px; line-height:1.5; }
+.note { color:var(--text-muted); }
+.error { color:var(--danger); }
+@media (max-width:480px) {
+  .root { padding-inline:8px; }
+  .control { min-height:44px; }
+}

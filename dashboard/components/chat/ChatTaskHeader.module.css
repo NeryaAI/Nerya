@@ -9,9 +9,6 @@
 .titleText { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .titleButton:hover,.action:hover { background:var(--panel-bg); }
 .titleButton:focus-visible,.action:focus-visible { outline:2px solid var(--violet); outline-offset:1px; }
-.status { display:inline-flex; flex:none; align-items:center; gap:6px; font-size:11px; color:var(--text-muted); max-width:220px; }
-.status[data-idle=true] { display:none; }
-.statusLabel { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
 .actions { display:flex; align-items:center; gap:4px; flex:none; }
 .action { display:inline-flex; align-items:center; justify-content:center; min-width:30px; height:30px; padding:0 7px; border-radius:5px; color:var(--text-muted); font-size:12px; }
 .actions > a { height:30px; width:30px; border:0; background:transparent !important; backdrop-filter:none; }
@@ -24,8 +21,6 @@
  .bar { height:auto; min-height:56px; gap:5px; padding:4px 8px; }
  .identity { flex-wrap:wrap; column-gap:5px; row-gap:0; }
  .title { flex:1; font-size:13px; }
- .status { flex-basis:100%; max-width:none; padding:0 4px 2px; }
- .statusLabel { white-space:normal; overflow-wrap:anywhere; }
  .titleButton { min-height:44px; min-width:44px; }
  .action { min-width:44px; min-height:44px; padding:0 7px; }
  .identity > div button,.actions > a { min-height:44px; min-width:44px; }

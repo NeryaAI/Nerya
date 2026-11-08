@@ -18,11 +18,11 @@ const { ChatResultsPanel } = require('../components/chat/ChatResultsPanel.tsx');
 const { DeliveryEvidence } = require('../components/chat/DeliveryEvidence.tsx');
 const { TurnWindow } = require('../components/chat/ConversationTimeline.tsx');
 const { conversationMatches, matchRange, useTimelineReveal } = require('../components/chat/timelineReveal.ts');
-const messages = Object.assign({}, ...fs.readdirSync(require('node:path').join(__dirname,'../messages/en')).filter(file=>file.endsWith('.json')).map(file=>require('../messages/en/'+file)));
-function html(element) {
+const messages = require('../messages/index.ts');
+function html(element, locale = 'en') {
   const previous = console.error;
   console.error = (...args) => { if (!String(args[0]).includes('useLayoutEffect does nothing on the server')) previous(...args); };
-  try { return renderToStaticMarkup(React.createElement(NextIntlClientProvider, { locale:'en', messages, timeZone:'UTC' }, element)); }
+  try { return renderToStaticMarkup(React.createElement(NextIntlClientProvider, { locale, messages: messages[locale], timeZone:'UTC' }, element)); }
   finally { console.error = previous; }
 }
 const msg = { role:'assistant', id:'stable-message', ts:1, loading:true, live_events:[
@@ -82,9 +82,25 @@ test('history operations and body export state their actual scope; failed eviden
   assert.match(user,/Edit record \(no rerun\)/);assert.match(user,/Delete record/);assert.match(user,/Edit and branch/);
   const result={id:'r',title:'fixture',text:'Everything passed',ts:1,evidence:{verifier:{hard_passed:true},artifacts:{tests_run:[{command:'fixture test',exit_code:1}],unverified_risks:[{message:'NOT CHECKED'}]}}};
   const evidence=html(React.createElement(DeliveryEvidence,{result}));
-  assert.match(evidence,/Failed checks/);assert.match(evidence,/exit 1/);assert.match(evidence,/NOT CHECKED/);assert.doesNotMatch(evidence,/This turn has successful/);
+  assert.match(evidence,/Checks need attention/);assert.match(evidence,/exit 1/);assert.match(evidence,/NOT CHECKED/);assert.doesNotMatch(evidence,/Recorded checks passed/);
   const panel=html(React.createElement(ChatResultsPanel,{results:[result]}));
   assert.match(panel,/Download Markdown body/);assert.match(panel,/not an evidence bundle/);
+});
+test('report controls and known diagnostics localize while unknown diagnostics and table content survive',()=>{
+  const path='evolution/proposals/fixture/after/strategies/eth_report/strategy.py';
+  const result={id:'localized-report',title:'报告',ts:1,text:'| 项目 | 内容 |\n| --- | --- |\n| 候选包 | `'+path+'` |\n| 源修订 | `abc123` |\n| 市场 | ETH/USDT |\n| 周期 | 1h |',evidence:{artifacts:{unverified_risks:[{kind:'edit_without_verification'},{kind:'future_diagnostic_code'}]}}};
+  for (const [locale,copyLabel,explanation,details] of [
+    ['zh','复制','文件已修改，但尚无对应的验证记录。','技术详情'],
+    ['en','Copy','Files were edited, but no verification was recorded.','Technical details'],
+  ]) {
+    const output=html(React.createElement(ChatResultsPanel,{results:[result]}),locale);
+    assert.ok(output.includes('title="'+copyLabel+'" aria-label="'+copyLabel+'"'));
+    assert.ok(output.includes(explanation));
+    assert.ok(output.includes('<details><summary>'+details+'</summary><code>edit_without_verification</code></details>'));
+    assert.match(output,/<p>future_diagnostic_code<\/p>/);
+    assert.match(output,/<th[^>]*>项目<\/th>/);assert.match(output,/<td[^>]*>候选包<\/td>/);
+    assert.ok(output.includes(path));
+  }
 });
 
 // Minimal hook scheduler for lifecycle assertions; it performs no browser or network I/O.

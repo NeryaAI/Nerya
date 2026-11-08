@@ -66,8 +66,7 @@ capability.
    reference page only when needed. `skill_view` remains a compatibility entry.
    Shared role contracts live in the default prompt bundle's `shared/` folder;
    domain methodology stays in Skills, not those shared contracts.
-   See `docs/skill-agent-consolidation.md` for catalog grouping, tool boundaries
-   and existing-workspace migration behavior.
+   See `nerya/skills/builtin/` for the shipped workflows and their references.
 
 ## 3. Repo layout (top-level)
 
@@ -247,7 +246,7 @@ From `setup(ctx)` the plugin may:
 - Every contribution returns a disposer; plugin failures are journaled
   to `journals/plugins.jsonl` and never abort boot.
 
-Design brief: `docs/extensibility-upgrade.md`.
+For financial extensions, see [Trading components](docs/trading-components.md).
 
 ### A new team template
 

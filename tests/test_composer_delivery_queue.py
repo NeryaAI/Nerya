@@ -110,6 +110,14 @@ def test_interaction_from_run_only_resumes_without_illegal_run_only_flag(runtime
     receipt = respond(runtime, answer)
     resumed = runtime.store.claim(SID, "continuation-owner")
     assert resumed is not None and resumed["command_id"] == receipt["command"]["command_id"]
+    if kind == "question":
+        public = runtime.store.snapshot(SID, resumed["command_id"])["command"]
+        assert public["show_user"] is False
+        with runtime.store.transaction() as con:
+            request = json.loads(con.execute("SELECT request_json FROM agent_commands WHERE command_id=?",
+                (resumed["command_id"],)).fetchone()[0])
+        assert request["source"] == "interaction_continue"
+        assert request["continuation_feedback"]
     with runtime.store.transaction() as con:
         request = json.loads(con.execute("SELECT request_json FROM agent_commands WHERE command_id=?",
             (resumed["command_id"],)).fetchone()[0])

@@ -9,12 +9,13 @@ import { Select } from "../Select";
 import { Field } from "./SettingsFields";
 import { providerDraftOf, providerPatch, type ProviderDraft } from "./providerManagementState";
 
-export function ProviderManagementPanel({ profiles, catalog, defaultEndpoints, disabled, onSaved, onRefreshed, onBusyChange, onDirtyChange }: {
+export function ProviderManagementPanel({ profiles, catalog, defaultEndpoints, disabled, onSaved, onDeleted, onRefreshed, onBusyChange, onDirtyChange }: {
   profiles: LlmProviderProfile[];
   catalog: Record<string, string[]>;
   defaultEndpoints: Record<string, string>;
   disabled: boolean;
   onSaved: (profile: LlmProviderProfile, revision: string, tiers: LlmTierConfig[]) => void;
+  onDeleted: (provider: string, revision: string) => void;
   onRefreshed: (provider: string, models: Array<Record<string, unknown>>) => void;
   onBusyChange: (busy: boolean) => void;
   onDirtyChange: (dirty: boolean) => void;
@@ -23,7 +24,7 @@ export function ProviderManagementPanel({ profiles, catalog, defaultEndpoints, d
   const common = useTranslations("common");
   const [editing, setEditing] = useState<LlmProviderProfile | null>(null);
   const [draft, setDraft] = useState<ProviderDraft>({ baseUrl: "", kind: "", key: "" });
-  const [busy, setBusy] = useState<{ provider: string; action: "save" | "refresh" } | null>(null);
+  const [busy, setBusy] = useState<{ provider: string; action: "save" | "refresh" | "delete" } | null>(null);
   const [errors, setErrors] = useState<Record<string, string>>({});
   const [notices, setNotices] = useState<Record<string, string>>({});
   const dirty = Boolean(editing && Object.keys(providerPatch(editing, draft)).length > 1);
@@ -37,8 +38,9 @@ export function ProviderManagementPanel({ profiles, catalog, defaultEndpoints, d
     setErrors(previous => ({ ...previous, ...(editing ? { [editing.provider]: "" } : {}), [profile.provider]: "" }));
     setNotices(previous => ({ ...previous, [profile.provider]: "" }));
   }
-  async function run(profile: LlmProviderProfile, action: "save" | "refresh") {
+  async function run(profile: LlmProviderProfile, action: "save" | "refresh" | "delete") {
     if (busy || disabled || (action === "save" && !dirty)) return;
+    if (action === "delete" && !(await confirm({ title: t("deleteTitle"), message: t("deleteDescription", { provider: profile.provider }), okLabel: t("delete"), tone: "danger" }))) return;
     if (action === "save" && !draft.baseUrl.trim() && !defaultEndpoints[profile.provider]) {
       setErrors(previous => ({ ...previous, [profile.provider]: t("endpointRequired") })); return;
     }
@@ -52,7 +54,13 @@ export function ProviderManagementPanel({ profiles, catalog, defaultEndpoints, d
     setErrors(previous => ({ ...previous, [profile.provider]: "" }));
     setNotices(previous => ({ ...previous, [profile.provider]: "" }));
     try {
-      if (action === "refresh") {
+      if (action === "delete") {
+        const result = await clientApi.llmConfigSet({ remove_providers: [profile.provider] });
+        if (!result.ok) throw new Error(result.error || t("deleteFailed"));
+        onDeleted(profile.provider, (result as typeof result & { revision?: string }).revision || "");
+        setEditing(null);
+        setNotices(previous => ({ ...previous, [profile.provider]: t("deleted") }));
+      } else if (action === "refresh") {
         const result = await clientApi.llmProviderModelsRefresh({ provider: profile.provider });
         if (!result.ok) throw new Error(result.detail || t("refreshFailed"));
         onRefreshed(profile.provider, result.models || []);
@@ -69,7 +77,7 @@ export function ProviderManagementPanel({ profiles, catalog, defaultEndpoints, d
       }
     } catch {
       // Provider errors may contain request credentials. Only show local copy.
-      setErrors(previous => ({ ...previous, [profile.provider]: t(action === "refresh" ? "refreshFailed" : "saveFailed") }));
+      setErrors(previous => ({ ...previous, [profile.provider]: t(action === "refresh" ? "refreshFailed" : action === "delete" ? "deleteFailed" : "saveFailed") }));
     } finally { setBusy(null); onBusyChange(false); }
   }
   if (!profiles.length) return null;
@@ -89,6 +97,7 @@ export function ProviderManagementPanel({ profiles, catalog, defaultEndpoints, d
             <div className="flex shrink-0 flex-wrap gap-2">
               <button type="button" className="btn btn-secondary" disabled={disabled || Boolean(busy) || (active && dirty)} onClick={() => void run(profile, "refresh")} aria-label={t("refreshProvider", { provider: profile.provider })}>{working && busy.action === "refresh" ? common("refreshing") : t("refresh")}</button>
               <button type="button" className="btn btn-ghost" disabled={disabled || Boolean(busy)} onClick={() => void edit(profile)} aria-label={t("editProvider", { provider: profile.provider })}>{t("edit")}</button>
+              <button type="button" className="btn btn-ghost text-danger" disabled={disabled || Boolean(busy)} onClick={() => void run(profile, "delete")} aria-label={t("deleteProvider", { provider: profile.provider })}>{working && busy.action === "delete" ? common("deleting") : t("delete")}</button>
             </div>
           </div>
           {active && <div className="mt-3 space-y-3 border-t border-[color:var(--line)] pt-3" data-testid="provider-editor">

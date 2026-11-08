@@ -310,6 +310,8 @@ def routes():
                 "ask": None,
                 "mid": price,
                 "last": price,
+                "change": t.get("change"),
+                "percentage": t.get("percentage"),
                 "age_s": t.get("age_s", 0),
                 "_envelope": env,
             }

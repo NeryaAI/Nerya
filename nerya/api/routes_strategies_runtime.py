@@ -38,10 +38,12 @@ from __future__ import annotations
 from typing import Any
 
 from ..core.errors import NeryaError, TradingError
-from ..evolution.strategy_code_generator import StrategyGenerationRequest
+from ..evolution.strategy_code_generator import StrategyGenerationInputError, StrategyGenerationRequest
 
 
 def _request_from_payload(payload: dict[str, Any]) -> StrategyGenerationRequest:
+    if "timeframe" in payload and payload["timeframe"] is None:
+        raise StrategyGenerationInputError(["timeframe"], "Use a non-blank candle timeframe string, or omit the field.")
     return StrategyGenerationRequest(
         strategy_id=str(payload.get("strategy_id") or "").strip(),
         title=str(payload.get("title") or ""),
@@ -52,6 +54,7 @@ def _request_from_payload(payload: dict[str, Any]) -> StrategyGenerationRequest:
         mode=str(payload.get("mode") or "paper").strip().lower(),
         markets=tuple(str(m) for m in (payload.get("markets") or ())),
         accounts=tuple(str(a) for a in (payload.get("accounts") or ())),
+        timeframe=payload.get("timeframe"),
         schedule_cron=str(payload.get("schedule_cron") or "").strip(),
         schedule_every_seconds=(
             int(payload.get("schedule_every_seconds"))

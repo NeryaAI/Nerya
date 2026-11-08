@@ -158,6 +158,33 @@ def _stop_dashboard(process) -> None:
             pass
 
 
+def _dashboard_build_env(dashboard_dir, port: int, env: dict[str, str]) -> dict[str, str]:
+    """Give each development server its own output and mutable TS config.
+
+    A port is not a build owner: an old compiler or another tool can clean the
+    same directory while the new server is serving it. Workers inherit one
+    per-launch identity. Never clean another launch's files, and never let Next
+    append generated type paths to the tracked project tsconfig.
+    """
+    import uuid
+
+    child = dict(env)
+    if child.get("NODE_ENV") == "production" or child.get("NERYA_UI_DIST_DIR"):
+        return child
+    identity = f"{int(port)}-{uuid.uuid4().hex[:12]}"
+    child["NERYA_UI_DIST_DIR"] = f".next-live-{identity}"
+    source = dashboard_dir / "tsconfig.json"
+    if not child.get("NERYA_UI_TSCONFIG") and source.is_file():
+        # Keep the copy beside its source so JSONC, extends, paths, includes and
+        # relative references retain their exact semantics. Next may edit only
+        # this ignored copy; its incremental cache is also launch-specific.
+        target = dashboard_dir / f".next-config-{identity}.json"
+        with target.open("xb") as output:
+            output.write(source.read_bytes())
+        child["NERYA_UI_TSCONFIG"] = target.name
+    return child
+
+
 def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 18317):
     """Spawn the bundled Next.js dashboard.
 
@@ -195,7 +222,7 @@ def _spawn_dashboard(port: int, *, api_host: str = "127.0.0.1", api_port: int = 
     safe_host = "127.0.0.1" if api_host in ("0.0.0.0", "::", "") else api_host
     api_base = f"http://{safe_host}:{api_port}"
 
-    env = dict(os.environ)
+    env = _dashboard_build_env(dashboard_dir, port, dict(os.environ))
     env["NERYA_API"] = api_base
     env["NEXT_PUBLIC_NERYA_API_BASE"] = api_base
     env["PORT"] = str(port)

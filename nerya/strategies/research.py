@@ -18,6 +18,20 @@ def manifest():
     from ..core.yaml_io import load
     return load(_roots()[0] / 'strategy.yml')
 
+def dataset(name):
+    """Read host-prepared immutable rows plus their provenance envelope."""
+    _roots()
+    import re
+    if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z][A-Za-z0-9_-]{0,63}', name):
+        raise ValueError('Use a declared replay dataset id')
+    directory = os.environ.get('NERYA_REPLAY_INPUTS')
+    if not directory:
+        raise ValueError('No host-prepared replay inputs are available')
+    path = Path(directory) / (name + '.json')
+    if path.is_symlink() or not path.is_file() or path.stat().st_size > 4_000_000:
+        raise ValueError('Prepared replay input is missing or unsafe')
+    return json.loads(path.read_text(encoding='utf-8'))
+
 def fetch_candles(market, *, interval, start, end, count):
     from ..core.config import load_config
     from ..data.candles import fetch_candles as fetch
@@ -68,7 +82,8 @@ def entrypoint():
     module=importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     fn=getattr(module,name)
-    if not callable(fn):raise ValueError('Saved entrypoint must be callable')
+    if not callable(fn):
+        raise ValueError('Saved entrypoint must be callable')
     return fn
 
 def validate_financial_request(request):
@@ -85,3 +100,17 @@ def validate_financial_call(method, *args, **kwargs):
     if method not in {'prepare','execute','get','reconcile','account_state'}:
         raise ValueError('Unsupported research financial method')
     signature(getattr(FinancialAPI,method)).bind(None,*args,**kwargs)
+
+def replay_sampled_lp():
+    """Run the saved LP policy against its immutable host-prepared dataset.
+
+    Returns quote-token counterfactual results only. Dataset preparation stays
+    outside the sandbox; callers cannot supply a replacement function or rows.
+    """
+    _roots()
+    saved = manifest()
+    policy = (saved.get('params') or {}).get('lp_replay')
+    if not isinstance(policy, dict) or not isinstance(policy.get('dataset_id'), str):
+        raise ValueError('Saved lp_replay dataset contract required')
+    from ..skills.builtin.backtest.scripts.lp_replay import simulate_lp_policy
+    return simulate_lp_policy(entrypoint(), saved, dataset(policy['dataset_id']))

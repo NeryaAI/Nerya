@@ -124,6 +124,8 @@ Python 命令应在项目虚拟环境中运行。macOS 构建应用后还可以�
 
 ## 项目结构
 
+各子系统的开发约定见[开发文档索引](docs/README.md)。
+
 ```text
 nerya/              Python Agent 运行时、API、连接器与交易服务
 nerya/skills/       内置 SKILL.md 技能、参考资料和执行脚本

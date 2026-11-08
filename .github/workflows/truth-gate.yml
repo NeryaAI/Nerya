@@ -88,6 +88,11 @@ jobs:
       - name: Translation contracts
         run: npm run check:i18n --workspace @nerya/dashboard
 
+      # The strategy receipt test runs the real Python workflow projection.
+      - uses: ./.github/actions/python
+      - name: Install runtime for workflow projection
+        run: uv pip install -c desktop/requirements.lock -e .
+
       - name: Dashboard unit regressions
         working-directory: dashboard
         run: node --test tests/*.test.cjs

@@ -44,7 +44,15 @@ EVOLVE_PROPOSALS_SCHEMA: dict[str, Any] = {
             "type": "string",
             "description": (
                 "Optional exact proposal id lookup. When set, searches all "
-                "proposals and ignores limit."
+                "proposals and ignores limit; inspect ownership before recovery."
+            ),
+        },
+        "scope": {
+            "type": "string",
+            "enum": ["task", "global"],
+            "description": (
+                "Defaults to task recovery when a command is active, otherwise global browsing. "
+                "Global results locate proposals but do not grant write ownership."
             ),
         },
         "limit": {
@@ -400,6 +408,8 @@ def evolve_proposals_handler(call: ToolCall, *, config: Config, strategy_id: str
 
     args = call.arguments or {}
     limit = max(1, int(args.get("limit") or 20))
+    command_bound = bool(config.get("runtime.command_id"))
+    query_scope = args.get("scope") or ("task" if command_bound else "global")
     try:
         proposals = list_proposals(config.paths)
         if strategy_id:
@@ -414,6 +424,34 @@ def evolve_proposals_handler(call: ToolCall, *, config: Config, strategy_id: str
                 message=f"{type(exc).__name__}: {exc}",
             ),
         )
+    def render(proposal):
+        ownership = {"same_task_producer": None, "recoverable": False,
+                     "diagnostic_code": "no_command_context"}
+        if command_bound:
+            # Read-only reuse of the write guard: discovery cannot grant more
+            # authority than a subsequent staged-file write would receive.
+            from .file_ops import _proposal_task_guard
+
+            ownership.update(same_task_producer=False, diagnostic_code="producer_receipt_missing")
+            staged = proposal.path / "after" / "strategies"
+            candidates = sorted(p for p in staged.iterdir() if p.is_dir()) if staged.is_dir() else []
+            if candidates:
+                for candidate in candidates:
+                    denied = _proposal_task_guard(
+                        call, path=(candidate / "main.py").relative_to(config.paths.root).as_posix(),
+                        root=config.paths.root, config=config, task_session_id=None, task_actor_id=None)
+                    if denied is not None:
+                        ownership["diagnostic_code"] = denied.error.detail["diagnostic_code"]
+                        break
+                else:
+                    ownership.update(same_task_producer=True, recoverable=True,
+                                     diagnostic_code="same_task_producer_receipt")
+        return {
+            "id": proposal.id, "kind": proposal.kind, "state": proposal.state,
+            "summary": proposal.summary, "ts": proposal.ts, "target": proposal.target,
+            "path": str(proposal.path), "ownership": ownership,
+        }
+
     proposal_id = str(args.get("proposal_id") or "").strip()
     if proposal_id:
         match = next((p for p in proposals if p.id == proposal_id), None)
@@ -423,26 +461,20 @@ def evolve_proposals_handler(call: ToolCall, *, config: Config, strategy_id: str
                 name=call.name,
                 data={
                     "found": False,
+                    "scope": query_scope,
                     "proposal_id": proposal_id,
                     "count": 0,
                     "proposal": None,
                     "proposals": [],
                 },
             )
-        item = {
-            "id": match.id,
-            "kind": match.kind,
-            "state": match.state,
-            "summary": match.summary,
-            "ts": match.ts,
-            "target": match.target,
-            "path": str(match.path),
-        }
+        item = render(match)
         return ToolResult.from_json(
             tool_use_id=call.id,
             name=call.name,
             data={
                 "found": True,
+                "scope": query_scope,
                 "proposal_id": proposal_id,
                 "count": 1,
                 "proposal": item,
@@ -453,23 +485,19 @@ def evolve_proposals_handler(call: ToolCall, *, config: Config, strategy_id: str
         proposals,
         key=lambda p: p.ts or "",
         reverse=True,
-    )[:limit]
-    out: list[dict[str, Any]] = [
-        {
-            "id": p.id,
-            "kind": p.kind,
-            "state": p.state,
-            "summary": p.summary,
-            "ts": p.ts,
-            "target": p.target,
-            "path": str(p.path),
-        }
-        for p in proposals
-    ]
+    )
+    out = []
+    for proposal in proposals:
+        item = render(proposal)
+        if query_scope == "task" and not item["ownership"]["recoverable"]:
+            continue
+        out.append(item)
+        if len(out) == limit:
+            break
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
-        data={"count": len(out), "proposals": out},
+        data={"scope": query_scope, "count": len(out), "proposals": out},
     )
 
 

@@ -11,6 +11,7 @@ import re
 import math
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from ..core.redaction import redact_display_dict
@@ -125,6 +126,112 @@ def _datasets_complete(value: Any) -> bool:
     return True
 
 
+def replay_scope_receipt(config, binding, *, replay=None, command_id=None):
+    """Check pool-price bytes without making producer defaults user constraints."""
+    from .request_scope import (ScopeError, check_receipt, current_contract,
+                                target_manifest, _price_simulation_receipt, _timestamp, compare)
+
+    if not replay or not (replay.get("provenance") or {}).get("price_simulation"):
+        return check_receipt(config, binding, replay=replay, command_id=command_id)
+    try:
+        contract = current_contract(config, command_id=command_id)
+        if contract is None:
+            return None
+        _, sid, _, pid = binding["artifact_id"].split(":")
+        args = {"strategy_id": sid, "proposal_id": None if pid == "installed" else pid}
+        manifest = target_manifest(config, args)
+        constraints = dict(contract["constraints"])
+        window = replay.get("data_manifest") or {}
+        for key in ("start_utc", "end_utc"):
+            if key not in constraints:
+                constraints[key] = _timestamp(window.get("requested_" + key)
+                                              or replay.get("requested_" + key))
+        if constraints["end_utc"] <= constraints["start_utc"]:
+            raise ScopeError()
+        # Only the local byte-check context gains the producer's default window.
+        # The admitted contract and its evidence hash remain unchanged.
+        context = {**contract, "constraints": constraints}
+        hashes = _price_simulation_receipt(context, manifest, replay, config, args=args)
+        compare(context, manifest, replay=replay, config=config)
+        return {"status": "passed", "request_scope_hash": contract["request_scope_hash"],
+                "source_revision": binding["revision"], "reason": "",
+                "differences": [], "prepared_inputs": hashes}
+    except Exception as exc:
+        return {"status": "failed" if isinstance(exc, ScopeError) and exc.reason == "request_scope_mismatch" else "missing",
+                "request_scope_hash": "", "source_revision": binding["revision"],
+                "reason": exc.reason if isinstance(exc, ScopeError) else "request_scope_unverified",
+                "differences": exc.differences if isinstance(exc, ScopeError) else []}
+
+
+def _completed_rate_receipt(root: Path, report: dict[str, Any], revision: str,
+                            strategy_id: str, proposal_id: str | None) -> dict[str, Any] | None:
+    # Lazy import: tool_verification imports source_revision from this module.
+    # Its output attestor only needs a read boundary, not runtime configuration.
+    from .tool_verification import _output_path, _rate_snapshots_attested
+
+    metrics = report["metrics"]
+    provenance = metrics.get("provenance")
+    replay = metrics.get("replay")
+    scope = "historical_rate_policy_simulation"
+    if (not isinstance(provenance, dict) or not isinstance(replay, dict)
+            or provenance.get("version") != 1
+            or provenance.get("source_revision") != revision
+            or provenance.get("sdk_build_id") != SDK_BUILD_ID
+            or provenance.get("strategy_id") != strategy_id
+            or provenance.get("proposal_id") != proposal_id
+            or provenance.get("source_changed_during_run") is not False
+            or provenance.get("data_kind") != "historical_observations"
+            or provenance.get("scope") != scope
+            or metrics.get("backtest_kind") != "rate_policy_replay"
+            or metrics.get("evaluation_mode") != "simulation"
+            or metrics.get("performance_evidence") is not False
+            or replay.get("scope") != scope
+            or replay.get("strategy_execution_verified") is not True
+            or replay.get("financial_execution_allowed") is not False
+            or replay.get("errors") != 0 or replay.get("sdk_errors") != 0
+            or replay.get("order_accounting_ok") is not True):
+        return None
+    isolation = provenance.get("isolation")
+    if (not isinstance(isolation, dict) or isolation.get("source_revision") != revision
+            or isolation.get("network") != "denied" or isolation.get("process_spawn") != "denied"
+            or isolation.get("process_exited") is not True
+            or isolation.get("process_group_stopped") is not True):
+        return None
+    if not isinstance(report.get("id"), str) or not re.fullmatch(r"[A-Za-z0-9_-]+", report["id"]):
+        return None
+    config = SimpleNamespace(paths=SimpleNamespace(root=root.resolve()))
+    try:
+        run = _output_path(config, f"backtests/{report['id']}/run.json")
+        if not run.is_file() or not 0 < run.stat().st_size <= 100_000:
+            return None
+        state = json.loads(run.read_text())
+        if (not isinstance(state, dict) or state.get("status") != "completed"
+                or state.get("preflight_only")
+                or state.get("strategy_id") != strategy_id
+                or state.get("proposal_id") != proposal_id
+                or state.get("backtest_ts") != report["id"]
+                or state.get("source_revision") != revision
+                or state.get("performance_evidence") is not False):
+            return None
+        binding = {"artifact_id": f"strategy:{strategy_id}:proposal:{proposal_id or 'installed'}",
+                   "revision": revision}
+        data = {"run_receipt": str(run), "report_path": str(run.with_name("report.md")),
+                "provenance": provenance}
+        if not _rate_snapshots_attested(config, data, binding):
+            return None
+    except (OSError, ValueError, TypeError, UnicodeError):
+        return None
+    return {"status": "completed", "operation_completed": True,
+            "strategy_id": strategy_id, "proposal_id": proposal_id,
+            "backtest_ts": report["id"], "source_revision": revision,
+            "scope": scope, "performance_evidence": False,
+            "requested_window_complete": metrics.get("requested_window_complete") is True,
+            "requested_window_days": metrics.get("requested_window_days"),
+            "verdict": metrics.get("verdict"), "start_utc": metrics.get("start_utc"),
+            "end_utc": metrics.get("end_utc"), "tf": metrics.get("tf"),
+            "metrics_path": str(run.with_name("metrics.json")), "run_receipt": str(run)}
+
+
 def completed_replay_receipt(root: Path, strategy_id: str, proposal_id: str | None) -> dict[str, Any] | None:
     """A finished calculation is evidence even when its economic verdict is FAIL.
 
@@ -142,6 +249,8 @@ def completed_replay_receipt(root: Path, strategy_id: str, proposal_id: str | No
     if not isinstance(provenance, dict):
         return None
     revision = source_revision(files)
+    if metrics.get("backtest_kind") == "rate_policy_replay":
+        return _completed_rate_receipt(root, report, revision, strategy_id, proposal_id)
     if (provenance.get("source_revision") != revision
             or provenance.get("sdk_build_id") != SDK_BUILD_ID
             or provenance.get("strategy_id") != strategy_id
@@ -166,12 +275,15 @@ def completed_replay_receipt(root: Path, strategy_id: str, proposal_id: str | No
         return None
     if replay.get("errors") or replay.get("sdk_errors") or replay.get("order_accounting_ok") is False:
         return None
-    return {"status": "completed", "strategy_id": strategy_id, "proposal_id": proposal_id,
+    result = {"status": "completed", "strategy_id": strategy_id, "proposal_id": proposal_id,
             "backtest_ts": report["id"], "source_revision": revision,
             "verdict": metrics.get("verdict"), "requested_window_days": metrics.get("requested_window_days"),
             "requested_window_complete": True, "start_utc": metrics.get("start_utc"),
             "end_utc": metrics.get("end_utc"), "tf": metrics.get("tf"),
             "metrics_path": str(run_path / "metrics.json"), "run_receipt": str(state_path)}
+    if replay.get("scope") == "historical_pool_price_simulation":
+        result.update(scope="historical_pool_price_simulation", performance_evidence=False)
+    return result
 
 
 def _window_complete(metrics: dict[str, Any]) -> bool:
@@ -188,7 +300,7 @@ def _window_complete(metrics: dict[str, Any]) -> bool:
 
 
 def replay_status(report: dict[str, Any] | None, revision: str,
-                  strategy_id: str, proposal_id: str | None) -> dict[str, Any]:
+                  strategy_id: str, proposal_id: str | None, *, root: Path | None = None) -> dict[str, Any]:
     if report is None:
         return {"status": "missing"}
     metrics = report["metrics"]
@@ -202,6 +314,9 @@ def replay_status(report: dict[str, Any] | None, revision: str,
         status = "unbound"
     elif provenance["source_revision"] != revision or provenance.get("source_changed_during_run"):
         status = "stale"
+    elif provenance.get("data_kind") == "historical_observations":
+        # Rate observations never certify trading performance, even with full coverage.
+        status = "limited"
     elif verdict == "FAIL":
         status = "failed"
     elif provenance.get("data_kind") == "sample":
@@ -220,9 +335,20 @@ def replay_status(report: dict[str, Any] | None, revision: str,
         "max_drawdown_pct", "sharpe_ratio", "total_fees_usd", "total_slippage_usd",
         "start_utc", "end_utc", "backtest_days", "requested_window_days", "coverage_ok", "coverage_message",
         "requested_primary_timeframe", "tf", "requested_timeframes", "timeframes",
-        "timeframe_fallback", "missing_timeframes", "flags")
-    return {"status": status, "id": report["id"], "provenance": provenance,
+        "timeframe_fallback", "missing_timeframes", "flags", "backtest_kind",
+        "requested_window_complete", "performance_evidence", "limitations")
+    result = {"status": status, "id": report["id"], "provenance": provenance,
             "metrics": {k: metrics[k] for k in keys if k in metrics}}
+    if metrics.get("backtest_kind") == "rate_policy_replay":
+        receipt = None
+        if root is not None and status == "limited":
+            files, omitted = _read_files(root)
+            if not omitted and source_revision(files) == revision:
+                receipt = _completed_rate_receipt(root, report, revision, strategy_id, proposal_id)
+        result.update(operation_completed=receipt is not None,
+                      requested_window_complete=metrics.get("requested_window_complete") is True,
+                      scope="historical_rate_policy_simulation", performance_evidence=False)
+    return result
 
 
 def check_workflow(paths: Any, strategy_id: str, proposal_id: str | None = None,
@@ -247,7 +373,7 @@ def check_workflow(paths: Any, strategy_id: str, proposal_id: str | None = None,
     target_root = (_safe_root(_safe_root(paths.proposals, proposal_id) / "after" / "strategies", strategy_id)
                    if proposal_id else _safe_root(paths.strategies, strategy_id))
     report, warnings = _read_report(target_root)
-    replay = replay_status(report, code_revision, strategy_id, proposal_id)
+    replay = replay_status(report, code_revision, strategy_id, proposal_id, root=target_root)
     if warnings and replay["status"] == "verified":
         replay["status"] = "limited"
     raw_sources = manifest.get("data_sources") or []

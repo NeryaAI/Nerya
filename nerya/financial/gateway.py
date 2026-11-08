@@ -12,13 +12,23 @@ class FinancialGateway:
     def __init__(self,config,*,adapters=None):
         self.config=config;self.store=FinancialStore(config);self.adapters=adapters
 
-    def adapter(self,request,*,quote=None,recovery=False):
+    def adapter(self,request,*,quote=None,recovery=False,context=None,action_id=None):
         if self.adapters is not None:
             adapter=self.adapters.get(request["kind"])
             if adapter is None:raise FinancialError("unsupported_financial_capability",422)
             return adapter
         from .adapters import adapter_for
-        return adapter_for(self.config,request,quote=quote,recovery=recovery)
+        config=self.config
+        if context is not None or action_id is not None:
+            import copy
+            from dataclasses import asdict
+            from ..core.config import Config
+            data=copy.deepcopy(config.data)
+            runtime=data.setdefault("runtime",{})
+            if context is not None:runtime["financial_context"]={**asdict(context),"scopes":sorted(context.scopes)}
+            if action_id is not None:runtime["financial_action_id"]=action_id
+            config=Config(paths=config.paths,data=data)
+        return adapter_for(config,request,quote=quote,recovery=recovery)
 
     @staticmethod
     def _producer(context,action):
@@ -42,14 +52,7 @@ class FinancialGateway:
             raise FinancialError("strategy_financial_owner_mismatch",403)
 
     def _quote(self,context,request):
-        from dataclasses import asdict
-        if self.adapters is None:
-            import copy
-            from ..core.config import Config
-            data=copy.deepcopy(self.config.data)
-            data.setdefault("runtime",{})["financial_context"]={**asdict(context),"scopes":sorted(context.scopes)}
-            adapter=FinancialGateway(Config(paths=self.config.paths,data=data)).adapter(request)
-        else:adapter=self.adapter(request)
+        adapter=self.adapter(request,context=context)
         quote=adapter.quote(request)
         binding=getattr(adapter,"component_binding",None)
         if binding:quote["component_binding"]=binding
@@ -65,7 +68,7 @@ class FinancialGateway:
         from .resource_binding import canonical_request
         request=canonical_request(self.config,request)
         self._strategy_resources(context,request)
-        adapter=self.adapter(request)
+        adapter=self.adapter(request,context=context)
         component=getattr(adapter,"component",None)
         if not component or not component.spec.account_state:raise FinancialError("component_account_state_unsupported",422)
         state=adapter.account_state(request)
@@ -220,7 +223,7 @@ class FinancialGateway:
         # New quote is a new reviewable version. Previous approvals never carry
         # over to changed calldata, minimum output, gas or routes.
         quote=self.checked_quote(action['request'],self._quote(context,action['request']))
-        adapter=self.adapter(action['request'],quote=quote)
+        adapter=self.adapter(action['request'],quote=quote,context=context)
         if self.adapters is None and action['request'].get('wallet_id'):
             from ..wallet.bindings import binding_fingerprint
             quote['binding_fingerprint']=binding_fingerprint(self.config,action['request'])
@@ -295,7 +298,7 @@ class FinancialGateway:
             from .task_binding import task_security_revision
             if task_security_revision(self.config,context.task_kind,context.task_id)!=context.security_revision:
                 raise FinancialError("financial_task_security_revision_changed")
-        try:self.adapter(action["request"],quote=action["quote"]).validate(action["request"],action["quote"])
+        try:self.adapter(action["request"],quote=action["quote"],context=context).validate(action["request"],action["quote"])
         except FinancialError as exc:
             if (action['kind']=='bridge_swap' and exc.code=='finite_bridge_allowance_required') or exc.code=='finite_protocol_allowance_required':
                 self.store.mark(aid,state='awaiting_prerequisite',receipt={'reason':exc.code})
@@ -329,12 +332,7 @@ class FinancialGateway:
             # Owned signers supply identity before network broadcast.
             self.store.mark(aid,state="submitted",submission=ref)
         try:
-            import copy
-            from ..core.config import Config
-            execution_data=copy.deepcopy(self.config.data)
-            execution_data.setdefault("runtime",{})["financial_action_id"]=aid
-            execution_config=Config(paths=self.config.paths,data=execution_data)
-            executor=self.adapter(action["request"],quote=action["quote"]) if self.adapters is not None else FinancialGateway(execution_config).adapter(action["request"],quote=action["quote"])
+            executor=self.adapter(action["request"],quote=action["quote"],context=context,action_id=aid)
             result=executor.execute(action["request"],action["quote"],submitted)
             state=result.get("state","unconfirmed")
             if state not in {"confirmed","submitted","confirming","unconfirmed","needs_recovery","failed_before_submission",'rejected'}:

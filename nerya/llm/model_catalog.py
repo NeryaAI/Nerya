@@ -77,6 +77,30 @@ class ModelCatalog:
     def exists(self, provider: str, model_id: str) -> bool:
         return any(m.get("id") == model_id for m in self.list(provider))
 
+    def remove_provider(self, provider: str) -> dict[str, Any]:
+        """Remove a provider's cached models without touching other providers."""
+
+        provider_id = (provider or "").strip().lower()
+        if not provider_id:
+            return self.load()
+        doc = self.load()
+        providers = dict(doc.get("providers") or {})
+        errors = dict(doc.get("errors") or {})
+        provider_meta = dict(doc.get("provider_meta") or {})
+        providers.pop(provider_id, None)
+        errors.pop(provider_id, None)
+        provider_meta.pop(provider_id, None)
+        doc["providers"] = providers
+        doc["errors"] = errors
+        if provider_meta:
+            doc["provider_meta"] = provider_meta
+        else:
+            doc.pop("provider_meta", None)
+        doc["updated_at"] = now_iso()
+        self.cache_path.parent.mkdir(parents=True, exist_ok=True)
+        self.cache_path.write_text(json.dumps(doc, indent=2), encoding="utf-8")
+        return doc
+
     def import_models(
         self,
         *,

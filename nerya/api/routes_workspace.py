@@ -69,18 +69,19 @@ def _rel(client, path: Path) -> str:
     return to_workspace_relative(path, client.config.paths.root)
 
 
-_BINARY_SNIFF_BYTES = 4096
-
-
 def _looks_binary(blob: bytes) -> bool:
     if not blob:
         return False
     if b"\x00" in blob:
         return True
-    # Treat anything with >30% non-text bytes as binary.
-    text_chars = bytes(range(32, 127)) + b"\n\r\t\b\f"
-    nontext = sum(1 for b in blob if b not in text_chars)
-    return (nontext / len(blob)) > 0.3
+    # Decode the bounded read before classifying characters: UTF-8 CJK bytes
+    # are not binary, and a byte sniff can split a multibyte character.
+    try:
+        text = blob.decode("utf-8")
+    except UnicodeDecodeError:
+        return True
+    nontext = sum(1 for char in text if not char.isprintable() and char not in "\n\r\t\b\f")
+    return (nontext / len(text)) > 0.3
 
 
 def routes():
@@ -259,7 +260,7 @@ def routes():
         except OSError as exc:
             return {"ok": False, "error": "read_failed", "detail": str(exc)}
 
-        binary = _looks_binary(blob[:_BINARY_SNIFF_BYTES])
+        binary = _looks_binary(blob)
         truncated = False
         if binary:
             return {

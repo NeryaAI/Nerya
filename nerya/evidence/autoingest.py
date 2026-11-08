@@ -217,6 +217,9 @@ def on_research_save(
     title: str,
     body: str,
     tags: Optional[list[str]] = None,
+    source_locator: str = "",
+    as_of: str = "",
+    retrieved_at: str = "",
 ) -> Optional[EvidenceDoc]:
     """Called after a research artifact (web fetch, notebook entry, etc.) is saved."""
 
@@ -231,6 +234,9 @@ def on_research_save(
             title=title,
             body=body,
             tags=tags,
+            source_locator=source_locator,
+            as_of=as_of,
+            retrieved_at=retrieved_at,
         )
     except Exception:
         _LOG.exception("evidence.autoingest: on_research_save failed")

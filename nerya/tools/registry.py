@@ -43,8 +43,6 @@ def compact_tool_catalog(tools: Iterable[ToolDescriptor]) -> list[ToolDescriptor
     hidden: set[str] = set()
     if "Skill" in native:
         hidden.update({"skill_index", "skill_view", "script_inspect"})
-    if "task_get" in native:
-        hidden.add("task_output")
     return [t for t in rows if t.namespace != "native" or t.name not in hidden]
 
 
@@ -247,6 +245,7 @@ def make_native_descriptor(
     permission_scope: Any = None,
     child_max_depth: int | None = None,
     delegates_to: str = "",
+    dedupe_context: Any = None,
 ) -> ToolDescriptor:
     """Build a :class:`ToolDescriptor` for a native tool.
 
@@ -283,6 +282,7 @@ def make_native_descriptor(
         auto_approve_when=auto_approve_when,
         child_max_depth=child_max_depth,
         delegates_to=str(delegates_to or ""),
+        dedupe_context=dedupe_context,
     )
 
 

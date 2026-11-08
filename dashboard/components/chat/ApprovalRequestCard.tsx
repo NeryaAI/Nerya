@@ -86,6 +86,7 @@ function stateFromEvent(event: Record<string, unknown>): string {
     event.state ||
       event.resolved_state ||
       record.state ||
+      event.status ||
       "",
   ).toLowerCase();
 }
@@ -300,11 +301,16 @@ export function ApprovalRequestCard({
   card,
   onAction,
   busy = false,
+  readOnly = false,
+  stoppedReason,
 }: {
   event: Record<string, unknown>;
   card?: ApprovalCard;
   onAction?: (callbackData: string) => void | Promise<void>;
   busy?: boolean;
+  // The shared decision dock can own the actions while this remains a receipt.
+  readOnly?: boolean;
+  stoppedReason?: string;
 }) {
   const t = useTranslations("approvals");
   const tCommon = useTranslations("common");
@@ -314,8 +320,17 @@ export function ApprovalRequestCard({
     card?.prompt ||
     ((event.prompt as ApprovalCard["prompt"] | undefined) ?? undefined);
   const rawState = stateFromEvent(event);
-  const state = rawState || (card ? "pending" : "pending");
-  const resolved = state === "approved" || state === "rejected";
+  const recordState = stateFromEvent(card ?? {});
+  const terminalStates = ["approved", "rejected", "expired", "cancelled"];
+  const kind = String(asRecord(event.record).kind || asRecord(asRecord(event.prompt).metadata).kind || "");
+  const nativePermission = ["tool_permission", "tool_permission_batch"].includes(kind) || (!kind && event.skill_id === "native");
+  // The command owns the stop reason; a different still-pending approval must
+  // stay actionable. This is a receipt projection, never a permission mutation.
+  const expired = stoppedReason === "approval_expired" && nativePermission && !card;
+  const state = terminalStates.includes(rawState) ? rawState
+    : terminalStates.includes(recordState) ? recordState
+    : expired ? "expired" : rawState || recordState || "pending";
+  const resolved = terminalStates.includes(state);
   const text =
     prompt?.text ||
     String(event.reason || t("needsPermission"));
@@ -404,6 +419,8 @@ export function ApprovalRequestCard({
       ? "border-brand-500/40 bg-brand-500/[0.08] text-brand-200"
       : state === "rejected"
       ? "border-danger/40 bg-danger/[0.08] text-rose-300"
+      : resolved
+      ? "border-[color:var(--line)] bg-[color:var(--card)] text-[color:var(--text-muted)]"
       : "border-warn/40 bg-warn/[0.07] text-warn";
   async function runApprovalAction(callbackData: string) {
     const lower = callbackData.toLowerCase();
@@ -436,6 +453,10 @@ export function ApprovalRequestCard({
             ? t("approved")
             : state === "rejected"
             ? t("rejected")
+            : state === "expired"
+            ? t("expired")
+            : state === "cancelled"
+            ? t("cancelled")
             : t("request")}
         </div>
         <span className="font-mono text-[10px] text-ink-400">
@@ -489,7 +510,7 @@ export function ApprovalRequestCard({
           {text}
         </pre>
       )}
-      {!resolved ? (
+      {!resolved && !readOnly ? (
         <div className="flex flex-wrap items-center gap-2">
           {buttons.map((button) => {
             const style = button.style || "default";

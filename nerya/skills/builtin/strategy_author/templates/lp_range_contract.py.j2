@@ -1,0 +1,236 @@
+"""LP contract behavior against installed SDKs and candidate-local companions.
+
+All lp.snapshot.v1 observations, identities and amounts below are SYNTHETIC
+unit fixtures, not history, wallet ownership, performance or live readiness.
+Run from the candidate root: python -m pytest -o addopts='' tests/test_contract.py.
+These tests never configure the saved manifest or authorize execution.
+"""
+from copy import deepcopy
+from datetime import datetime, timezone
+import json
+from types import SimpleNamespace
+
+import pytest
+
+import main
+from nerya.strategies import ResultBuilder, StrategyResult
+from nerya.strategies.context import StrategyClock, StrategyState, StateStore
+from nerya.strategies.input_context import StrategyInputContext
+
+
+class NoFinancial:
+    def __init__(self):
+        self.calls = []
+
+    def __getattr__(self, name):
+        self.calls.append(name)
+        raise AssertionError('synthetic paper fixture must not use financial: ' + name)
+
+
+@pytest.fixture
+def ctx(tmp_path):
+    clock = StrategyClock()
+    clock.freeze(iso='2026-01-01T00:00:00+00:00')
+    binding = dict(id='synthetic-component', revision='synthetic-revision', abi_version=1)
+    pool = dict(pool_id='synthetic-pool', tick=0, token0='synthetic-token-a',
+        token1='synthetic-token-b', underlying_tokens=['synthetic-token-a', 'synthetic-token-b'],
+        decimals=[18, 6], fee=500, tick_spacing=10)
+    position = dict(token_id=7, owner='synthetic-owner-not-an-address', pool=deepcopy(pool),
+        tick_lower=-100, tick_upper=100, liquidity='1000000', principal_value_usd='20',
+        owed_value_usd='0', amounts_base=['1000000000000000000', '1000000'],
+        tokens_owed_base=['0', '0'])
+    observed = dict(health='ok', source='synthetic-unit-fixture-not-history',
+                    as_of=clock.now().timestamp())
+    request = dict(kind='lp_add', component_id=binding['id'], wallet_id='synthetic-wallet',
+        chain='synthetic-chain', protocol='synthetic-protocol', parameters={'pool_id': pool['pool_id']})
+    source = dict(source_id='synthetic-lp', wallet_id=request['wallet_id'], chain=request['chain'],
+        protocol=request['protocol'], pool_id=pool['pool_id'], token_id=7,
+        token0=pool['token0'], token1=pool['token1'], decimals=[18, 6], fee=500, tick_spacing=10,
+        component_binding=binding, account_request=request)
+    snapshot = dict(**observed, schema='lp.snapshot.v1', wallet_id=source['wallet_id'],
+        chain=source['chain'], protocol=source['protocol'], pool_id=source['pool_id'], pool=pool,
+        account=dict(**observed, component_binding=deepcopy(binding), positions=[position],
+            coverage=['lp_nft_inventory', 'liquidity', 'ranges', 'principal'],
+            fees_coverage='fee_growth_inside'),
+        economics=dict(**observed, pool_id=pool['pool_id'], currency='USD',
+            expected_incremental_fees_usd='2', total_execution_cost_usd='.1'))
+    params = dict(lp_source=source, lp_policy=dict(max_age_seconds=60, persistence_seconds=10,
+        cooldown_seconds=100, cost_multiple=2, enter_when_empty=True,
+        exit_below_principal_usd=5, collect_min_fees_usd=1),
+        lp_execution=dict(operation_key='synthetic-cycle', requests={'lp_add': request}))
+    return SimpleNamespace(mode='paper', result=ResultBuilder(), clock=clock,
+        config=SimpleNamespace(params=params), state=StrategyState(StateStore(tmp_path / 'state.json')),
+        inputs=StrategyInputContext(sources=[], market=None, news=None, markets=(),
+                                    run_id='synthetic-contract', clock=clock),
+        financial=NoFinancial(), snapshot=snapshot)
+
+
+def publish(ctx, seconds=0):
+    now = ctx.clock.now().timestamp() + seconds
+    ctx.clock.freeze(iso=datetime.fromtimestamp(now, timezone.utc).isoformat())
+    for value in (ctx.snapshot, ctx.snapshot['account'], ctx.snapshot['economics']):
+        value['as_of'] = now
+    ctx.inputs.publish('source:synthetic-lp', ctx.snapshot, source='synthetic-unit-fixture-not-history')
+
+
+def paper_decision(ctx):
+    result = main.run(ctx)
+    assert isinstance(result, StrategyResult)
+    assert result.status.value == 'hold', result.asdict()
+    assert result.metadata['financial_execution_allowed'] is False
+    assert result.metadata['funds_sent'] is False
+    assert ctx.financial.calls == []
+    assert ctx.state.get('lp_operation') is None
+    return result.metadata['lp_decision']
+
+
+@pytest.mark.parametrize('case,action,reason', [
+    ('entry', 'lp_add', 'configured_initial_entry'),
+    ('hold', 'hold', 'inside_range'),
+    ('collect', 'lp_collect', 'fee_collection_threshold'),
+    ('exit', 'lp_remove', 'principal_floor_exit'),
+    ('closed', 'lp_collect', 'remaining_fees'),
+    ('cost', 'hold', 'fees_do_not_cover_execution'),
+])
+def test_paper_lifecycle(ctx, case, action, reason):
+    position = ctx.snapshot['account']['positions'][0]
+    if case == 'entry':
+        ctx.config.params['lp_source']['token_id'] = None
+        ctx.snapshot['account']['positions'] = []
+    if case in {'collect', 'closed', 'cost'}:
+        position['owed_value_usd'] = '2'
+    if case == 'exit':
+        position['principal_value_usd'] = '4'
+    if case == 'closed':
+        position['liquidity'] = '0'
+    if case == 'cost':
+        ctx.snapshot['economics']['total_execution_cost_usd'] = '2'
+    publish(ctx)
+    decision = paper_decision(ctx)
+    assert (decision['action'], decision['reason']) == (action, reason)
+
+
+def test_persistence_and_cooldown_use_saved_state(ctx, tmp_path):
+    ctx.snapshot['account']['positions'][0]['pool']['tick'] = 100
+    publish(ctx)
+    assert paper_decision(ctx)['reason'] == 'range_exit_first_observed'
+    saved = json.loads((tmp_path / 'state.json').read_text())['lp_policy_state:paper']
+    assert saved['outside_since'] == ctx.clock.now().timestamp()
+    ctx.state = StrategyState(StateStore(tmp_path / 'state.json'))
+    publish(ctx, 9)
+    assert paper_decision(ctx)['reason'] == 'range_exit_not_persistent'
+    publish(ctx, 1)
+    assert paper_decision(ctx)['action'] == 'lp_rebalance'
+    ctx.state.set('lp_policy_state:paper', {**saved, 'last_rebalance': ctx.clock.now().timestamp()})
+    publish(ctx, 1)
+    assert paper_decision(ctx)['reason'] == 'rebalance_cooldown'
+    publish(ctx, 99)
+    assert paper_decision(ctx)['action'] == 'lp_rebalance'
+    ctx.snapshot['account']['positions'][0]['pool']['tick'] = 0
+    publish(ctx)
+    assert paper_decision(ctx)['reason'] == 'inside_range'
+    assert ctx.state.get('lp_policy_state:paper')['outside_since'] is None
+
+
+@pytest.mark.parametrize('damage', ['source', 'binding', 'units', 'tokens', 'stale'])
+def test_invalid_observations_fail_closed(ctx, damage):
+    publish(ctx)
+    snapshot = deepcopy(ctx.snapshot)
+    if damage == 'source':
+        ctx.config.params['lp_source']['source_id'] = 'unpublished-synthetic-source'
+    elif damage == 'binding':
+        snapshot['account']['component_binding']['revision'] = 'other-synthetic-revision'
+    elif damage == 'units':
+        snapshot['account']['positions'][0]['pool']['decimals'] = [6, 18]
+    elif damage == 'tokens':
+        snapshot['account']['positions'][0]['pool']['underlying_tokens'].reverse()
+    else:
+        snapshot['as_of'] -= 61
+    ctx.inputs.publish('source:synthetic-lp', snapshot)
+    result = main.run(ctx)
+    assert isinstance(result, StrategyResult)
+    assert result.status.value == 'error'
+    assert result.error_kind == 'data_error'
+    assert ctx.financial.calls == []
+    assert ctx.state.get('lp_operation') is None
+
+
+class RecoveryFinancial:
+    """Signature-strict synthetic receipts only; no gateway, signing or wallet."""
+    def __init__(self, state):
+        self.state, self.calls = state, []
+
+    def get(self, action_id):
+        self.calls.append(('get', action_id))
+        return dict(action_id=action_id, state=self.state)
+
+    def prepare(self, request, *, client_request_id):
+        self.calls.append(('prepare', deepcopy(request), client_request_id))
+        return dict(action_id='synthetic-action', state='prepared', quote_hash='synthetic-quote')
+
+    def reconcile(self, action_id):
+        self.calls.append(('reconcile', action_id))
+        return dict(action_id=action_id, state='confirmed')
+
+
+@pytest.mark.parametrize('state', ['submitted', 'prepared', 'failed', 'interrupted_prepare'])
+def test_live_recovery_preserves_original_identity_before_new_inputs(ctx, tmp_path, state):
+    ctx.mode = 'live'
+    # Empty real inputs and config must not prevent recovery or trigger a new cycle.
+    ctx.config.params = {}
+    ctx.financial = RecoveryFinancial(state)
+    saved = dict(key='lp:synthetic-original', cycle='synthetic-original', kind='lp_add',
+                 payload={'synthetic_frozen_request': True})
+    if state != 'interrupted_prepare':
+        saved['action_id'] = 'synthetic-action'
+    ctx.state.set('lp_operation', saved)
+    ctx.state = StrategyState(StateStore(tmp_path / 'state.json'))
+    result = main.run(ctx)
+    assert isinstance(result, StrategyResult)
+    expected = [('prepare', saved['payload'], saved['key'])] if state == 'interrupted_prepare' else [
+        ('get', 'synthetic-action')]
+    if state == 'submitted':
+        expected.append(('reconcile', 'synthetic-action'))
+    assert ctx.financial.calls == expected
+    assert result.status.value == ('ok' if state == 'submitted' else 'error' if state == 'failed' else 'hold')
+    persisted = json.loads((tmp_path / 'state.json').read_text())['lp_operation']
+    assert persisted == {**saved, 'action_id': 'synthetic-action'}
+    if state == 'submitted':
+        timing = ctx.state.get('lp_policy_state:live')
+        assert timing['completed_key'] == saved['key']
+        assert timing['last_rebalance'] == ctx.clock.now().timestamp()
+    assert ctx.inputs.snapshot() == {}
+
+
+class RebalanceRecovery:
+    def __init__(self):
+        self.calls = []
+
+    def get_rebalance(self, rebalance_id):
+        self.calls.append(('get', rebalance_id))
+        return dict(rebalance_id=rebalance_id, state='waiting', revision=3,
+                    cursor='exit', action_ids=['synthetic-exit'])
+
+    def advance_rebalance(self, rebalance_id, *, expected_revision):
+        self.calls.append(('advance', rebalance_id, expected_revision))
+        return dict(rebalance_id=rebalance_id, state='completed', revision=4,
+                    cursor='done', action_ids=['synthetic-exit', 'synthetic-entry'])
+
+
+def test_saved_rebalance_uses_real_companion_and_original_revision(ctx):
+    ctx.mode = 'live'
+    ctx.config.params = {}
+    ctx.financial = RebalanceRecovery()
+    saved = dict(key='lp:synthetic-cycle', cycle='synthetic-cycle',
+                 kind='lp_rebalance', payload={'synthetic_frozen_plan': True})
+    ctx.state.set('lp_operation', saved)
+    ctx.state.set('lp_rebalance:' + saved['key'], 'synthetic-rebalance')
+    result = main.run(ctx)
+    assert isinstance(result, StrategyResult)
+    assert result.status.value == 'ok'
+    assert result.metadata['state'] == 'completed'
+    assert result.metadata['action_ids'] == ['synthetic-exit', 'synthetic-entry']
+    assert ctx.financial.calls == [('get', 'synthetic-rebalance'), ('advance', 'synthetic-rebalance', 3)]
+    assert ctx.state.get('lp_operation') == saved
+    assert ctx.state.get('lp_policy_state:live')['completed_key'] == saved['key']
+    assert ctx.inputs.snapshot() == {}

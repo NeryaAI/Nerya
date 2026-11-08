@@ -13,18 +13,18 @@ executes it and normalises the minimum artifact contract:
 from __future__ import annotations
 
 import csv
+import io
 import json
-import os
+import math
 import re
-import subprocess
-import sys
-import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
 from .....core.config import load_config as load_workspace_config
 from .....core.errors import TradingError
+from .....core.redaction import redact_display_dict, redact_public_record, redact_text
+from .freeform_sandbox import execute_freeform, uses_host_lp_replay
 from .backtest_run import (
     _load_target_package,
     _metrics_display,
@@ -73,6 +73,7 @@ REPORT_NAMES = (
 
 EQUITY_NAMES = ("equity.csv", "equity_curve.csv", "nav.csv")
 TRADES_NAMES = ("trades.csv", "trade_details.csv", "fills.csv")
+DECISION_NAMES = ("decisions.csv",)
 TIME_KEYS = ("ts", "time", "timestamp", "date", "datetime", "t")
 EQUITY_KEYS = ("equity", "value", "balance", "nav")
 
@@ -81,20 +82,127 @@ def has_freeform_backtest_script(strategy_root: str | Path) -> bool:
     return _find_script(Path(strategy_root)) is not None
 
 
+def _redact_equity_row(row):
+    row = dict(row)
+    for key in EQUITY_KEYS:
+        if key in row:
+            value = _float_or_none(row[key])
+            row[key] = value if value is not None and math.isfinite(value) else None
+    return redact_display_dict(row)
+
+
+def _redact_artifact(name, text, prepared):
+    if name in RESULT_NAMES:
+        return json.dumps(_redact_replay_payload(json.loads(text), prepared), ensure_ascii=False)
+    if name in EQUITY_NAMES:
+        reader = csv.DictReader(io.StringIO(text))
+        rows = [_redact_equity_row(row) for row in reader]
+        output = io.StringIO(newline='')
+        writer = csv.DictWriter(output, fieldnames=list(redact_display_dict(
+            {key: None for key in reader.fieldnames or []})))
+        writer.writeheader()
+        writer.writerows(rows)
+        return output.getvalue()
+    if name in REPORT_NAMES:
+        # Shield only standalone denominations admitted by the JSON path's
+        # host receipt/hash checks; embedded secret-shaped strings stay redacted.
+        marker = '__nerya_public_denomination_'
+        while marker in text:
+            marker += '_'
+        identities = {}
+        def protect(match):
+            value = match.group()
+            token = value.rsplit(':', 1)[-1]
+            for role in ('token0', 'token1'):
+                currency = role + ':' + token
+                if value not in (token, currency):
+                    continue
+                clean = _redact_replay_payload(
+                    {'quote_token': token, 'accounting_currency': currency}, prepared)
+                if clean.get('quote_token') == token and clean.get('accounting_currency') == currency:
+                    placeholder = marker + str(len(identities)) + '__'
+                    identities[placeholder] = value
+                    return placeholder
+            return value
+        text = re.sub(r'(?<!\S)(?:token[01]:)?0x[0-9a-fA-F]{40}(?!\S)', protect, text)
+        text = redact_text(text)
+        for placeholder, value in identities.items():
+            text = text.replace(placeholder, value)
+        return text
+    return redact_text(text)
+
+
+def _redact_replay_payload(payload, prepared):
+    """Restore only the denomination bound to host-prepared public pool data."""
+    import hashlib
+    clean = redact_display_dict(payload)
+    if not isinstance(payload, dict):
+        return clean
+    for key in ('equity_curve', 'equity', 'nav_curve'):
+        if isinstance(payload.get(key), list):
+            clean[key] = [_redact_equity_row(row) for row in _payload_rows(payload, (key,))]
+    for receipt in prepared['receipts']:
+        if receipt.get('provider') != 'uniswap' or receipt.get('action') != 'pool_history':
+            continue
+        blob = prepared['files'].get(receipt['id'] + '.json')
+        if blob is None or hashlib.sha256(blob).hexdigest() != receipt['sha256']:
+            continue
+        dataset = json.loads(blob)
+        envelope = dataset.get('_envelope', {})
+        cadence = dataset.get('protocol') == 'nerya.lp_cadence.v1'
+        pool = dataset.get('pool', {}) if cadence else envelope.get('pool', {})
+        if ((not cadence and (envelope.get('provider') != 'uniswap' or envelope.get('action') != 'pool_history'
+                or envelope.get('row_contract') != 'uniswap_v3_pool_history.v1'
+                or envelope.get('mock') is not False or envelope.get('chain_id') != 1))
+                or pool.get('chain_id') != 1
+                or any(not isinstance(pool.get(key), str)
+                       or not re.fullmatch(r'0x[0-9a-fA-F]{40}', pool[key])
+                       or int(pool[key], 16) == 0 for key in ('token0', 'token1'))):
+            continue
+        for role in ('token0', 'token1'):
+            token = pool[role]
+            if (payload.get('quote_token') == token
+                    and payload.get('accounting_currency') == role + ':' + token):
+                clean.update(redact_public_record(
+                    {key: payload[key] for key in ('quote_token', 'accounting_currency')},
+                    identity_fields=frozenset({'quote_token', 'accounting_currency'})))
+    return clean
+
+
 def run_freeform_backtest(
     *,
     strategy_id: str | None = None,
     proposal_id: str | None = None,
     workspace: str | Path | None = None,
     timeout_seconds: int = 180,
+    cancel_token: object | None = None,
+    progress=None,
+    validate_prepared_inputs=None,
+    runtime_config=None,
 ) -> dict[str, Any]:
+    from .run_state import RunTracker
+    tracker = RunTracker(progress=progress, cancel_token=cancel_token)
+    try:
+        return _run_freeform_backtest(strategy_id=strategy_id, proposal_id=proposal_id,
+            workspace=workspace, timeout_seconds=timeout_seconds, cancel_token=cancel_token, tracker=tracker,
+            validate_prepared_inputs=validate_prepared_inputs, runtime_config=runtime_config)
+    except BaseException as exc:
+        tracker.fail(exc)
+        raise
+
+
+def _run_freeform_backtest(*, strategy_id, proposal_id, workspace, timeout_seconds, cancel_token, tracker,
+                           validate_prepared_inputs=None, runtime_config=None):
     """Execute the strategy package's freeform backtest script.
 
-    The script is run from the strategy root with these environment variables:
+    The script is run from a read-only snapshot with these environment variables:
     ``NERYA_BACKTEST_OUT_DIR``, ``NERYA_STRATEGY_ROOT``, and
-    ``NERYA_WORKSPACE``. It can call provider SDKs and write either CSV
-    artifacts directly or ``result.json`` containing ``equity_curve`` and
-    ``trades`` arrays.
+    ``NERYA_WORKSPACE`` (empty scratch, never the runtime workspace). Prepared
+    package history is readable; network and child processes are denied. Only
+    the dedicated output directory and scratch are writable. CSV artifacts or
+    JSON with ``equity_curve``/``trades`` remain supported, including stdout.
+    macOS only, with no unsafe fallback; wall time is capped at the shared
+    validation limit. This is isolation evidence, not performance attestation.
     """
 
     if bool(strategy_id) == bool(proposal_id):
@@ -102,72 +210,105 @@ def run_freeform_backtest(
 
     config_obj = load_workspace_config(Path(workspace).expanduser() if workspace else None)
     package = _load_target_package(config_obj.paths, strategy_id, proposal_id)
+    root = config_obj.paths.root.resolve()
+    if not package.root.resolve().is_relative_to(root):
+        raise TradingError('freeform package must stay inside the workspace')
+    if any(path.is_symlink() for path in [package.root, *package.root.parents] if path != root and path.is_relative_to(root)):
+        raise TradingError('freeform package path must not contain symlinks')
     script_path = _find_script(package.root)
     if script_path is None:
         raise NoFreeformBacktestScript(
             f"no freeform backtest script found under {package.root}"
         )
-
     from .writers import create_run_dir
-    out_dir = create_run_dir(package.root, kind="freeform")
+    from .run_state import atomic_json
+    from .replay_inputs import prepare_inputs
+    from .....strategies.verification import source_revision
+    from .....strategies.workflow_service import _read_files
+    from .....core.runtime_identity import BUILD_ID, SDK_BUILD_ID
+    files, omitted = _read_files(package.root)
+    if omitted:
+        raise TradingError('custom replay failed closed: source cannot be completely snapshotted')
+    revision = source_revision(files)
+    out_dir = create_run_dir(package.root, kind='freeform')
     ts_name = out_dir.name
+    tracker.bind(out_dir, strategy_id=package.manifest.strategy_id, proposal_id=proposal_id)
+    tracker.phase('preparing_data')
+    cadence = None
+    lp_mode = package.manifest.extras.get('params', {}).get('lp_replay', {}).get('mode')
+    if lp_mode == 'cadence' and uses_host_lp_replay(package, script_path):
+        from .lp_state_requirements import prepare_lp_cadence
+        from .lp_replay import cadence_receipt
+        from .replay_inputs import json_bytes, read_manifest
+        from .....harness.cancellation import raise_if_cancelled
+        from .....data_api.uniswap_history import UniswapHistoryProvider
+        import hashlib
+        import time
+        target = {'proposal_id': proposal_id} if proposal_id else {'strategy_id': strategy_id}
+        cadence = prepare_lp_cadence(config_obj, target, lambda: raise_if_cancelled(cancel_token))
+        if cadence['source_revision'] != revision:
+            raise TradingError('LP source changed during preparation')
+        compact = cadence_receipt(cadence)
+        pool = cadence['observations'][0]['checkpoint']['pool']
+        identities, catalog = UniswapHistoryProvider()._token_catalog(
+            pool, time.monotonic() + 15, cancel_token=cancel_token)
+        if not identities:
+            raise TradingError('LP cadence token catalog identity unavailable')
+        compact['_envelope'] = {'provider': 'uniswap', 'action': 'pool_history', 'mock': False,
+            'row_contract': 'nerya.lp_cadence.v1', 'observation_kind': 'historical_lp_cadence',
+            'pool_identity_scope': 'historical_onchain_pool_with_current_token_catalog',
+            'chain_id': 1, 'pool': pool, 'token_identities': identities,
+            'sources': [{'sha256': compact['prepared_sha256']}, catalog],
+            'requested_window': cadence['requested_window']}
+        blob = json_bytes(compact)
+        if len(blob) > 4_000_000:
+            raise TradingError('LP cadence evidence receipt exceeds byte limit')
+        name = package.manifest.extras['params']['lp_replay']['dataset_id']
+        prepared = {'files': {name + '.json': blob}, 'manifest': read_manifest(package.root), 'receipts': [{
+            'id': name, 'provider': 'uniswap', 'action': 'pool_history',
+            'sha256': hashlib.sha256(blob).hexdigest(), 'rows': compact['observation_count'],
+            'sources': compact['_envelope']['sources'], 'requested_window': cadence['requested_window'],
+            'coverage': {'completeness': 'complete'}, 'requested_window_complete': True,
+            'snapshot_file': 'prepared_inputs/' + name + '.json',
+            'observation_kind': 'historical_lp_cadence', 'data_kind': 'historical_observations'}]}
+    else:
+        prepared = prepare_inputs(package.root, cancel_token=cancel_token, config=runtime_config or config_obj)
+    if validate_prepared_inputs is not None:
+        validate_prepared_inputs(prepared)
+    if prepared["files"]:
+        persisted_inputs = out_dir / "prepared_inputs"
+        persisted_inputs.mkdir()
+        for name, blob in prepared["files"].items():
+            (persisted_inputs / name).write_bytes(blob)
+    atomic_json(out_dir / 'data_manifest.json', {'datasets': prepared['receipts']})
+    tracker.phase('executing')
 
-    env = dict(os.environ)
-    env["NERYA_BACKTEST_OUT_DIR"] = str(out_dir)
-    env["NERYA_STRATEGY_ROOT"] = str(package.root)
-    env["NERYA_WORKSPACE"] = str(config_obj.paths.root)
-    env["NERYA_FREEFORM_BACKTEST"] = "1"
-    env["PYTHONPATH"] = _join_pythonpath(
-        [str(config_obj.paths.root), str(Path.cwd())],
-        env.get("PYTHONPATH"),
-    )
-
-    started_at = time.time()
-    proc = subprocess.run(
-        [sys.executable, str(script_path)],
-        cwd=str(package.root),
-        env=env,
-        input="",
-        text=True,
-        capture_output=True,
-        timeout=timeout_seconds,
-        check=False,
+    proc, artifacts, isolation = execute_freeform(
+        package, script_path, artifact_names=(*RESULT_NAMES, *REPORT_NAMES, *EQUITY_NAMES, *TRADES_NAMES, *DECISION_NAMES),
+        timeout_seconds=timeout_seconds, cancel_token=cancel_token,
+        prepared_inputs=prepared['files'], **({'trusted_lp_cadence': cadence} if cadence is not None else {}),
     )
     if proc.returncode != 0:
         missing = re.search(r"ModuleNotFoundError: No module named ['\"]([^'\"]+)['\"]", proc.stderr or "")
         if missing:
-            raise FreeformDependencyError(missing.group(1), script_path)
+            raise FreeformDependencyError(redact_text(missing.group(1)), script_path)
         raise TradingError(
             "freeform backtest script failed "
             f"({script_path}, exit={proc.returncode}): "
-            f"{_tail(proc.stderr or proc.stdout)}"
+            f"{redact_text(_tail(proc.stderr or proc.stdout))}"
         )
 
-    fallback_roots = _fallback_artifact_roots(
-        script_path=script_path,
-        package_root=package.root,
-        out_dir=out_dir,
-    )
+    tracker.phase('writing_artifacts')
+    for name, data in artifacts.items():
+        # Persist only bounded regular artifacts after the isolated child exits.
+        text = data.decode('utf-8')
+        text = _redact_artifact(name, text, prepared)
+        (out_dir / name).write_text(text, encoding='utf-8')
     payload = _read_first_json(out_dir, RESULT_NAMES)
     if not payload:
-        for root in fallback_roots:
-            payload = _read_first_json(root, RESULT_NAMES, min_mtime=started_at)
-            if payload:
-                break
-    if not payload:
-        payload = _read_payload_from_stdout(proc.stdout or "")
+        payload = _redact_replay_payload(_read_payload_from_stdout(proc.stdout or ""), prepared)
     equity_path = _find_artifact(out_dir, EQUITY_NAMES)
     trades_path = _find_artifact(out_dir, TRADES_NAMES)
-    if equity_path is None:
-        for root in fallback_roots:
-            equity_path = _find_artifact(root, EQUITY_NAMES, min_mtime=started_at)
-            if equity_path is not None:
-                break
-    if trades_path is None:
-        for root in fallback_roots:
-            trades_path = _find_artifact(root, TRADES_NAMES, min_mtime=started_at)
-            if trades_path is not None:
-                break
 
     if equity_path is None:
         equity_rows = _payload_rows(payload, ("equity_curve", "equity", "nav_curve"))
@@ -220,6 +361,57 @@ def run_freeform_backtest(
         proposal_id=proposal_id,
         script_path=script_path,
     )
+    current, omitted = _read_files(package.root)
+    if omitted or source_revision(current) != revision:
+        raise TradingError('custom replay source changed during execution')
+    import hashlib
+    if any(isolation['snapshot_files'].get(name) != hashlib.sha256(content.encode()).hexdigest()
+           for name, content in files.items() if name != 'workflow.json'):
+        raise TradingError('custom replay executed a different source snapshot')
+    datasets = prepared['receipts']
+    for receipt in datasets:
+        if isolation['prepared_inputs'].get(receipt['snapshot_file']) != receipt['sha256']:
+            raise TradingError('custom replay input snapshot mismatch')
+    coverage = (False if any(row['requested_window_complete'] is False for row in datasets)
+                else True if datasets and all(row['requested_window_complete'] is True for row in datasets) else None)
+    windows=[row.get("requested_window") for row in datasets]
+    if windows and all(isinstance(window,dict) and window==windows[0] for window in windows):
+        requested_start=_coerce_unix_seconds(windows[0].get("start"))
+        requested_end=_coerce_unix_seconds(windows[0].get("end"))
+        if requested_start is not None and requested_end is not None and requested_end>=requested_start:
+            metrics.update(requested_start_utc=_iso_utc(requested_start),requested_end_utc=_iso_utc(requested_end),
+                requested_window_days=(requested_end-requested_start)/86400,
+                requested_end_inclusive=windows[0].get("inclusive"))
+    metrics.update(coverage_ok=coverage, requested_window_complete=coverage,
+        provenance={'version': 1, 'strategy_id': package.manifest.strategy_id, 'proposal_id': proposal_id,
+            'runtime_build_id': BUILD_ID, 'sdk_build_id': SDK_BUILD_ID, 'source_revision': revision,
+            'source_changed_during_run': False, 'package_hash': package.content_hash,
+            'replay_snapshot_sha256': isolation['snapshot_sha256'], 'datasets': datasets,
+            "data_manifest": str((out_dir / "data_manifest.json").relative_to(root)),
+            'data_kind': 'historical_observations' if datasets and all(row['data_kind'] == 'historical_observations' for row in datasets) else 'unverified',
+            'scope': 'Isolated custom calculation; no execution-model, strategy equivalence or historical performance attestation.'},
+        replay={'process_exited': True, 'process_group_stopped': True, 'errors': 0,
+            'scope': 'isolated_custom_calculation', 'strategy_execution_verified': False})
+    if coverage is False:
+        metrics['coverage_message'] = 'Prepared observations have coverage gaps; the requested historical window is incomplete.'
+    if isolation.get('lp_execution'):
+        metrics['replay'].update(strategy_execution_verified=True, accounting_verified=True, **isolation['lp_execution'])
+        metrics['coverage_message'] = (
+            'Sampled LP strategy execution and accounting are verified. Requested-window completeness '
+            'remains false: boundary gaps and unobserved state/tick transitions between samples are '
+            'separate limitations. Changing step_blocks, max_samples, or endpoint alignment alone '
+            'cannot establish full LP coverage. Full coverage requires an admitted historical '
+            'event/state producer and validated reconstruction for the same pool and window.')
+        metrics['provenance']['scope'] = (
+            'Saved entrypoint executed in isolation; host-owned sampled fixed-range LP accounting. '
+            'Partial observations only; no fills, complete tick path or performance attestation.')
+        if cadence is not None:
+            metrics['requested_window_complete'] = metrics['coverage_ok'] = isolation['lp_execution']['requested_window_complete']
+            metrics['coverage_message'] = ('Saved cadence states and intervening range continuity are verified.'
+                if metrics['coverage_ok'] else 'Saved policy max_gap_seconds omitted fee intervals; accounting remains partial.')
+            metrics['provenance']['scope'] = (
+                'Saved scheduled decisions executed in isolation with verified historical checkpoints and range continuity; '
+                'host-owned fixed-range counterfactual accounting. No live fills or historical performance attestation.')
     metrics_path = out_dir / "metrics.json"
     metrics_path.write_text(
         json.dumps(metrics, ensure_ascii=False, indent=2, default=str),
@@ -240,6 +432,11 @@ def run_freeform_backtest(
         metrics=metrics,
         workspace_root=config_obj.paths.root,
     )
+    decisions_path = _find_artifact(out_dir, DECISION_NAMES)
+    if decisions_path is not None:
+        decision_rows = _read_csv(decisions_path)
+        chart['tables'].append(_table('decisions', decision_rows[:100]))
+        chart['meta']['recorded_decision_rows'] = len(decision_rows)
     chart_path = out_dir / "chart.json"
     chart_path.write_text(
         json.dumps(chart, ensure_ascii=False, indent=2, default=str),
@@ -277,10 +474,20 @@ def run_freeform_backtest(
         "total_return_pct": metrics.get("total_return_pct"),
         "max_drawdown_pct": metrics.get("max_drawdown_pct"),
         "final_equity_usd": metrics.get("final_equity_usd"),
-        "coverage_ok": True,
+        **{key:metrics[key] for key in ('accounting_currency', 'modeled_initial_value', 'modeled_final_value') if key in metrics},
+        "coverage_ok": metrics["coverage_ok"],
+        "requested_window_complete": metrics["requested_window_complete"],
+        "performance_evidence": metrics["performance_evidence"],
         "recommended_coverage_ok": None,
         "coverage_message": metrics.get("coverage_message"),
-        "limitations": payload.get("limitations") if isinstance(payload, dict) else [],
+        **{key:metrics.get(key) for key in ("requested_window_days","requested_start_utc",
+            "requested_end_utc","requested_end_inclusive")},
+        "limitations": [*(payload.get("limitations", []) if isinstance(payload.get("limitations"), list) else []),
+                        "Historical data provenance, requested coverage and trading performance are not verified."],
+        "isolation": isolation,
+        "run_receipt": _ws_rel(out_dir / 'run.json'),
+        "provenance": metrics['provenance'],
+        "replay": metrics['replay'],
     }
     result_path.write_text(
         json.dumps(result_payload, ensure_ascii=False, indent=2, default=str),
@@ -310,6 +517,8 @@ def run_freeform_backtest(
     }
     if chart.get("chart_blocks"):
         result["chart_blocks"] = chart["chart_blocks"]
+    tracker.complete(source_revision=revision, snapshot_sha256=isolation['snapshot_sha256'],
+                     report_path=str(report_path), performance_evidence=False)
     return result
 
 
@@ -321,42 +530,11 @@ def _find_script(strategy_root: Path) -> Path | None:
     return None
 
 
-def _join_pythonpath(prefixes: list[str], existing: str | None) -> str:
-    values = [p for p in prefixes if p]
-    if existing:
-        values.append(existing)
-    return os.pathsep.join(dict.fromkeys(values))
-
-
 def _tail(text: str, *, limit: int = 1200) -> str:
     text = (text or "").strip()
     if len(text) <= limit:
         return text
     return text[-limit:]
-
-
-def _fallback_artifact_roots(
-    *,
-    script_path: Path,
-    package_root: Path,
-    out_dir: Path,
-) -> list[Path]:
-    """Common script mistakes: writing beside the script or into cwd."""
-
-    candidates = [script_path.parent, package_root]
-    out: list[Path] = []
-    out_resolved = out_dir.resolve()
-    for path in candidates:
-        try:
-            resolved = path.resolve()
-        except Exception:
-            continue
-        if resolved == out_resolved:
-            continue
-        if resolved in [p.resolve() for p in out]:
-            continue
-        out.append(path)
-    return out
 
 
 def _fresh_file(path: Path, *, min_mtime: float | None = None) -> bool:
@@ -535,9 +713,9 @@ def _build_metrics(
     start_ts = _first_time(equity_rows[0])
     end_ts = _first_time(equity_rows[-1])
     days = ((end_ts - start_ts) / 86400.0) if start_ts and end_ts and end_ts > start_ts else 0.0
-    return {
+    result = {
         "backtest_kind": "freeform_backtest",
-        "verdict": str(payload.get("verdict") or "RESEARCH"),
+        "verdict": "RESEARCH",
         "strategy_id": strategy_id,
         "proposal_id": proposal_id,
         "script_path": str(script_path),
@@ -556,15 +734,29 @@ def _build_metrics(
         "backtest_days": round(days, 6),
         "start_utc": _iso_utc(start_ts) if start_ts else None,
         "end_utc": _iso_utc(end_ts) if end_ts else None,
-        "coverage_ok": True,
+        "coverage_ok": None,
+        "requested_window_complete": None,
+        "performance_evidence": False,
         "recommended_coverage_ok": None,
         "coverage_message": (
-            "Freeform SDK backtest accepted: the strategy-local script emitted "
-            "a capital curve and trade details; no fixed OHLCV timeframe or "
-            "minimum window was enforced."
+            "Custom replay artifacts were generated; historical input provenance "
+            "and requested-window coverage remain unverified. Script output and "
+            "sandbox hashes do not attest historical trading performance."
         ),
         "flags": list(payload.get("flags") or []),
     }
+    currency = payload.get('accounting_currency')
+    if isinstance(currency, str) and currency.strip() and currency != 'USD':
+        # Quote-token units are not USD, even for a token named USDC. Keep the
+        # recorded curve without manufacturing dollar values or performance.
+        result.update(accounting_currency=currency[:120], modeled_initial_value=first_value,
+                      modeled_final_value=last_value)
+        for key in ('initial_capital_usd', 'final_equity_usd', 'total_return_usd',
+                    'total_return_pct', 'max_drawdown_pct', 'sharpe_ratio',
+                    'profit_factor', 'win_rate_pct', 'benchmark_buy_hold_return_pct',
+                    'alpha_vs_benchmark_pct'):
+            result[key] = None
+    return result
 
 
 def _float_or_none(value: Any) -> float | None:
@@ -685,13 +877,17 @@ def _render_chart(
             "start": metrics.get("start_utc"),
             "end": metrics.get("end_utc"),
             "initial_capital_usd": metrics.get("initial_capital_usd"),
+            **{key: metrics[key] for key in ('accounting_currency', 'modeled_initial_value', 'modeled_final_value') if key in metrics},
+            **{key:metrics.get(key) for key in ("coverage_ok","requested_window_complete","requested_window_days",
+                "requested_start_utc","requested_end_utc","requested_end_inclusive","coverage_message",
+                "performance_evidence","provenance","replay","backtest_days")},
         },
         "panels": [
             {
                 "id": "equity",
                 "type": "line",
-                "title": "Equity",
-                "series": [{"kind": "line", "name": "equity", "data": equity}],
+                "title": f"Modeled value ({metrics['accounting_currency']})" if metrics.get('accounting_currency') else "Equity",
+                "series": [{"kind": "line", "name": "modeled_value" if metrics.get('accounting_currency') else "equity", "data": equity}],
             }
         ],
         "summary_cards": [
@@ -702,7 +898,9 @@ def _render_chart(
         ],
         "tables": [_table("trades", trade_rows[:100])],
     }
-    block = _build_equity_chart_block(
+    # Legacy chart blocks assume dollar-equity accounting. Non-USD curves
+    # use the explicit unit-bearing panel above instead.
+    block = None if metrics.get('accounting_currency') else _build_equity_chart_block(
         workspace_root=workspace_root,
         out_dir=out_dir,
         strategy_id=strategy_id,

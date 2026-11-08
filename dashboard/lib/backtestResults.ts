@@ -1,16 +1,20 @@
-import { liveEventsToBlocks, type ChatThread } from "./chat";
+import type { ChatThread } from "./chat";
+import { projectMessageBlocks } from "./streamTranscript";
 
 export type BacktestResultRef = {
   id: string; strategyId: string; proposalId: string | null; ts: string;
   title: string; seenAt: number; status: "completed" | "blocked" | "failed";
   verdict: string; metrics: Record<string, unknown>; message: string; dataKind: string;
   evaluationMode: string; executionMode: string; performanceEvidence?: boolean;
+  decisionReplay?: Record<string, unknown>;
   replay: Record<string, unknown>; provenance: Record<string, unknown>; engine: string;
   start: string; end: string; nextAction: string; flags: string[];
   equityPreview: Array<{ time: number; value: number }>;
   coverage?: Record<string, unknown>;
   biasChecks?: Record<string, unknown>;
   researchChecks?: Record<string, unknown>;
+  failureReason?: string;
+  failureDiagnostics?: Record<string, unknown>;
 };
 const object = (value: unknown): Record<string, unknown> => value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : {};
 const text = (value: unknown): string => typeof value === "string" ? value.trim() : "";
@@ -57,6 +61,12 @@ function structured(raw: string): unknown {
 }
 
 const pathKeys = ["out_dir", "backtest_dir", "metrics_path", "raw_metrics_file", "report_path", "chart_path", "equity_path", "trades_path", "result_path"];
+const producerMetricKeys = [
+  "accounting_currency",
+  "coverage_reason", "coverage_ok", "requested_window_complete", "coverage_message",
+  "requested_window_days", "requested_start_utc", "requested_end_utc",
+  "limitations", "limitation_codes", "gaps", "modeled_coverage", "observation_coverage",
+];
 
 /** Results only: never visit tool arguments or infer a run from assistant prose. */
 export function extractBacktestResults(value: unknown, seenAt = 0, action = ""): BacktestResultRef[] {
@@ -72,13 +82,31 @@ export function extractBacktestResults(value: unknown, seenAt = 0, action = ""):
     seen.add(value);
     if (Array.isArray(value)) { value.slice(0, 100).forEach(item => visit(item, depth + 1, inherited, backtest, failed)); return; }
     const row = object(value);
-    if (row.kind === "tool_use" || row.type === "tool_use") return;
+    if (row.kind === "tool_use" || row.type === "tool_use"
+      || ["text", "text_delta", "thinking", "thinking_delta"].includes(text(row.kind))
+      || !backtest && ["text", "thinking"].includes(text(row.type))) return;
     const named = [row.action, row.name, row.tool].map(text).join(" ");
     backtest ||= /backtest/i.test(named) || row.result_type === "backtest_result";
-    failed ||= row.ok === false || row.is_error === true || Boolean(row.error);
+    // A policy read or an interaction boundary is not an executed replay.
+    // Legacy traces omit the protocol, so also recognize its structured body.
+    if (row.result_protocol === "user_interaction_pending"
+      || row.result_type === "retrospective_authorization_policy"
+      || backtest && (object(row.payload).policy_check_only === true || object(row.arguments).policy_check_only === true)
+      || backtest && row.error_kind === "deduped" && row.elapsed_ms === 0 && row.result === null
+      || row.reason === "retrospective_replay_authorization_pending"
+        && object(row.interaction).kind === "question" && object(row.interaction).state === "pending") return;
+    const rowFailed = row.ok === false || row.is_error === true || Boolean(row.error) || ["failed", "blocked"].includes(text(row.backtest_status));
+    failed ||= rowFailed;
     const metadata = { ...inherited };
-    for (const key of ["strategy_id", "proposal_id", "backtest_ts"]) if (text(row[key])) metadata[key] = row[key];
+    for (const key of ["strategy_id", "proposal_id", "backtest_ts", "call_id"]) if (text(row[key])) metadata[key] = row[key];
+    for (const key of ["attempt", "recovery", "verification"]) if (row[key] != null) metadata[key] = row[key];
     let strategyId = text(metadata.strategy_id || row.strategyId), proposalId = text(metadata.proposal_id || row.proposalId);
+    // Failed tools can have no result body. Their producer receipt still binds
+    // the candidate; request arguments are never evidence of an executed run.
+    const verification = object(metadata.verification);
+    const binding = verification.protocol === "nerya.verification.v1"
+      ? text(verification.artifact_id).match(/^strategy:([^:]+):proposal:([^:]+)$/) : null;
+    if (failed && binding) { strategyId ||= binding[1]; proposalId ||= binding[2]; }
     let ts = text(metadata.backtest_ts || row.backtestTs);
     for (const key of pathKeys) {
       const path = locator(text(row[key]));
@@ -92,32 +120,42 @@ export function extractBacktestResults(value: unknown, seenAt = 0, action = ""):
       if (row[key] != null) visit(row[key], depth + 1, metadata, backtest, failed);
     }
     // Prefer a producer's detailed diagnostic to the enclosing generic error.
-    const explicitFailure = results.size === before && backtest && failed && (row.ok === false || row.is_error === true || Boolean(row.error));
+    const explicitFailure = results.size === before && backtest && failed && rowFailed;
     if ((!failed && strategyId && timestamp(ts)) || explicitFailure) {
-      const reason = text(row.reason) || text(error.kind);
-      const id = explicitFailure ? `error:${proposalId}:${strategyId}:${reason || message}` : `${proposalId ? proposalId + ":" : ""}${strategyId}:${ts}`;
+      const reason = text(row.reason) || text(object(metadata.recovery).reason) || text(error.kind);
+      const callId = text(metadata.call_id);
+      const id = explicitFailure ? callId ? `error:call:${callId}:${metadata.attempt || 1}`
+        : `error:${proposalId}:${strategyId}:${reason || message}` : `${proposalId ? proposalId + ":" : ""}${strategyId}:${ts}`;
       const old = results.get(id);
       const flags = Array.isArray(row.flags) ? row.flags.filter((v): v is string => typeof v === "string") : old?.flags || [];
       const rawVerdict = text(row.verdict) || old?.verdict || "";
+      const evidence = { ...object(row.metrics), ...row };
+      const producerMetrics = Object.fromEntries(producerMetricKeys
+        .filter(key => row[key] !== undefined)
+        .map(key => [key, row[key]]));
       results.set(id, {
-        id, strategyId, proposalId: proposalId || null, ts: explicitFailure ? "" : ts,
+        id, strategyId: strategyId || old?.strategyId || "", proposalId: proposalId || old?.proposalId || null, ts: explicitFailure ? "" : ts,
         title: text(row.title) || old?.title || strategyId || proposalId || "Backtest", seenAt,
-        status: explicitFailure ? (row.backtest_status === "blocked" || ["no_historical_data", "backtest_sdk_unsupported", "backtest_dependency_missing"].includes(reason) ? "blocked" : "failed") : "completed",
+        status: explicitFailure ? (row.backtest_status === "blocked" || !reason && old?.status === "blocked" || ["no_historical_data", "historical_provider_unsupported", "backtest_sdk_unsupported", "backtest_dependency_missing", "protocol_replay_model_required"].includes(reason) ? "blocked" : "failed") : "completed",
         verdict: effectiveBacktestVerdict(rawVerdict, flags),
-        metrics: { ...old?.metrics, ...object(row.metrics), ...object(row.metrics_display) },
+        metrics: { ...old?.metrics, ...object(row.metrics), ...object(row.metrics_display), ...producerMetrics },
         message: message || old?.message || "",
-        dataKind: text(object(row.provenance).data_kind) || old?.dataKind || "",
-        evaluationMode: text(row.evaluation_mode) || old?.evaluationMode || "",
-        executionMode: text(row.execution_mode) || old?.executionMode || "",
-        performanceEvidence: typeof row.performance_evidence === "boolean" ? row.performance_evidence : old?.performanceEvidence,
-        replay: { ...old?.replay, ...object(row.replay) },
-        provenance: { ...old?.provenance, ...object(row.provenance) },
+        failureReason: reason || old?.failureReason || "",
+        failureDiagnostics: { ...old?.failureDiagnostics, ...object(row.diagnostics), ...object(row.recovery) },
+        dataKind: text(object(evidence.provenance).data_kind) || old?.dataKind || "",
+        evaluationMode: text(evidence.evaluation_mode) || old?.evaluationMode || "",
+        executionMode: text(evidence.execution_mode) || old?.executionMode || "",
+        performanceEvidence: typeof evidence.performance_evidence === "boolean" ? evidence.performance_evidence : old?.performanceEvidence,
+        decisionReplay: { ...old?.decisionReplay, ...object(evidence.decision_replay) },
+        replay: { ...old?.replay, ...object(evidence.replay) },
+        provenance: { ...old?.provenance, ...object(evidence.provenance),
+          ...(failed && binding && text(verification.revision) ? { source_revision: text(verification.revision) } : {}) },
         biasChecks: { ...old?.biasChecks, ...object(object(row.metrics).bias_checks), ...object(row.bias_checks) },
         researchChecks: { ...old?.researchChecks, ...object(object(row.metrics).research_checks), ...object(row.research_checks) },
         engine: text(row.engine) || old?.engine || "",
-        coverage: { ...old?.coverage, ...Object.fromEntries(["requested_window_days", "requested_window_complete", "data_manifest", "tf", "backtest_days"].filter(key => row[key] !== undefined).map(key => [key, row[key]])) },
-        start: text(row.start_utc || object(row.metrics_display).start_utc || object(row.metrics).start_utc) || old?.start || "",
-        end: text(row.end_utc || object(row.metrics_display).end_utc || object(row.metrics).end_utc) || old?.end || "",
+        coverage: { ...old?.coverage, ...Object.fromEntries(["requested_window_days", "requested_window_complete", "requested_start_utc", "requested_end_utc", "data_manifest", "tf", "backtest_days"].filter(key => evidence[key] !== undefined).map(key => [key, evidence[key]])) },
+        start: text(evidence.start || evidence.start_utc || object(row.metrics_display).start_utc) || old?.start || "",
+        end: text(evidence.end || evidence.end_utc || object(row.metrics_display).end_utc) || old?.end || "",
         flags,
         nextAction: text(object(row.next_required_action).message) || old?.nextAction || "",
         equityPreview: Array.isArray(row.equity_preview) ? row.equity_preview.flatMap(value => {
@@ -137,19 +175,27 @@ export function collectBacktestResults(thread: Pick<ChatThread, "messages"> | nu
   for (const message of thread?.messages || []) {
     if (message.role !== "assistant") continue;
     const values: unknown[] = [
-      ...(message.turn?.blocks || []),
-      ...liveEventsToBlocks([...(message.turn?.activity_events || []), ...(message.live_events || [])]),
+      ...projectMessageBlocks(message),
       ...(message.turn?.tool_trace || []), ...(message.turn?.actions || []),
     ];
     for (const value of values) for (const result of extractBacktestResults(value, message.ts)) {
-      const old = results.get(result.id);
+      // Call IDs identify one operation across transcript and final trace, not
+      // across independent commands. Keep legacy run IDs unchanged.
+      const key = result.id.startsWith("error:call:") ? `${message.command_id || message.id}:${result.id}` : result.id;
+      const old = results.get(key);
       const flags = result.flags.length ? result.flags : old?.flags || [];
-      results.set(result.id, { ...result, verdict: effectiveBacktestVerdict(result.verdict || old?.verdict || "", flags),
-        title: result.title === result.strategyId && old?.title ? old.title : result.title,
+      results.set(key, { ...result, id: key,
+        strategyId: result.strategyId || old?.strategyId || "", proposalId: result.proposalId || old?.proposalId || null,
+        status: result.status === "failed" && old?.status === "blocked" && !result.failureReason ? old.status : result.status,
+        failureReason: result.failureReason || old?.failureReason || "",
+        failureDiagnostics: { ...old?.failureDiagnostics, ...result.failureDiagnostics },
+        verdict: effectiveBacktestVerdict(result.verdict || old?.verdict || "", flags),
+        title: (result.title === "Backtest" || result.title === result.strategyId) && old?.title && old.title !== "Backtest" ? old.title : result.title,
         message: result.message || old?.message || "", dataKind: result.dataKind || old?.dataKind || "",
         metrics: { ...old?.metrics, ...result.metrics },
         evaluationMode: result.evaluationMode || old?.evaluationMode || "", executionMode: result.executionMode || old?.executionMode || "",
         performanceEvidence: result.performanceEvidence ?? old?.performanceEvidence,
+        decisionReplay: { ...old?.decisionReplay, ...result.decisionReplay },
         replay: { ...old?.replay, ...result.replay }, provenance: { ...old?.provenance, ...result.provenance },
         coverage: { ...old?.coverage, ...result.coverage },
         biasChecks: { ...old?.biasChecks, ...result.biasChecks },

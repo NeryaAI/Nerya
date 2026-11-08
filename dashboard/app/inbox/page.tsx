@@ -60,6 +60,7 @@ type TranslateFn = (key: string, values?: Record<string, string | number>) => st
 export default function InboxPage() {
   const t = useTranslations("inbox");
   const tCommon = useTranslations("common");
+  const tWorkspace = useTranslations("workspaceUi");
   const router = useRouter();
   const [env, setEnv] = useState<InboxItemsEnvelope | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -541,7 +542,7 @@ export default function InboxPage() {
                             className={`${actionBtnClass} disabled:opacity-50`}
                             title={act.disabled_reason || actionLabel(act, t, tCommon)}
                           >
-                            {actionLabel(act, t, tCommon)}
+                            {act.id === "preview" ? tWorkspace("previewTitle") : actionLabel(act, t, tCommon)}
                           </button>
                         );
                       })}

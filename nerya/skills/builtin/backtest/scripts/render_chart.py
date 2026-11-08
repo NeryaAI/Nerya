@@ -57,6 +57,7 @@ def render_chart(backtest_dir: str | Path) -> dict[str, Any]:
             "evaluation_mode": metrics.get("evaluation_mode", "trading"),
             "execution_mode": metrics.get("execution_mode", "script"),
             "performance_evidence": metrics.get("performance_evidence", True),
+            "accounting_currency": metrics.get("accounting_currency"),
             "replay": metrics.get("replay", {}),
             "provenance": metrics.get("provenance", {}),
             "factor_refs": metrics.get("factor_refs", []),

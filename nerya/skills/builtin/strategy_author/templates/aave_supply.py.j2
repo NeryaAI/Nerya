@@ -1,0 +1,76 @@
+"""Save beside main.py; call every tick with the Aave data/decision gates.
+
+One serialized supply/withdraw operation per strategy at a time. The caller
+supplies an immutable request and stable operation_key for each decided action.
+Resource/deployment review and finite authorization belong to the operator.
+This helper neither selects a wallet/reserve nor implements historical replay.
+"""
+from nerya.strategies import StrategyResult, StrategyResultStatus
+
+
+def financial_result(ctx, receipt):
+    """Financial actions use state; approval/prerequisite responses use status."""
+    metadata = {'financial_action': receipt, 'recovery': 'get/reconcile original action'}
+    if not isinstance(receipt, dict):
+        return ctx.result.error(message='Unknown Aave receipt', kind='execution_unknown', metadata=metadata)
+    state = receipt.get('state') or receipt.get('status')
+    mapped = {
+        'confirmed': 'filled', 'rejected': 'rejected',
+        'approval_required': 'pending_approval', 'awaiting_approval': 'pending_approval',
+        'submitted': 'submitted', 'confirming': 'submitted', 'submitting': 'submitted',
+        'reserved': 'submitted', 'prepared': 'hold',
+        'prerequisite_required': 'hold', 'awaiting_prerequisite': 'hold',
+    }.get(state, 'error')
+    return StrategyResult(
+        status=StrategyResultStatus(mapped), reason=f'Aave action: {state}',
+        approval_id=receipt.get('approval_id'), metadata=metadata,
+        error_kind=('execution_error' if state in {'failed_before_submission', 'discarded'}
+                    else 'execution_unknown') if mapped == 'error' else None,
+    )
+
+
+def aave_supply_tick(ctx, *, request, operation_key, data_ready, decision):
+    if ctx.mode != 'live':
+        return ctx.result.hold(reason='Aave execution gate closed',
+                               metadata={'financial_execution_allowed': False, 'funds_sent': False})
+    execution_allowed = data_ready is True and decision is True
+    required = ('wallet_id', 'chain', 'asset', 'amount')
+    if (not isinstance(request, dict) or any(not request.get(key) for key in required)
+            or request.get('kind') not in {'lend_supply', 'lend_withdraw'}
+            or request.get('component_id') != 'builtin:aave'
+            or request.get('protocol') != 'aave_v3'
+            or not isinstance(operation_key, str) or not operation_key or len(operation_key) > 200):
+        return ctx.result.error(message='Explicit Aave resource/request binding required', kind='resource_binding')
+    key = 'aave_supply_action'
+    saved = ctx.state.get(key)
+    if saved:
+        if saved['operation_key'] == operation_key and saved['request'] != request:
+            return ctx.result.error(message='Aave operation key reused with changed request', kind='resource_binding')
+        if not saved.get('action_id'):
+            return ctx.result.error(message='Recover original Aave prepare before retry', kind='execution_unknown',
+                                    metadata={'financial_action': saved})
+        receipt = ctx.financial.get(saved['action_id'])
+        if (execution_allowed and saved['operation_key'] == operation_key
+                and receipt.get('state') == 'prepared'):
+            # The SDK rechecks producer/run, quote, permissions and approval.
+            return financial_result(ctx, ctx.financial.execute(
+                saved['action_id'], quote_hash=receipt['quote_hash']))
+        if receipt.get('state') in {'submitted', 'confirming', 'unconfirmed', 'needs_recovery'}:
+            receipt = ctx.financial.reconcile(saved['action_id'])
+        if (not execution_allowed or saved['operation_key'] == operation_key
+                or receipt.get('state') not in {'confirmed', 'rejected', 'failed_before_submission', 'discarded'}):
+            return financial_result(ctx, receipt)
+    if not execution_allowed:
+        return ctx.result.hold(reason='Aave execution gate closed',
+                               metadata={'financial_execution_allowed': False, 'funds_sent': False})
+    account = ctx.financial.account_state(request)
+    if account.get('health') != 'ok':
+        return ctx.result.error(message='Aave account state unavailable or stale', kind='data_error',
+                                metadata={'account_state': account})
+    saved = {'operation_key': operation_key, 'request': request, 'action_id': None}
+    ctx.state.set(key, saved)  # An interrupted prepare must not mint another key.
+    receipt = ctx.financial.prepare(request, client_request_id=operation_key)
+    ctx.state.set(key, {**saved, 'action_id': receipt['action_id']})
+    if receipt.get('state') == 'prepared':
+        receipt = ctx.financial.execute(receipt['action_id'], quote_hash=receipt['quote_hash'])
+    return financial_result(ctx, receipt)

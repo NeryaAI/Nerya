@@ -5,9 +5,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 import hashlib
 import json
+import re
 import threading
-from typing import Any
-from ..core.redaction import redact_display_dict
+from typing import Any, Callable
+from ..core.redaction import redact_public_record
 from ..core.time import now_iso
 from ..core.atomic_write import atomic_write_text
 from ..security.prompt_injection import wrap_untrusted
@@ -17,7 +18,10 @@ from .source_config import dimensions, is_matrix, validate_source
 def safe_data(value: Any) -> Any:
     # Reject unserializable/non-finite data, rather than inventing a string.
     copy = json.loads(json.dumps(value, ensure_ascii=False, allow_nan=False))
-    return redact_display_dict({"value": copy}).get("value")
+    return redact_public_record({"value": copy}, identity_fields=frozenset({
+        "sha256", "rows_sha256", "returned_rows_sha256", "underlying_tokens",
+        "pool_id", "token0", "token1",
+    })).get("value")
 
 
 def configured_sources(raw: Any) -> list[dict[str, Any]]:
@@ -38,6 +42,9 @@ class StrategyInputContext:
     markets: tuple[str, ...]
     run_id: str
     clock: Any = None
+    # Only the runtime builder supplies this audited public reader. Historical
+    # contexts deliberately leave it unset and may publish prepared snapshots.
+    _data_api_reader: Callable[[str, str, dict[str, Any]], Any] | None = field(default=None, repr=False)
     _values: dict[str, Any] = field(default_factory=dict, init=False)
     _lock: Any = field(default_factory=threading.RLock, init=False, repr=False)
 
@@ -80,6 +87,10 @@ class StrategyInputContext:
         Plural source settings return market_series/v1. Scalar settings retain
         the old list/dict shape. Selection never silently picks the first item.
         """
+        if market is not None or timeframe is not None:
+            preset = next((p for p in configured_sources(self.sources) if str(p.get("id")) == source_id), {})
+            if preset.get("provider") == "data_api":
+                raise ValueError("data_api source selection belongs in its declared args, not market/timeframe selectors")
         value = self._read_source(source_id)
         if market is None and timeframe is None:
             return value
@@ -120,6 +131,8 @@ class StrategyInputContext:
             validate_source(preset)
             provider = preset.get("provider", "runtime.market")
             capability = preset.get("capability", "candles")
+            if provider == "data_api":
+                return self._read_data_api_source(source_id, preset)
             if provider not in {"runtime.market", "runtime.news"}:
                 raise ValueError(f"source {source_id}: publish its actual provider output before dispatch; unsupported automatic reader {provider!r}")
             if provider == "runtime.news":
@@ -159,6 +172,42 @@ class StrategyInputContext:
                 value = fetch(selected[0], frames[0]) if len(selected) == 1 else {m: fetch(m, frames[0]) for m in selected}
             self.publish(key, value, source=f"data_source:{source_id}")
             return deepcopy(value)
+
+    def _read_data_api_source(self, source_id: str, preset: dict[str, Any]) -> Any:
+        """Called under the run lock; cache failures as well as bounded results."""
+        key = f"source:{source_id}"
+        request = deepcopy(preset)
+        try:
+            if self._data_api_reader is None:
+                raise ValueError(f"source {source_id}: data_api unavailable; no host read-only producer; publish {key!r} before reading in historical contexts")
+            from ..data_api.registry import compact_data_result
+
+            raw = self._data_api_reader(request["provider_id"], request["action"], deepcopy(request["args"]))
+            if not isinstance(raw, dict) or not isinstance(raw.get("rows"), list) or len(raw["rows"]) > 10_000:
+                raise ValueError("data_api input producer must return a bounded table")
+            envelope = raw.get("_envelope")
+            sources = envelope.get("sources") if isinstance(envelope, dict) else None
+            if (not isinstance(sources, list) or not 1 <= len(sources) <= 8
+                    or any(not isinstance(source, dict) or not isinstance(source.get("sha256"), str)
+                           or not re.fullmatch(r"[0-9a-f]{64}", source["sha256"]) for source in sources)):
+                raise ValueError("data_api input producer must retain its provenance envelope and source hashes")
+            # Bound the producer payload before projection/redaction can hide
+            # oversized or non-finite data in rows outside the selected limit.
+            if len(json.dumps(raw, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 4_000_000:
+                raise ValueError("data_api input exceeds 4 MB")
+            value = compact_data_result(request["provider_id"], request["action"], raw,
+                                        limit=request.get("limit", 100))
+            if len(json.dumps(value, ensure_ascii=False, allow_nan=False).encode("utf-8")) > 4_000_000:
+                raise ValueError("data_api input exceeds 4 MB after compaction")
+            self.publish(key, value, source=f"data_source:{source_id}")
+        except Exception as exc:
+            self.publish(key, None, source=f"data_source:{source_id}")
+            self._values[key]["errors"] = safe_data([f"{type(exc).__name__}: {exc}"])
+            raise
+        finally:
+            if key in self._values:
+                self._values[key]["request"] = safe_data(request)
+        return self.read(key)
 
 
 def collect_task_context(task: Any, ctx: Any, configuration: dict[str, Any]) -> None:

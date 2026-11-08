@@ -9,10 +9,12 @@
  */
 
 import { Children, ReactNode, useState } from "react";
+import { useTranslations } from "next-intl";
 import { CheckIcon, CopyIcon, ChevronRightIcon } from "../../icons";
 
 export function CopyButton({ text }: { text: string }) {
   const [copied, setCopied] = useState(false);
+  const tCommon = useTranslations("common"), tChat = useTranslations("chat");
   if (!text) return null;
   return (
     <button
@@ -26,8 +28,8 @@ export function CopyButton({ text }: { text: string }) {
         }
       }}
       className="inline-flex h-7 w-7 items-center justify-center rounded-md border border-brand-500/20 text-ink-400 hover:text-white hover:border-brand-500/40 transition-colors"
-      title={copied ? "Copied" : "Copy"}
-      aria-label={copied ? "Copied" : "Copy"}
+      title={copied ? tChat("copied") : tCommon("copy")}
+      aria-label={copied ? tChat("copied") : tCommon("copy")}
     >
       {copied ? <CheckIcon size={14} /> : <CopyIcon size={14} />}
     </button>

@@ -436,6 +436,8 @@ class ToolBatchPhase:
         executable_indices: list[int] = []
         pending_writes: dict[str, int] = {}
         duplicate_writes: dict[int, int] = {}
+        dedupe_contexts: dict[int, str] = {}
+        interaction_deferred_indices: set[int] = set()
         repeated_loop_abort = False
         batch_budget_calls = 0
 
@@ -444,6 +446,7 @@ class ToolBatchPhase:
             # A question is a control boundary: no sibling action may race ahead
             # of the user's answer, including actions emitted in the same batch.
             if interaction is not None and call.id != interaction.id:
+                interaction_deferred_indices.add(index)
                 prepared_results[index] = ToolResult.from_error(tool_use_id=call.id,name=call.name,
                     error=ToolError(kind=ToolErrorKind.ABORTED,message="Not started: waiting for user interaction",retryable=False))
                 continue
@@ -468,6 +471,18 @@ class ToolBatchPhase:
                 continue
             fingerprint = tool_call_fingerprint(call)
             prior_result = state.tool_result_by_fingerprint.get(fingerprint)
+            descriptor = self.registry.find(call.name)
+            if descriptor and descriptor.dedupe_context:
+                try:
+                    context = descriptor.dedupe_context(call, prior_result)
+                except Exception:
+                    context = None  # Revision lookup failure never relaxes replay guards.
+                if context is not None:
+                    dedupe_contexts[index] = context
+                    if (prior_result is not None
+                            and not (prior_result.error and prior_result.error.detail.get("execution_state") == "unknown")
+                            and prior_result.metadata.get("dedupe_context") != context):
+                        prior_result = None
             if _tool_name_is_read_only(call.name, self.registry) and any(
                 not _tool_name_is_read_only(pending.name, self.registry) for pending in executable_calls
             ):
@@ -530,6 +545,8 @@ class ToolBatchPhase:
                 for call in executable_calls
             ]
         for index, result in zip(executable_indices, paired_results):
+            if index in dedupe_contexts:
+                result.metadata["dedupe_context"] = dedupe_contexts[index]
             prepared_results[index] = result
             if result.error and result.error.detail.get("execution_state") == "unknown":
                 state.checkpointed_fingerprints.add(tool_call_fingerprint(calls[index]))
@@ -606,6 +623,10 @@ class ToolBatchPhase:
                         completed_required_action_names.add(result.name)
                     state.required_next_tool_names.discard(result.name)
 
+            # Retain deferred results in the transcript, but they never ran
+            # and must not suppress the exact call after the user's answer.
+            if index in interaction_deferred_indices:
+                continue
             fingerprint = tool_call_fingerprint(call)
             if _is_fresh_status_poll(call, self.registry) and index in executable_indices:
                 prior = state.tool_result_by_fingerprint.get(fingerprint)

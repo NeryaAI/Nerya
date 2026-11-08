@@ -21,7 +21,7 @@ const originalCall = client.callApi;
 beforeEach(() => {
   identity.setWorkspaceIdentity(null);
   global.sessionStorage = storage(); global.localStorage = storage();
-  global.window = { sessionStorage, localStorage, dispatchEvent() {}, addEventListener() {}, removeEventListener() {} };
+  global.window = Object.assign(new EventTarget(), { sessionStorage, localStorage });
   global.document = { addEventListener() {}, removeEventListener() {} };
   client.callApi = () => { throw Error('No real network is allowed'); };
 });
@@ -131,6 +131,52 @@ test('durable storage retains settings-only rows and strips attachment bodies', 
   identity.setWorkspaceIdentity('B');
   assert.deepEqual(await durable.savedDrafts('A', 'same'), []);
   assert.equal(durable.safeDraft({ text: '', attachments: [{ ...file, text: 'private', data_url: 'data:body' }] }).attachments[0].data_url, undefined);
+});
+
+test('draft recovery offers content only without changing stored drafts or the active draft', async () => {
+  identity.setWorkspaceIdentity('A');
+  const current = { text: 'active draft', attachments: [file], settings, revision: 1 };
+  const row = (key, draft, windowId = key) => ({ key, workspace: 'A', scope: 'same', windowId, updatedAt: 1, draft });
+  const rows = [
+    row('settings', { text: '', attachments: [], settings }),
+    row('empty', { text: '', attachments: [] }),
+    row('whitespace', { text: ' \n\t', attachments: [], settings }),
+    row('text', { text: '  unfinished prompt  ', attachments: [], settings }),
+    row('attachment', { text: '', attachments: [file], settings }),
+    row('own', current, 'current-window'),
+  ];
+  const stored = JSON.stringify({ rows, current });
+  let cursor = 0, slots = [], effects = [], cleanups = [];
+  const hooks = {
+    useState(initial) { const i = cursor++; if (!(i in slots)) slots[i] = initial;
+      return [slots[i], value => { slots[i] = value; }]; },
+    useRef(value) { const i = cursor++; return slots[i] ??= { current: value }; },
+    useCallback: fn => fn,
+    useEffect(fn, deps) { const i = cursor++; const old = slots[i];
+      if (!old || deps.some((value, j) => value !== old[j])) { slots[i] = deps; effects.push(fn); } },
+  };
+  const filename = path.resolve(__dirname, '../components/chat/useChatDraft.ts');
+  const m = new Module(filename, module); m.filename = filename; m.paths = module.paths;
+  m.require = name => name === 'react' ? hooks : name.endsWith('/workspaceIdentity')
+    ? { ...identity, useWorkspaceIdentity: () => identity.getWorkspaceIdentity() }
+    : name.endsWith('/chatDraft') ? { ...drafts, readChatDraft: () => current,
+      writeChatDraft: () => assert.fail('recovery discovery must not overwrite a draft') }
+    : name.endsWith('/durableDrafts') ? { draftWindowId: () => 'current-window', savedDrafts: async () => rows,
+      saveDurableDraft: () => assert.fail('recovery discovery must not write storage') }
+    : Module.createRequire(filename)(name);
+  m._compile(ts.transpileModule(fs.readFileSync(filename, 'utf8'), { compilerOptions }).outputText, filename);
+  const render = () => { cursor = 0; const result = m.exports.useChatDraft('same');
+    const work = effects; effects = []; for (const effect of work) cleanups.push(effect()); return result; };
+  try {
+    render();
+    await new Promise(resolve => setImmediate(resolve));
+    const result = render();
+    assert.deepEqual(result.recovery, [rows[3], rows[4]]);
+    assert.equal(result.text, current.text);
+    assert.deepEqual(result.attachments, current.attachments);
+    assert.deepEqual(result.settings, settings);
+    assert.equal(JSON.stringify({ rows, current }), stored, 'filtering must preserve every stored field');
+  } finally { for (const cleanup of cleanups) cleanup?.(); }
 });
 
 test('home handoff carries settings and artifact references; unknown identity cannot consume it', () => {
@@ -253,6 +299,189 @@ function observerFixture() {
     dispose() { for (const cleanup of cleanups.values()) cleanup?.(); },
   };
 }
+
+test('a healthy pending POST is not exposed as delivery unconfirmed before its receipt', async () => {
+  identity.setWorkspaceIdentity('A');
+  const calls = [];
+  client.callApi = (path, options) => new Promise((resolve, reject) => calls.push({ path, options, resolve, reject }));
+  const hook = observerFixture();
+  let sent;
+  try {
+    hook.render();
+    calls[0].resolve({ ok: true, commands: [], queue: { paused: false, revision: 1 } });
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hook.render().connection, 'online');
+    sent = commands.submitCommand('same', 'send', { payload: { text: 'BTC/USDT 1h, 30 day backtest, no trading' } });
+    const durable = commands.pendingCommands('same')[0];
+    assert.ok(durable, 'persist the original key before sending for crash recovery');
+    assert.deepEqual(hook.render().pending, [], 'an in-flight POST is submitting, not delivery unconfirmed');
+    calls[1].resolve({ ok: true, command: { command_id: durable.command_id, session_id: 'same', state: 'running' } });
+    await sent;
+    assert.deepEqual(hook.render().pending, []);
+    assert.deepEqual(commands.pendingCommands('same'), []);
+  } finally {
+    if (sent) {
+      const request = calls.find(call => call.options.method === 'POST');
+      request.resolve({ ok: true, command: { command_id: request.options.body.command_id, session_id: 'same' } });
+      await sent;
+    }
+    hook.dispose();
+  }
+});
+
+for (const status of [404, 503]) test(`a fresh command snapshot stays online while stream events return ${status}`, async () => {
+  identity.setWorkspaceIdentity('A');
+  const command = { command_id: 'accepted', session_id: 'same', kind: 'send', state: 'running', revision: 1 };
+  let failEvents = true;
+  const cursors = [];
+  client.callApi = async path => {
+    if (path.startsWith('/agent/commands/events?')) {
+      cursors.push(new URL(path, 'http://fixture').searchParams.get('after_seq'));
+      if (failEvents) throw new client.ApiError('events not ready', status, { error: 'events_unavailable' });
+      return { ok: true, events: [{ kind: 'message.delta', seq: 1, text: 'Accepted' }], cursor: 1, has_more: false };
+    }
+    return { ok: true, commands: [command], queue: { paused: false, revision: 1 } };
+  };
+  const hook = observerFixture();
+  try {
+    hook.render();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hook.render().connection, 'online', 'event hydration failure is not a command API outage');
+    assert.ok(hook.projected.some(([row]) => row.command_id === 'accepted' && row.state === 'running'));
+    failEvents = false;
+    hook.render().refresh();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(hook.projected.some(([, events]) => events.some(event => event.seq === 1)));
+    assert.deepEqual(cursors, ['0', '0'], 'retry from the durable cursor after event hydration fails');
+  } finally { hook.dispose(); }
+});
+
+for (const failure of ['network', 408, 503, 'invalid receipt']) test(`unknown ${failure} delivery retains recovery and the original key without resending`, async () => {
+  identity.setWorkspaceIdentity('A');
+  let finishPost, accepted;
+  const posts = [];
+  client.callApi = async (path, options) => {
+    if (options.method === 'POST') {
+      posts.push(options.body);
+      return new Promise((resolve, reject) => { finishPost = () => {
+        if (failure === 'invalid receipt') resolve({ ok: true, command: { command_id: 'different', session_id: 'same' } });
+        else reject(typeof failure === 'number' ? new client.ApiError('uncertain delivery', failure, {}) : new TypeError('Failed to fetch'));
+      }; });
+    }
+    return { ok: true, commands: accepted ? [accepted] : [], queue: { paused: false, revision: 1 } };
+  };
+  const hook = observerFixture();
+  try {
+    hook.render();
+    await new Promise(resolve => setImmediate(resolve));
+    const sent = commands.submitCommand('same', 'send', { payload: { text: 'Keep this request' } });
+    const durable = commands.pendingCommands('same')[0];
+    assert.deepEqual(hook.render().pending, []);
+    finishPost();
+    await assert.rejects(sent, error => error.code === 'delivery_unconfirmed' && error.uncertain);
+    assert.deepEqual(hook.render().pending, [durable]);
+    hook.render().refresh();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(hook.render().pending, [durable], 'absence from a snapshot is not a rejection');
+    accepted = { command_id: durable.command_id, session_id: 'same', kind: 'send', state: 'queued', revision: 1 };
+    hook.render().refresh();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(hook.render().pending, []);
+    assert.deepEqual(commands.pendingCommands('same'), []);
+    assert.equal(posts.length, 1, 'reconciliation must never auto-resend');
+    assert.equal(posts[0].command_id, durable.command_id);
+  } finally { hook.dispose(); }
+});
+
+test('restored pending records stay visible and an explicit resend preserves the original key', async () => {
+  identity.setWorkspaceIdentity('A');
+  const durable = pending('A', 'restore');
+  localStorage.setItem(identity.workspaceStorageKey('nerya.chat.pending-command.v3:', 'A', durable.command_id), JSON.stringify(durable));
+  const posts = [];
+  client.callApi = async (path, options) => {
+    if (options.method === 'POST') {
+      posts.push(options.body);
+      return { ok: true, command: { command_id: durable.command_id, session_id: 'same', state: 'queued' } };
+    }
+    if (path.includes('command_id=')) throw new client.ApiError('not found', 404, {});
+    return { ok: true, commands: [], queue: { paused: false, revision: 1 } };
+  };
+  const hook = observerFixture();
+  try {
+    hook.render();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(hook.render().pending, [durable]);
+    await assert.rejects(hook.render().recover(durable), error => error.status === 404);
+    assert.equal(posts.length, 0);
+    assert.deepEqual(hook.render().pending, [durable]);
+    await hook.render().recover(durable, true);
+    assert.deepEqual(posts, [durable]);
+    assert.deepEqual(hook.render().pending, []);
+  } finally { hook.dispose(); }
+});
+
+test('a failed result fetch keeps terminal admission and does not starve another command', async () => {
+  identity.setWorkspaceIdentity('A');
+  const terminal = { command_id: 'done', session_id: 'same', kind: 'send', state: 'succeeded', revision: 2, has_result: true };
+  const running = { ...terminal, command_id: 'next', state: 'running', has_result: false };
+  let failResult = true;
+  client.callApi = async path => {
+    if (path.includes('/events?')) return { ok: true, events: [], cursor: 0, has_more: false };
+    if (path.includes('command_id=')) {
+      if (failResult) throw new TypeError('Failed to fetch');
+      return { ok: true, command: { ...terminal, result: { turn_id: 'turn', final_text: 'Done' } } };
+    }
+    return { ok: true, commands: [terminal, running], queue: { paused: false, revision: 1 } };
+  };
+  const hook = observerFixture();
+  try {
+    hook.render();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hook.render().connection, 'online');
+    assert.deepEqual(hook.projected.map(([row]) => row.command_id), ['done', 'next']);
+    failResult = false;
+    hook.render().refresh();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.ok(hook.projected.some(([row]) => row.result?.final_text === 'Done'));
+  } finally { hook.dispose(); }
+});
+
+test('a failed later event page never advances past unprojected events', async () => {
+  identity.setWorkspaceIdentity('A');
+  const command = { command_id: 'paged', session_id: 'same', kind: 'send', state: 'running', revision: 1 };
+  const cursors = [];
+  let failPage = true;
+  client.callApi = async path => {
+    if (!path.includes('/events?')) return { ok: true, commands: [command], queue: { paused: false, revision: 1 } };
+    const after = Number(new URL(path, 'http://fixture').searchParams.get('after_seq'));
+    cursors.push(after);
+    if (after === 1 && failPage) throw new TypeError('Failed to fetch');
+    return { ok: true, events: [{ kind: 'message.delta', seq: after + 1, text: String(after + 1) }], cursor: after + 1, has_more: after === 0 };
+  };
+  const hook = observerFixture();
+  try {
+    hook.render();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hook.render().connection, 'online');
+    failPage = false;
+    hook.render().refresh();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(hook.projected.flatMap(([, events]) => events.map(event => event.seq)), [1, 2]);
+    assert.deepEqual(cursors, [0, 1, 0, 1]);
+  } finally { hook.dispose(); }
+});
+
+for (const status of [404, 503]) test(`actual snapshot failure ${status} still reports connection unavailability`, async () => {
+  identity.setWorkspaceIdentity('A');
+  client.callApi = async () => { throw new client.ApiError('snapshot unavailable', status, {}); };
+  const hook = observerFixture();
+  try {
+    hook.render();
+    await new Promise(resolve => setImmediate(resolve));
+    assert.equal(hook.render().connection, status === 404 ? 'incompatible' : 'offline');
+    assert.equal(hook.render().data, null);
+  } finally { hook.dispose(); }
+});
 
 test('command observer waits for identity, discards old async snapshot, and refuses foreign recovery', async () => {
   const calls = [];

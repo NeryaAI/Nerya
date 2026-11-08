@@ -158,10 +158,16 @@ def ingest_research(
     title: str,
     body: str,
     tags: Optional[list[str]] = None,
+    source_locator: str = "",
+    as_of: str = "",
+    retrieved_at: str = "",
 ) -> EvidenceDoc:
     return store.ingest(
         source_type="research",
         source_id=f"research:{provider}:{artifact_id}",
+        source_locator=source_locator,
+        as_of=as_of,
+        retrieved_at=retrieved_at,
         title=title,
         summary=title,
         body=body,

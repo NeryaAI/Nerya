@@ -11,9 +11,17 @@ from .engine import BacktestResult
 
 def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapshot: dict[str, Any], outputs: dict[str, Path] | None = None) -> str:
     outputs = outputs or {}
+    # The public report needs modes, not potentially private stub responses.
+    config_snapshot = {**config_snapshot, "mock_surfaces": {
+        name: {**surface, "payload": "[omitted]"} if "payload" in surface else surface
+        for name, surface in config_snapshot.get("mock_surfaces", {}).items()
+    }}
+    pool_simulation = (metrics.get("replay") or {}).get("scope") == "historical_pool_price_simulation"
+    currency = (metrics.get("accounting_currency") or "quote unit not recorded") if pool_simulation else None
+    initial = f"{metrics.get('initial_capital_usd'):,.2f} {currency}" if pool_simulation else f"${metrics.get('initial_capital_usd'):,.2f}"
     lines = [
         f"# Backtest - {result.strategy_id} - {metrics.get('start_utc')} -> {metrics.get('end_utc')}",
-        f"> {metrics.get('backtest_days', 0):.2f} days · {', '.join(metrics.get('markets', []))} · {metrics.get('tf')} · initial ${metrics.get('initial_capital_usd'):,.2f}",
+        f"> {metrics.get('backtest_days', 0):.2f} days · {', '.join(metrics.get('markets', []))} · {metrics.get('tf')} · initial {initial}",
         "",
         "## Verdict",
         str(metrics.get("verdict") or "UNKNOWN"),
@@ -24,6 +32,17 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
         "| Metric | Value |",
         "|---|---:|",
     ]
+    if pool_simulation:
+        lines[8:8] = [
+            "## Pool-price simulation provenance",
+            f"Accounting currency: {currency}. Legacy `*_usd` engineering fields contain quote-unit amounts; no USD conversion is implied. "
+            "The execution target and observed pool/token/quote source are distinct. Fills and costs are modeled assumptions, not historical target-venue routes, fees or fills.",
+            "Producer `provenance.price_simulation` (target, source quote and assumptions as recorded):",
+            "```yaml",
+            yaml_io.dumps((metrics.get("provenance") or {}).get("price_simulation") or {"status": "not recorded"}).strip(),
+            "```",
+            "",
+        ]
     if metrics.get("recommended_coverage_ok") is False:
         lines[8:8] = [
             "## Coverage note",
@@ -33,6 +52,20 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
             ),
             "",
         ]
+    if metrics.get("performance_evidence") is False:
+        lines[8:8] = [
+            "## Evidence limitation",
+            "`performance_evidence: false`. This run is not trading-performance evidence. "
+            "Returns, fills and verdict below describe the replay simulation only; "
+            "they do not establish real AI performance or authorize bypassing strategy gates.",
+            "",
+        ]
+    if metrics.get("decision_replay"):
+        proof = metrics["decision_replay"]
+        lines[8:8] = ["## Current-model retrospective replay",
+            f"Host-verified decision receipts: {proof.get('decision_count', 0)}. "
+            "The current model was evaluated on historical prefixes; these are not decisions recorded at that historical time.",
+            *["- " + str(value) for value in proof.get("limitations", [])], ""]
     for key in [
         "total_return_pct",
         "annualized_return_pct",
@@ -47,6 +80,12 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
     ]:
         lines.append(f"| {key} | {_fmt_metric(key, metrics.get(key))} |")
     evidence = metrics.get("replay") or {}
+    if evidence.get("mock_surface_calls"):
+        lines.extend(["", "## Mock surface calls",
+                      "Only actual calls are counted. Stub payloads are simulated inputs, not historical model/news evidence.",
+                      "| Surface | Mode | Count |", "|---|---|---:|"])
+        for call in evidence["mock_surface_calls"]:
+            lines.append(f"| {call['surface']} | {call['mode']} | {call['count']} |")
     lines.extend(["", "## Order execution evidence", "A strategy status of ok is not an order or a fill.",
                   "| Stage | Count |", "|---|---:|"])
     for key in ("order_attempts", "orders_submitted", "orders_filled", "orders_rejected", "sdk_errors", "forced_closes", "ok_without_orders"):
@@ -78,15 +117,15 @@ def render_report(metrics: dict[str, Any], result: BacktestResult, config_snapsh
         row["notional"] += float(t.get("notional", 0.0) or 0.0)
         row["fees"] += float(t.get("fee", 0.0) or 0.0)
     for reason, row in by_reason.items():
-        lines.append(f"| {reason} | {int(row['n'])} | {_usd(row['notional'])} | {_usd(row['fees'])} |")
+        lines.append(f"| {reason} | {int(row['n'])} | {_usd(row['notional'], currency)} | {_usd(row['fees'], currency)} |")
     if not by_reason:
         lines.append("| no_trades | 0 | 0 | 0 |")
     lines.extend(["", "## Top 5 winners / losers"])
     closed = [t for t in result.trades if "pnl" in t]
     for t in sorted(closed, key=lambda r: float(r.get("pnl", 0.0)), reverse=True)[:5]:
-        lines.append(f"- winner {t.get('market')} {t.get('ts')}: {_usd(t.get('pnl'))} ({_pct(t.get('pnl_pct'))})")
+        lines.append(f"- winner {t.get('market')} {t.get('ts')}: {_usd(t.get('pnl'), currency)} ({_pct(t.get('pnl_pct'))})")
     for t in sorted(closed, key=lambda r: float(r.get("pnl", 0.0)))[:5]:
-        lines.append(f"- loser {t.get('market')} {t.get('ts')}: {_usd(t.get('pnl'))} ({_pct(t.get('pnl_pct'))})")
+        lines.append(f"- loser {t.get('market')} {t.get('ts')}: {_usd(t.get('pnl'), currency)} ({_pct(t.get('pnl_pct'))})")
     lines.extend(["", "## Drawdown episodes (>3%)"])
     for ep in metrics.get("drawdown_episodes", [])[:10]:
         lines.append(f"- {ep.get('peak_ts')} -> {ep.get('trough_ts')} dd={_pct(ep.get('dd_pct'))} recovery={ep.get('recovery_ts')}")
@@ -120,13 +159,14 @@ def _pct(value: Any) -> str:
         return f"{value}%"
 
 
-def _usd(value: Any) -> str:
+def _usd(value: Any, currency: str | None = None) -> str:
     if value is None:
         return "null"
     try:
-        return f"${float(value):.4f}"
+        amount = f"{float(value):.4f}"
     except Exception:
-        return f"${value}"
+        amount = str(value)
+    return f"{amount} {currency}" if currency else f"${amount}"
 
 
 def _fmt(value: Any) -> str:

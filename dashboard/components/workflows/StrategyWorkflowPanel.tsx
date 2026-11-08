@@ -15,6 +15,7 @@ import { WorkflowVerification } from "./WorkflowVerification";
 import { WorkflowHelp } from "./WorkflowNative";
 import { StrategyExportButton } from "./StrategyTransfer";
 import { WorkflowEditorDialog } from "./WorkflowEditorDialog";
+import { WorkflowSourceRecovery } from "./WorkflowSourceRecovery";
 import { compactWorkflow } from "../../lib/workflowProjection";
 import { sourceTypeLabel } from "../../lib/workflowSources";
 import sourceUi from "./WorkflowSourceSettings.module.css";
@@ -265,6 +266,8 @@ export function StrategyWorkflowPanel({ strategyId, proposalId, defaultView = "s
     finally { setBusy(false); }
   }
   if (!graph || !data) return <section className={ui.panel} data-testid="strategy-workflow-panel" aria-busy={loading}><header className={ui.header}><div className={ui.title}><h2>{renderTitle ? renderTitle(strategyId) : strategyId}</h2></div><div className={ui.headerActions}>{headerActions}</div></header>{loading ? <div className={styles.loading} role="status">{t("copy.components_workflows_StrategyWorkflowPanel.030")}</div> : <div className={styles.empty} role="alert"><p>{error || t("copy.components_workflows_StrategyWorkflowPanel.031")}</p><button className={styles.secondaryButton} onClick={() => void load()}>{t("copy.components_workflows_StrategyWorkflowPanel.032")}</button></div>}</section>;
+  if (data.recovery) return <WorkflowSourceRecovery key={data.revision} data={data} onDirtyChange={setAddDraftDirty}
+    onSaved={value => { hydrate(value, false); onSaved?.(value); }} />;
   return <section ref={panelRef} className={embedded ? ui.embeddedPanel : ui.panel} data-testid="strategy-workflow-panel" aria-busy={busy || loading} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === "s") { event.preventDefault(); void reviewChanges(); } }}>
     <header className={ui.header}><div className={ui.title}><h2>{renderTitle ? renderTitle(String(data.manifest.title || strategyId)) : String(data.manifest.title || strategyId)}</h2>{data.manifest.description ? <p>{String(data.manifest.description)}</p> : null}</div><div className={ui.headerActions}><ModePill mode={String(data.manifest.mode || "paper")} /><span className={ui.state}>{stateLabel(data.source.state, t)}</span>{headerActions}</div></header>
     <StrategyVersionContext workflow={data} dirty={dirty} />

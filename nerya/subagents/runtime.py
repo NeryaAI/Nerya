@@ -22,7 +22,7 @@ from __future__ import annotations
 import json
 import math
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any, Literal
 
 from ..core.config import Config
@@ -348,6 +348,7 @@ class SubAgentRuntime:
     # Required execution dependencies; no direct-handler or second-engine fallback.
     tool_registry: Any
     tool_executor: Any
+    parent_model_selection: dict[str, Any] = field(default_factory=dict)
 
     # ---------------------------------------------------------------- config
     def _execution_limit(
@@ -368,13 +369,16 @@ class SubAgentRuntime:
     def _max_iterations(self, spec: SubAgentSpec | None = None) -> int:
         # The shared Agent loop uses zero for an inherited unlimited budget.
         # Rejecting it here broke strategy teams under the default main config.
-        return int(self._execution_limit(spec, "max_iterations", 60, minimum=0))
+        default = int(self.config.get("agent.native.max_iterations", 0) or 0)
+        return int(self._execution_limit(spec, "max_iterations", default))
 
     def _max_skill_calls(self, spec: SubAgentSpec | None = None) -> int:
-        return int(self._execution_limit(spec, "max_skill_calls", 120))
+        default = int(self.config.get("agent.native.max_total_tool_calls", 0) or 0)
+        return int(self._execution_limit(spec, "max_skill_calls", default))
 
     def _max_wall_seconds(self, spec: SubAgentSpec | None = None) -> float:
-        return float(self._execution_limit(spec, "max_wall_seconds", 600.0))
+        default = float(self.config.get("agent.native.max_wall_seconds", 0.0) or 0.0)
+        return float(self._execution_limit(spec, "max_wall_seconds", default))
 
     def _llm_max_attempts(self, spec: SubAgentSpec | None = None) -> int:
         return int(self._execution_limit(spec, "llm_max_attempts", 2, minimum=1))
@@ -424,6 +428,22 @@ class SubAgentRuntime:
             return None, None
         matched_provider, matched_model = matches[0]
         return matched_provider or None, matched_model or None
+
+    def _model_options(self, spec: SubAgentSpec) -> dict[str, Any]:
+        provider, model = self._model_override(spec)
+        parent = self.parent_model_selection
+        inherited = False
+        if not spec.provider and not spec.model and parent.get("provider") and parent.get("model"):
+            provider, model = self._model_override(replace(
+                spec, provider=parent["provider"], model=parent["model"],
+            ))
+            inherited = bool(provider and model)
+        return {
+            "model_provider": provider,
+            "model_id": model,
+            "reasoning_effort": parent.get("reasoning_effort") if inherited else None,
+            "reasoning_summary": parent.get("reasoning_summary") if inherited else None,
+        }
 
     def _finalization_reserve_seconds(self) -> float:
         return float(self._execution_limit(
@@ -575,8 +595,6 @@ class SubAgentRuntime:
             base_context = self._preloaded_skill_context(spec)
 
         max_calls = self._max_skill_calls(spec)
-        if max_calls <= 0:
-            allowed_native_tools = []
         required_native_tools = list(spec.execution_policy.required_native_tools)
         unavailable = set(required_native_tools) - set(allowed_native_tools)
         if unavailable:
@@ -669,16 +687,12 @@ class SubAgentRuntime:
             runtime="native",
         )
 
-        tier_config = self.config.get(f"llm.tiers.{spec.tier}", {}) or {}
-        if not isinstance(tier_config, dict):
-            tier_config = {}
-        configured_wall = self._max_wall_seconds(spec)
+        configured_wall = self._max_wall_seconds(spec) or None
         if max_wall_seconds is not None:
             supplied_wall = float(max_wall_seconds)
             if not math.isfinite(supplied_wall) or supplied_wall < 0:
                 raise ValueError("max_wall_seconds must be finite and non-negative")
-            configured_wall = min(configured_wall, supplied_wall)
-        model_provider, model_id = self._model_override(spec)
+            configured_wall = min(configured_wall, supplied_wall) if configured_wall is not None else supplied_wall
         tool_metadata = {
             "allowed_skills": list(spec.allowed_skills or []),
             "agent_parent_session_id": session_id,
@@ -695,10 +709,7 @@ class SubAgentRuntime:
             tier=spec.tier,
             task="subagent_analysis",
             caller=f"subagent:{spec.name}",
-            reasoning_effort=str(tier_config.get("reasoning_effort") or "") or None,
-            reasoning_summary=str(tier_config.get("reasoning_summary") or "") or None,
-            model_provider=model_provider,
-            model_id=model_id,
+            **self._model_options(spec),
             session_id=session_id,
             strategy_id=strategy_id,
             trigger_event_id=trigger_event_id,
@@ -706,7 +717,7 @@ class SubAgentRuntime:
             max_total_tool_calls=max_calls,
             wall_time_final_synthesis_seconds=min(
                 self._finalization_reserve_seconds(),
-                max(1.0, configured_wall / 2),
+                max(1.0, configured_wall / 2) if configured_wall is not None else float("inf"),
             ),
             llm_retry_attempts=self._llm_max_attempts(spec),
             max_extra_llm_attempts_per_turn=self._max_extra_llm_attempts(),
@@ -828,6 +839,19 @@ class SubAgentRuntime:
         if outcome.completion_status == "blocked":
             final_output.update(done=False, degraded=True,
                 error_kind=outcome.completion_reason or outcome.stop_reason)
+        completion = {
+            "status": outcome.completion_status,
+            "reason": outcome.completion_reason,
+            "feedback": outcome.completion_feedback,
+        }
+        if final_output.get("done") is False and outcome.completion_status != "blocked":
+            # Use host budget state and typed skipped-call recovery, never model prose.
+            if max_calls > 0 and outcome.tool_calls >= max_calls and any(
+                item.get("error_kind") == "aborted"
+                and item.get("recovery_hint", {}).get("action") == "finish_from_existing_evidence"
+                for item in rejected_actions
+            ):
+                completion.update(reason="max_tool_calls", limit=max_calls, used=outcome.tool_calls)
         signals_used: list[str] = []
         for signal in _coerce_list(
             final_output.get("signals") or final_output.get("signals_used")
@@ -993,11 +1017,7 @@ class SubAgentRuntime:
                 or final_output.get("done") is False else outcome.completion_status
             ),
             "completion_rounds": outcome.completion_rounds,
-            "completion": {
-                "status": outcome.completion_status,
-                "reason": outcome.completion_reason,
-                "feedback": outcome.completion_feedback,
-            },
+            "completion": completion,
         }
 
     def _render_prompt(

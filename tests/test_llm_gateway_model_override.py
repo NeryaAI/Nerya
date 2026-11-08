@@ -102,6 +102,111 @@ def test_messages_call_uses_frontend_model_override_without_mutating_tier(tmp_pa
     assert cfg.get("llm.tiers")["medium"]["model"] == "medium-model"
 
 
+def test_cross_tier_model_selection_preserves_task_admission(tmp_path):
+    cfg = _config(tmp_path, {
+        "medium": {"provider": "openai", "model": "default-model",
+                   "allowed_tasks": ["agent.loop"], "allowed_classes": ["agent_loop"]},
+        "high": {"provider": "anthropic", "model": "selected-model",
+                 "allowed_tasks": ["script_generation"],
+                 "allowed_classes": ["proposal_generation"], "reasoning_effort": "high"},
+    })
+    route = LLMGateway(cfg)._effective_tier_cfg("medium",
+        provider_override="anthropic", model_override="selected-model")
+    assert route["allowed_tasks"] == ["agent.loop"]
+    assert route["allowed_classes"] == ["agent_loop"]
+    assert route["reasoning_effort"] == "high"
+    data = deepcopy(cfg.data)
+    data["llm"]["tiers"] = {"medium": route}
+    assert LLMGateway(Config(cfg.paths, data)).tier_policy.resolve(
+        "agent.loop", requested_tier="medium", caller_allowed_tiers=None) == "medium"
+
+
+@pytest.mark.parametrize("placement", ["same_tier", "cross_tier", "unlisted"])
+def test_concrete_selection_pins_route_before_key_expansion(monkeypatch, tmp_path, placement):
+    selected = {
+        "provider": "provider-b", "models": ["selected-model", "other-model"],
+        "reasoning_effort": "low",
+    }
+    tiers = {
+        "light": {
+            "routes": [{"provider": "provider-a", "model": "default-model"}],
+            "allowed_tasks": ["agent.loop"], "allowed_classes": ["agent_loop"],
+        },
+    }
+    if placement == "same_tier":
+        tiers["light"]["routes"].append(selected)
+    elif placement == "cross_tier":
+        tiers["high"] = {
+            **selected, "allowed_tasks": ["script_generation"],
+            "allowed_classes": ["proposal_generation"],
+        }
+    cfg = _config(tmp_path, tiers)
+    before = deepcopy(cfg.data)
+    gateway = LLMGateway(cfg)
+    key_routes = []
+
+    def resolve_keys(route):
+        key_routes.append((route["provider"], route["model"]))
+        return ["test-key-1", "test-key-2"]
+
+    monkeypatch.setattr(gateway, "_resolve_provider_keys", resolve_keys)
+    effective = gateway._effective_tier_cfg(
+        "light", provider_override="provider-b", model_override="selected-model",
+    )
+    assert effective["allowed_tasks"] == ["agent.loop"]
+    assert effective["allowed_classes"] == ["agent_loop"]
+    routes = gateway._messages_route_cfgs(
+        "light", provider_override="provider-b", model_override="selected-model",
+    )
+    assert [(route["provider"], route["model"]) for route in routes] == [
+        ("provider-b", "selected-model"), ("provider-b", "selected-model"),
+    ]
+    assert key_routes == [("provider-b", "selected-model")]
+    assert cfg.data == before
+
+
+@pytest.mark.parametrize("selection", ["concrete", "automatic", "provider_only", "model_only"])
+def test_messages_route_failures_respect_concrete_selection(monkeypatch, tmp_path, selection):
+    cfg = _config(tmp_path, {
+        "light": {
+            "routes": [
+                {"provider": "provider-a", "models": ["selected-model", "other-model"]},
+                {"provider": "provider-b", "model": "backup-model"},
+            ],
+            "allowed_tasks": ["agent.loop"], "allowed_classes": ["agent_loop"],
+        },
+    })
+    gateway = LLMGateway(cfg)
+    monkeypatch.setattr(gateway, "_resolve_provider_keys", lambda route: [])
+    selected_error = LLMError("HTTP 429: selected model quota exhausted")
+    backup_error = LLMError("backup model unavailable")
+    attempts = []
+
+    def resolve_backend(tier, *, route_cfg, **kwargs):
+        assert tier == "light"
+        identity = (route_cfg["provider"], route_cfg["model"])
+
+        def backend(request):
+            attempts.append(identity)
+            raise selected_error if identity[1] == "selected-model" else backup_error
+
+        return backend
+
+    monkeypatch.setattr(gateway, "_resolve_messages_backend", resolve_backend)
+    with pytest.raises(LLMError) as caught:
+        gateway.call_messages(
+            task="agent.loop", caller="test", system="test",
+            messages=[{"role": "user", "content": "hello"}], tier="light",
+            model_provider="provider-a" if selection in {"concrete", "provider_only"} else None,
+            model_id="selected-model" if selection in {"concrete", "model_only"} else None,
+        )
+    expected = [("provider-a", "selected-model")]
+    if selection != "concrete":
+        expected += [("provider-a", "other-model"), ("provider-b", "backup-model")]
+    assert attempts == expected
+    assert caught.value is (selected_error if selection == "concrete" else backup_error)
+
+
 def test_prompt_api_mock_provider_requires_explicit_mock_mode(monkeypatch, tmp_path):
     monkeypatch.delenv("NERYA_ALLOW_MOCK_DATA", raising=False)
     monkeypatch.delenv("NERYA_MOCK_MODE", raising=False)

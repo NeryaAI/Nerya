@@ -86,7 +86,7 @@ class DataApiRegistry:
             if tag_set and not tag_set.intersection({_norm(t) for t in spec.tags}):
                 continue
             preview = spec.preview()
-            if query_l and not _matches(preview, query_l):
+            if query_l and not _matches(preview, query_l, provider_scoped=bool(provider_l)):
                 continue
             rows.append(preview)
             if len(rows) >= max_rows:
@@ -141,6 +141,13 @@ class DataApiRegistry:
                 },
             }
 
+        provider_total = sum(
+            1 for (p, _a) in self._actions
+            if p == provider_l
+        ) if provider_l else 0
+        scoped_query_hidden_actions = (
+            provider_l and query_l and not rows and provider_total > 0
+        )
         return {
             "providers": self.providers(),
             "aliases": self.aliases(),
@@ -161,7 +168,12 @@ class DataApiRegistry:
                 "For chain/meme/DEX discovery, inspect both "
                 "provider='wallet' and provider='onchainos' before deciding "
                 "a data source is unavailable."
-            ) if not rows and not requested_provider else "",
+            ) if not rows and not requested_provider else (
+                f"Provider {provider_l!r} has {provider_total} registered "
+                "action(s); the text query filtered all of them out. Retry "
+                "data_api list with a shorter provider-scoped query or without "
+                "a query before concluding the provider is unavailable."
+            ) if scoped_query_hidden_actions else "",
         }
 
     def providers(self) -> list[str]:
@@ -176,9 +188,18 @@ class DataApiRegistry:
         provider_l = _norm(provider)
         return self._aliases.get(provider_l, provider_l)
 
+    def _action_name(self, provider: str, action: str) -> str:
+        name = _norm(action)
+        if (self.resolve_provider(provider), name) in self._actions:
+            return name
+        prefix, dot, local = name.partition(".")
+        if dot and self.resolve_provider(prefix) == self.resolve_provider(provider):
+            return local
+        return name
+
     def schema(self, provider: str, action: str) -> dict[str, Any]:
         provider_l = self.resolve_provider(provider)
-        action_l = _norm(action)
+        action_l = self._action_name(provider, action)
         spec = self._actions.get((provider_l, action_l))
         if spec is not None:
             return {
@@ -199,7 +220,7 @@ class DataApiRegistry:
                 },
                 retryable=False,
             )
-        return adapter.schema(action)
+        return adapter.schema(action_l)
 
     def call(
         self,
@@ -210,7 +231,7 @@ class DataApiRegistry:
         context: DataApiContext,
     ) -> Any:
         provider_l = self.resolve_provider(provider)
-        action_l = _norm(action)
+        action_l = self._action_name(provider, action)
         spec = self._actions.get((provider_l, action_l))
         if spec is not None:
             return spec.handler(context, dict(args or {}))
@@ -228,12 +249,37 @@ class DataApiRegistry:
                 },
                 retryable=False,
             )
-        return adapter.call(action, dict(args or {}), context=context)
+        return adapter.call(action_l, dict(args or {}), context=context)
 
     def _known_provider(self, provider: str) -> bool:
         if provider in self._providers:
             return True
         return any(p == provider for p, _a in self._actions)
+
+    def call_replay_input(
+        self,
+        provider: str,
+        action: str,
+        args: dict[str, Any],
+        *,
+        cancel_token: Any | None = None,
+    ) -> Any:
+        """Only installed, explicitly audited public sources can prepare replay."""
+        spec = self.admit_replay_input(provider, action, args)
+        # No workspace/config/vault context crosses into public preparation.
+        return spec.handler(DataApiContext(cancel_token=cancel_token), dict(args))
+
+    def admit_replay_input(self, provider, action, args):
+        """Use the same admission without acquiring data for an explicit snapshot."""
+        spec = self._actions.get((self.resolve_provider(provider), self._action_name(provider, action)))
+        if spec is None or not spec.replay_input:
+            raise DataApiError("Data action does not support isolated replay inputs",
+                               kind="permission_denied", retryable=False)
+        from ..tools.executor import _validate_against_schema
+        problem = _validate_against_schema(args, spec.input_schema)
+        if problem:
+            raise DataApiError(problem, kind="schema_validation", retryable=False)
+        return spec
 
 
 def compact_data_result(
@@ -335,12 +381,25 @@ def _bounded_int(value: Any, *, default: int, minimum: int, maximum: int) -> int
         return default
 
 
-def _matches(row: dict[str, Any], query: str) -> bool:
+def _matches(row: dict[str, Any], query: str, *, provider_scoped: bool = False) -> bool:
+    search_terms = [str(term).lower() for term in (row.get("search_terms") or [])]
+    if any(term and term in query for term in search_terms):
+        return True
     haystack = " ".join(
         str(row.get(key) or "")
         for key in ("provider", "action", "title", "description", "tags")
     ).lower()
-    return query in haystack
+    if query in haystack:
+        return True
+    # Natural-language requests carry scope around the action name. A single
+    # exact catalog term is enough to discover the action; the action schema
+    # remains authoritative for the actual call. Provider-scoped keyword lists
+    # (e.g. "history pool tick liquidity fee") already constrain the search
+    # space, so any catalog term may match without the unscoped noise guard.
+    terms = [token for token in query.replace("/", "  ").replace("-", "  ").split() if len(token) >= 3]
+    if len(terms) > 2 and not provider_scoped:
+        return False
+    return any(term in haystack for term in terms)
 
 
 def _records(raw: Any) -> list[Any] | None:

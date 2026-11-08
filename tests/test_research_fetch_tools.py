@@ -1028,7 +1028,7 @@ def test_native_registry_exposes_web_research_tools(tmp_path) -> None:
     deps = build_native_tool_deps(
         workspace_root=tmp_path,
         skill_roots=[],
-        config=SimpleNamespace(),
+        config={},
         skills=EmptySkillKernel(),
     )
     register_native_tools(registry, deps)

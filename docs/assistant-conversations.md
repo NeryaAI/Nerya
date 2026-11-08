@@ -47,28 +47,3 @@ Workspace policy remains the permission ceiling. Assistant restrictions apply to
 web, gateway and delegated execution, including memory access. The permission
 engine rechecks the current assistant policy before each tool call so a revoked
 capability cannot continue under the previous turn's cached profile.
-
-## Validation and PR port
-
-The feature was developed against the local preview and then ported onto main
-at `126f2e0`. This PR excludes the local financial and task-workbench refactors.
-Schedule association uses main's existing `ScheduleEntry`, `TriggerAPI` and
-`ScheduledSessionRunner`; it does not require the unpublished task-run SDK.
-
-Run deterministic backend checks from the repository root:
-
-```sh
-python -m pytest -m '' tests/test_assistant_avatar.py tests/test_assistants.py tests/test_assistant_work.py tests/test_scheduled_tasks.py tests/test_gateway_commands_sessions.py -q
-```
-
-From `dashboard`, run the TypeScript and i18n checks. The standalone assistant
-Playwright configuration accepts `NERYA_ASSISTANTS_QA_URL` and an optional
-`NERYA_ASSISTANTS_QA_AUTH_FILE`. Avatar tests create and archive their own profile;
-activity/result scenarios require the isolated QA workspace's persisted task
-fixtures. They do not submit new LLM work. Counts and evidence boundaries are
-recorded in `assistant-acceptance.json`.
-
-Real workspace LLM exercises were performed on the earlier preview branch. The
-clean-main PR port was validated with deterministic backend checks and actual
-browser interactions, without rerunning those LLM requests. Voice and independent
-assistant computers are outside this change.

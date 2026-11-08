@@ -1,4 +1,14 @@
 {
+  "workflowRecovery": {
+    "title": "Repair strategy source",
+    "description": "The manifest cannot be parsed. Inspect the original source and diagnostic below. Saving creates a separate review proposal; it never overwrites or activates this strategy.",
+    "source": "strategy.yml source",
+    "readOnly": "Some package files could not be read safely. Source repair is unavailable until those files are resolved.",
+    "save": "Propose source repair",
+    "saving": "Checking repair…",
+    "discard": "Discard edits",
+    "discardMessage": "Discard this local repair draft and restore the saved source?"
+  },
   "strategyTransfer": {
     "edit": "Edit strategy",
     "import": "Import strategy",
@@ -50,7 +60,7 @@
     "chartLoading": "Loading backtest chart...",
     "chartUnavailable": "Backtest chart is unavailable for this run.",
     "detailEyebrow": "{id} backtest",
-    "detailDescription": "Full equity, benchmark, trade details, a separate instrument K-line canvas, and downloadable artifacts.",
+    "detailDescription": "View recorded charts, metrics, detailed records, and downloadable artifacts (availability varies by run).",
     "equityBenchmarkTitle": "Equity / Benchmark",
     "equityBenchmarkDescription": "Prioritizes the full equity curve. When the artifact has no benchmark series, the page derives a buy-and-hold benchmark from price data.",
     "tradeDetailsTitle": "Trade details",
@@ -447,6 +457,7 @@
     "tickResult": "Manual tick {runId} → {status} ({ms} ms)"
   },
   "strategyProposal": {
+    "currentSourceNeedsValidation": "Current source needs validation",
     "approveAdd": "Approve and add",
     "appliedNotice": "Added strategy {strategy}",
     "blocked": "validation blocked",

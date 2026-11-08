@@ -1,0 +1,121 @@
+"""Pure LP policy. Values are supplied by declared snapshots, never candles.
+
+See references/mainstream-strategies.md LP work for the input contract.
+Wallet NFT inventory is observed exposure; sole strategy claims are checked
+by the installed financial adapter before any exit/collect/rebalance.
+"""
+from risk_rules import number, rebalance_signal
+
+
+def fresh(value, now, age):
+    if not isinstance(value, dict) or value.get('health') != 'ok' or not value.get('source'):
+        raise ValueError('LP attested snapshot required')
+    observed = number(value['as_of'])
+    # StrategyClock has millisecond precision; adapter as_of is fractional seconds.
+    if observed > now + number('.001') or now - observed > age:
+        raise ValueError('LP snapshot stale or future')
+
+
+def decide_lp(*, policy, source, snapshot, account, state, now):
+    """Return decision plus next persistence state; mutate no caller inputs."""
+    now = number(now)
+    age = number(policy['max_age_seconds'], positive=True)
+    persistence = number(policy['persistence_seconds'], positive=True)
+    cooldown = number(policy['cooldown_seconds'], positive=True)
+    multiple = number(policy['cost_multiple'], positive=True)
+    if multiple < 1 or type(policy['enter_when_empty']) is not bool:
+        raise ValueError('Invalid LP policy')
+    for key in ('wallet_id', 'chain', 'protocol', 'pool_id', 'token0', 'token1'):
+        if not isinstance(source[key], str) or not source[key].strip():
+            raise ValueError('Explicit LP source binding required')
+    if (source['token0'] == source['token1']
+            or not isinstance(source['decimals'], list) or len(source['decimals']) != 2
+            or any(type(v) is not int or not 0 <= v <= 255 for v in source['decimals'])
+            or type(source['tick_spacing']) is not int or source['tick_spacing'] <= 0
+            or type(source['fee']) is not int or source['fee'] < 0):
+        raise ValueError('Invalid LP pool units')
+    loss_floor = number(policy['exit_below_principal_usd'])
+    collect_min = number(policy['collect_min_fees_usd'], positive=True)
+    fresh(account, now, age)
+    fresh(snapshot, now, age)
+    binding = dict(account.get('component_binding') or {})
+    # Snapshot publication preserves typed hashes, not untyped long strings.
+    if isinstance(binding.get('revision'), dict):
+        binding['revision'] = binding['revision']['sha256']
+    if (snapshot.get('schema') != 'lp.snapshot.v1'
+            or any(snapshot.get(k) != source[k] for k in ('wallet_id', 'chain', 'protocol', 'pool_id'))
+            or binding != source['component_binding']):
+        raise ValueError('LP snapshot resource/component binding mismatch')
+    if not {'lp_nft_inventory', 'liquidity', 'ranges', 'principal'} <= set(account['coverage']):
+        raise ValueError('LP inventory coverage incomplete')
+    positions = account['positions']
+    if not isinstance(positions, list):
+        raise ValueError('LP positions required')
+    token = source['token_id']
+    matches = [p for p in positions if str(p['token_id']) == str(token)] if token is not None else []
+    if len(matches) > 1 or token is not None and len(matches) != 1:
+        raise ValueError('Configured LP position missing or ambiguous')
+    position = matches[0] if matches else None
+    if position is None and positions:
+        raise ValueError('Explicit NFT selection required for observed inventory')
+    pool = position['pool'] if position else snapshot['pool']
+    if pool['pool_id'] != source['pool_id'] or type(pool['tick']) is not int:
+        raise ValueError('LP pool identity/tick mismatch')
+    # Raw adapter units/orientation are explicit; never infer ETH/WETH or tick
+    # from a price series. Quotes enforce spacing and deployment code identity.
+    tokens = pool.get('underlying_tokens', [pool.get('token0'), pool.get('token1')])
+    if (tokens != [source['token0'], source['token1']]
+            or pool['decimals'] != source['decimals'] or pool['fee'] != source['fee']
+            or pool['tick_spacing'] != source['tick_spacing']):
+        raise ValueError('LP pool token orientation/units mismatch')
+    economics = snapshot['economics']
+    fresh(economics, now, age)
+    if economics['pool_id'] != source['pool_id'] or economics['currency'] != 'USD':
+        raise ValueError('LP fee/gas economics binding mismatch')
+    costs = economics['total_execution_cost_usd']
+    fees = economics['expected_incremental_fees_usd']
+    if costs is not None: number(costs)
+    if fees is not None: number(fees)
+    next_state = dict(state)
+    identity = [source[k] for k in ('wallet_id', 'chain', 'protocol', 'pool_id', 'token_id')]
+    if state.get('identity') != identity:
+        next_state = {'identity': identity, 'last_rebalance': state.get('last_rebalance')}
+    state = next_state
+    for key in ('outside_since', 'last_rebalance'):
+        if state.get(key) is not None and number(state[key]) > now:
+            raise ValueError('LP policy state is in the future')
+    decision = {'action': 'hold', 'reason': 'entry_disabled'}
+    if position is None:
+        next_state['outside_since'] = None
+        if policy['enter_when_empty']:
+            decision = {'action': 'lp_add', 'reason': 'configured_initial_entry'}
+    else:
+        liquidity = number(position['liquidity'])
+        principal = number(position['principal_value_usd'])
+        owed = number(position['owed_value_usd'])
+        if account['fees_coverage'] != 'fee_growth_inside' or not position['owner']:
+            raise ValueError('LP position/fee evidence incomplete')
+        if liquidity and principal < loss_floor:
+            decision = {'action': 'lp_remove', 'reason': 'principal_floor_exit'}
+        elif not liquidity:
+            decision = {'action': 'lp_collect' if owed >= collect_min else 'hold',
+                        'reason': 'remaining_fees' if owed >= collect_min else 'closed_position'}
+        else:
+            decision = rebalance_signal(
+                tick=pool['tick'], lower=position['tick_lower'], upper=position['tick_upper'],
+                outside_since=state.get('outside_since'), last_rebalance=state.get('last_rebalance'),
+                now=now, observed_at=min(number(account['as_of']), now), max_age_seconds=age,
+                persistence_seconds=persistence, cooldown_seconds=cooldown,
+                expected_incremental_fees=fees, total_execution_cost=costs, cost_multiple=multiple)
+            if 'outside_since' in decision:
+                next_state['outside_since'] = decision['outside_since']
+            if decision['action'] == 'prepare_rebalance':
+                decision['action'] = 'lp_rebalance'
+            elif decision['reason'] == 'inside_range' and owed >= collect_min:
+                decision = {'action': 'lp_collect', 'reason': 'fee_collection_threshold'}
+    if decision['action'] in {'lp_add', 'lp_collect'}:
+        if costs is None or decision['action'] == 'lp_add' and fees is None:
+            decision = {'action': 'hold', 'reason': 'fee_economics_unknown'}
+        elif (number(fees) if decision['action'] == 'lp_add' else owed) <= number(costs) * multiple:
+            decision = {'action': 'hold', 'reason': 'fees_do_not_cover_execution'}
+    return decision, next_state

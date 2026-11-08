@@ -12,6 +12,7 @@ import { plainToolOutput } from "../../lib/toolSemantics";
 import { ToolResultContent } from "./ToolResultContent";
 import { CodeOutput } from "./CodeOutput";
 import { shellResult } from "../../lib/toolOutputPresentation";
+import { toolFailureSummary } from "../../lib/toolFailureSummary";
 import styles from "./ExecutionTimeline.module.css";
 
 /** Raw transport is an explicit troubleshooting view, never the default conversation. */
@@ -32,7 +33,7 @@ export function ToolActivity({ step, state, open, onOpenChange }: { step: ToolSt
   const targetPath=String(p.payload.path||p.payload.file_path||"");
   const subject=["read","edit"].includes(p.family)&&targetPath===p.subject&&targetPath.includes("/")
     ? `${targetPath.split("/").pop()} · ${targetPath.split("/").slice(-3,-1).join("/")}` : p.subject;
-  const phase = p.failed ? "failed" : p.waiting ? "waiting" : p.preparing ? "preparing" : p.pending ? "running" : step.result ? "settled" : "unconfirmed";
+  const phase = p.failed ? "failed" : p.warning ? "warning" : p.waiting ? "waiting" : p.preparing ? "preparing" : p.pending ? "running" : step.result ? "settled" : "unconfirmed";
   const [choice,setChoice] = useState<boolean|null>(null);
   const expanded = open ?? choice ?? (p.failed || (p.pending && p.family === "shell"));
   const displayValue = step.data.display_result ?? step.data.result;
@@ -48,6 +49,7 @@ export function ToolActivity({ step, state, open, onOpenChange }: { step: ToolSt
   const percent=Number.isFinite(current)&&total>0?Math.min(100,Math.max(0,current/total*100)):undefined;
   const progressMessage=String(step.data.progress_message||"");
   const duration=typeof step.data.elapsed_ms === "number" ? step.data.elapsed_ms : undefined;
+  const failureSummary = p.failed ? toolFailureSummary(step.data, zh) : "";
   return <details open={expanded} onToggle={(e) => {const next=e.currentTarget.open;if(next!==expanded){setChoice(next);onOpenChange?.(next);}}}
     data-testid="agent-operation" data-operation-kind={step.event.kind} data-tool-family={p.family} data-operation-id={step.key} data-state={phase} className="group/step min-w-0 py-0.5">
     <summary className="flex min-h-8 max-[600px]:min-h-11 cursor-pointer list-none flex-col justify-center rounded text-[12px] text-[color:var(--text-base)] outline-none focus-visible:ring-2 focus-visible:ring-brand-400">
@@ -57,23 +59,25 @@ export function ToolActivity({ step, state, open, onOpenChange }: { step: ToolSt
       <span className="shrink-0 text-[color:var(--text-base)]">{p.title}</span>
       <span className="min-w-0 flex-1 truncate text-[color:var(--text-muted)]" title={p.subject}>{subject}</span>
       {duration!==undefined&&duration>=1000&&<span className={styles.duration}>{`${(duration/1000).toFixed(1)} s`}</span>}
-      <span className={`shrink-0 text-xs ${p.failed ? "text-danger" : p.waiting ? "text-warn" : "text-[color:var(--text-muted)]"}`} role={p.pending?"status":undefined}>{p.pending ? <span aria-hidden className={styles.activeDot} /> : null}{p.failed || p.pending || p.waiting || !step.result ? p.state : <CheckIcon size={12} aria-label={p.state}/>}</span>
+      <span className={`shrink-0 text-xs ${p.failed ? "text-danger" : p.warning || p.waiting && !p.notStartedInteraction ? "text-warn" : "text-[color:var(--text-muted)]"}`} role={p.pending||p.warning||p.notStartedInteraction?"status":undefined}>{p.pending ? <span aria-hidden className={styles.activeDot} /> : null}{p.failed || p.warning || p.pending || p.waiting || !step.result ? p.state : <CheckIcon size={12} aria-label={p.state}/>}</span>
       </span>
-      {!expanded&&p.summary&&<span className={styles.outcome} title={p.summary}>{p.summary}</span>}
+      {!expanded&&(failureSummary||p.summary)&&<span className={styles.outcome} title={failureSummary||p.summary}>{failureSummary||p.summary}</span>}
       {p.pending&&(progressMessage||percent!==undefined)&&<span className={styles.progress} role="status"><span>{progressMessage}</span>{percent!==undefined&&<progress max={100} value={percent} aria-label={i18nCopy(zh, "copy.components_chat_ReadableExecution.005")}/>}</span>}
     </summary>
     {expanded&&<div className={styles.toolBody}>
-      {snapshot ? <PortfolioSnapshot accounts={snapshot} /> : command || output.text || errorOutput.text ? <div className={styles.terminal}>
+      {p.notStartedInteraction ? <p role="status" className="py-2 text-[color:var(--text-muted)]">{p.summary}</p>
+        : p.failed ? <p role="status" data-testid="tool-failure-summary" className="py-2 whitespace-pre-wrap text-danger">{failureSummary}</p>
+        : p.warning ? <p role="status" className="py-2 whitespace-pre-wrap text-warn">{p.summary}</p>
+        : snapshot ? <PortfolioSnapshot accounts={snapshot} /> : command || output.text || errorOutput.text ? <div className={styles.terminal}>
         <div className={styles.terminalHeader}><span>{i18nCopy(zh, "copy.components_chat_ReadableExecution.006")}</span>{typeof out.exit_code==="number"&&<span>{i18nCopy(zh, "copy.components_chat_ReadableExecution.007")} {out.exit_code}</span>}</div>
         <pre tabIndex={0}>{command?`$ ${command}\n`:""}{output.text}{errorOutput.text&&<span className="text-danger">{`\n${errorOutput.text}`}</span>}</pre>
       </div> : diff ? <CodeOutput diff text={diff} path={String(p.payload.path||out.path||"")}/>
         : value!=null ? <ToolResultContent value={displayValue} family={p.family} path={String(p.payload.path||p.payload.file_path||"")}/>
         : p.family==="plan"?<ToolResultContent value={p.payload} family="plan"/>
         : <p className="py-2 text-[color:var(--text-muted)]">{p.pending ? (i18nCopy(zh, "copy.components_chat_ReadableExecution.002")) : (i18nCopy(zh, "copy.components_chat_ReadableExecution.003"))}</p>}
-      {command&&!shell&&typeof value==="object"&&!output.text&&!errorOutput.text&&<ToolResultContent value={displayValue} family={p.family}/>}
-      {p.failed && step.data.error ? <p role="status" className="mt-2 whitespace-pre-wrap text-danger">{readableResult(step.data.error, zh)}</p> : null}
+      {!p.failed&&!p.warning&&command&&!shell&&typeof value==="object"&&!output.text&&!errorOutput.text&&<ToolResultContent value={displayValue} family={p.family}/>}
       {step.data.truncated || out.truncated || step.data.output_truncated || output.truncated || errorOutput.truncated || diff.length>64000 ? <p className="mt-2 text-warn">{i18nCopy(zh, "copy.components_chat_ReadableExecution.004")}</p> : null}
-      <AgentDebug value={{ request: step.event.data, response: step.result?.data }} />
+      <AgentDebug value={{ request: step.event.data, response: step.result?.data, ...(p.failed ? {diagnostic: step.data} : {}) }} />
     </div>}
   </details>;
 }

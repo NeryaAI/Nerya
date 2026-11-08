@@ -1,5 +1,6 @@
 import { liveEventsToBlocks, type ChatThread } from "./chat";
 import { isChartBlockShape, type ChartBlockShape } from "./chartBlock";
+import { projectMessageBlocks } from "./streamTranscript";
 
 export type ResearchNews = { title: string; url: string; source: string; published_at: string; summary?: string };
 export type ResearchInstrument = {
@@ -96,8 +97,7 @@ export function collectResearchVisuals(thread: Pick<ChatThread, "messages"> | nu
   }
   for (const message of thread?.messages || []) {
     if (message.role !== "assistant") continue;
-    for (const block of liveEventsToBlocks([...(message.turn?.activity_events || []), ...(message.live_events || [])])) visit(block, message.ts);
-    for (const block of message.turn?.blocks || []) visit(block, message.ts);
+    for (const block of projectMessageBlocks(message)) visit(block, message.ts);
     for (const call of message.turn?.tool_trace || []) if (call.ok !== false && !call.error) visit(call.result, message.ts);
     for (const call of message.turn?.actions || []) if (!call.error) visit(call.result, message.ts);
   }

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -51,6 +52,11 @@ class TriggerRuntime:
         if event.dry_run:
             return self.router.dry_run(event)
         routed = self.router.route(event)
+        try:
+            from ..agent.task_control import dispatch_trigger
+            dispatch_trigger(self.config.paths, event.asdict(), config=self.config)
+        except Exception as exc:
+            logging.getLogger(__name__).warning("Task subscription dispatch failed: event=%s type=%s", event.event_id, type(exc).__name__)
         if (
             routed.status == "routed"
             and (routed.target or event.target) == "skill:strategy.agent_task"
@@ -159,7 +165,7 @@ class TriggerRuntime:
         return StrategyTriggerExecutionResult(
             event_id=event.event_id,
             target=target or "",
-            status="executed",
+            status="blocked" if result.get("status") == "blocked" else "executed",
             strategy_id=str(strategy_id),
             route_id=route_result.route_id,
             result=result,

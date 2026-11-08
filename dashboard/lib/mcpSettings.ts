@@ -16,7 +16,7 @@ export function mergeTunnelRuntime(status: McpStatus, live: Partial<McpStatus["o
   const runtime = Object.fromEntries(keys.filter(key => key in live).map(key => [key, live[key]]));
   return { ...status, openai_tunnel: { ...status.openai_tunnel, ...runtime } };
 }
-export type SkillRow = { id: string; description: string; source: string; revision: string;
+export type SkillRow = { id: string; title?: string; description: string; source: string; revision: string;
   entry: string; enabled: boolean; assigned: boolean | null; edit_effect: string;
   catalog_parent?: string; catalog_group?: "core" | "professional"; method_count?: number };
 export type SkillCatalog = { skills: SkillRow[]; total: number; next_offset: number | null;

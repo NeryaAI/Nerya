@@ -4,6 +4,7 @@ import {
   cloneElement,
   isValidElement,
   memo,
+  type MouseEvent,
   type ReactElement,
   type ReactNode,
 } from "react";
@@ -14,6 +15,34 @@ import type { Components } from "react-markdown";
 import { useTranslations } from "next-intl";
 import { CopyIcon } from "../icons";
 import { toast } from "../../lib/dialogs";
+
+/** Relative document/code/data references retain a raw URL as a navigation fallback. */
+function workspaceArtifactHref(href: string | undefined): string | undefined {
+  if (!href || /^(?:[a-z][a-z0-9+.-]*:|\/|#|\?)/i.test(href)) return href;
+  let path: string;
+  try { path = decodeURIComponent(href).replace(/^\.\//, ""); } catch { return href; }
+  // Do not reinterpret application links, encoded indirection or traversal.
+  if (/[\\%:?#\x00-\x1f\x7f]/.test(path) || path.replace(/\/$/, "").split("/").some(part => !part || part === "." || part === "..")) return href;
+  const candidate = /^evolution\/proposals\/([^/]+)\/after\/strategies\/([^/]+)\/?$/.exec(path);
+  if (candidate) return "/strategies?strategy_id=" + encodeURIComponent(candidate[2]) + "&proposal_id=" + encodeURIComponent(candidate[1]);
+  const installed = /^strategies\/([^/]+)\/?$/.exec(path);
+  if (installed) return "/strategies?strategy_id=" + encodeURIComponent(installed[1]);
+  if (!/\.(?:md|txt|json|csv|tsv|ya?ml|toml|py|js|ts|tsx|jsx|sql|ipynb|pdf|png|jpe?g|webp|svg|xlsx?|docx?|pptx?)$/i.test(path)) return href;
+  return "/api/proxy/workspace/file/raw/" + path.split("/").map(encodeURIComponent).join("/");
+}
+
+/** Route ordinary Markdown file clicks through the workspace's existing opener. */
+export function openWorkspaceFileLink(event: MouseEvent<HTMLElement>, onOpenFile?: (path: string) => void) {
+  if (!onOpenFile || event.defaultPrevented || event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+  const anchor = event.target instanceof Element ? event.target.closest<HTMLAnchorElement>(".nerya-markdown a[href]") : null;
+  if (!anchor || anchor.hasAttribute("download")) return;
+  const prefix = "/api/proxy/workspace/file/raw/";
+  const href = anchor.getAttribute("href") || "";
+  const resource = workspaceArtifactHref(href.startsWith(prefix) ? href.slice(prefix.length) : href);
+  if (!resource?.startsWith(prefix)) return;
+  event.preventDefault();
+  onOpenFile(decodeURIComponent(resource.slice(prefix.length)));
+}
 
 /**
  * Shared markdown renderer for the chat surface.
@@ -71,7 +100,7 @@ const components: Components = {
   li: ({ children }) => <li className="leading-relaxed">{children}</li>,
   a: ({ href, children }) => (
     <a
-      href={href}
+      href={workspaceArtifactHref(href)}
       target="_blank"
       rel="noreferrer noopener"
       className="text-brand-300 hover:text-brand-200 underline break-words"
@@ -96,12 +125,12 @@ const components: Components = {
     <thead className="bg-ink-800/50 text-ink-200">{children}</thead>
   ),
   th: ({ children }) => (
-    <th className="px-2 py-1 text-left border-b border-ink-700/60 font-semibold">
+    <th className="min-w-[6em] px-2 py-1 text-left border-b border-ink-700/60 font-semibold">
       {children}
     </th>
   ),
   td: ({ children }) => (
-    <td className="px-2 py-1 border-b border-ink-700/40 text-ink-100">
+    <td className="min-w-[6em] px-2 py-1 border-b border-ink-700/40 text-ink-100">
       {children}
     </td>
   ),
@@ -128,6 +157,14 @@ const components: Components = {
   ),
   em: ({ children }) => <em className="italic text-ink-100">{children}</em>,
 };
+
+export function hasUnclosedFence(value: string): boolean {
+  let fences = 0;
+  for (const line of value.split(/\r?\n/)) {
+    if (/^\s*(`{3,}|~{3,})/.test(line)) fences += 1;
+  }
+  return fences % 2 === 1;
+}
 
 /** Flatten a rendered code element back to raw text (for copy-to-clipboard). */
 function extractText(node: ReactNode): string {

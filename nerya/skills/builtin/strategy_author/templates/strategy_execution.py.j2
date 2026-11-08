@@ -1,0 +1,134 @@
+"""Save as strategy_execution.py beside main.py; finite execution, no model loop.
+
+Requires serialized invocations per strategy/market/timeframe. State get/set is
+not an atomic lock. Ambiguous submissions require external reconciliation.
+"""
+from nerya.strategies import StrategyResult, StrategyResultStatus
+from nerya.strategies.candle_view import candle_snapshots
+from nerya.strategies.signal_runner import indicator_parameters, minimum_closed_history
+
+
+def execution_result(ctx, receipt):
+    """Map only known statuses; retain the complete receipt and reconciliation IDs."""
+    if not isinstance(receipt, dict):
+        return ctx.result.error(message='invalid trading receipt', kind='execution_unknown',
+                                metadata={'execution': receipt, 'recovery': 'reconcile'})
+    status = receipt.get('status')
+    known = {'submitted', 'rejected', 'pending_approval', 'filled', 'partial', 'error'}
+    mapped = status if status in known else 'error'
+    if status in {'created', 'reserving', 'ready', 'working', 'closing', 'canceling'}:
+        mapped = 'submitted'
+    result = StrategyResult(
+        status=StrategyResultStatus(mapped), reason=str(receipt.get('reason') or ''),
+        intent=dict(receipt.get('intent') or {}), order=dict(receipt.get('order') or {}),
+        risk_decision=dict(receipt.get('risk_decision') or {}),
+        approval_id=receipt.get('approval_id'), order_id=receipt.get('order_id'),
+        session_id=receipt.get('session_id'),
+        metadata={'execution': receipt, 'recovery': 'reconcile'})
+    if mapped == 'error':
+        result.error_kind = 'execution_error' if status in {'error', 'failed', 'canceled'} else 'execution_unknown'
+        result.reason = result.reason or f'trading outcome: {status!r}; reconcile before retry'
+    return result
+
+
+def run_closed_signal(ctx, signal, *, confirm=None):
+    """Long/flat signals; optional read-only confirmation before any submission."""
+    params, timeframe = ctx.config.params, ctx.config.timeframe
+    routed = ctx.trigger.get('market')
+    if routed is not None and routed not in ctx.config.markets:
+        return ctx.result.error(message=f'unconfigured market: {routed}', kind='data_error')
+    markets = (routed,) if routed is not None else ctx.config.markets
+    parameters = indicator_parameters(signal, params['indicator'])
+    results = []
+    for market in markets:
+        rows = candle_snapshots(ctx.market.candles(
+            market, timeframe=timeframe, limit=params['lookback']), timeframe)
+        now = ctx.clock.now_ms()
+        if any('ts' not in row or 'close_time_ms' not in row for row in rows):
+            return ctx.result.error(message='missing candle timestamp', kind='data_error')
+        candles = [row for row in rows if row['close_time_ms'] <= now]
+        if not candles:
+            return ctx.result.error(message='no closed candles', kind='data_error')
+        required = minimum_closed_history(parameters)
+        if required is not None and len(candles) < required:
+            results.append(ctx.result.hold(
+                reason='insufficient_closed_history',
+                metadata={'required_closed_bars': required, 'available_closed_bars': len(candles)},
+            ))
+            continue
+        stamps = [row['ts'] for row in candles]
+        if any(a >= b for a, b in zip(stamps, stamps[1:])):
+            return ctx.result.error(message='unordered or duplicate candles', kind='data_error')
+        key = f'closed_signal:{signal.__name__}:{market}:{timeframe}'
+        saved = ctx.state.get(key) or {}
+        pending = saved.get('pending')
+        if pending:
+            # Read authority by receipt IDs; local holdings cannot prove terminality.
+            receipt = pending.get('receipt')
+            observation = ctx.trading.execution_status(receipt) if isinstance(receipt, dict) else None
+            observation = observation if isinstance(observation, dict) else {}
+            resolved = (observation.get('terminal') is True
+                        and observation.get('reconciled') is True
+                        and observation.get('has_open_orders') is False
+                        and observation.get('status') in {'filled', 'rejected', 'canceled'})
+            pending = {**pending, 'execution_status': observation}
+            if not resolved:
+                ctx.state.set(key, {**saved, 'pending': pending})
+                status = 'submitted' if observation.get('status') == 'submitted' else 'unknown'
+                original = receipt if isinstance(receipt, dict) else {}
+                result = execution_result(ctx, {**original, 'status': status})
+                result.metadata = {'execution': receipt, 'execution_status': observation,
+                                   'submission': pending,
+                                   'recovery': observation.get('recovery') or 'verify_execution'}
+                results.append(result)
+                continue
+            saved = {'last_ts': saved['last_ts'], 'last_submission': pending}
+            ctx.state.set(key, saved)
+        if saved.get('last_ts') is not None and saved['last_ts'] >= stamps[-1]:
+            results.append(ctx.result.hold(reason='duplicate_closed_candles'))
+            continue
+        signals = signal(candles, **parameters)
+        buy, sell = signals['buy'][-1], signals['sell'][-1]
+        if type(buy) is not bool or type(sell) is not bool or buy and sell:
+            raise ValueError('signals must be nonconflicting boolean series')
+        positions = ctx.portfolio.positions(market)
+        if any(p.size < 0 for p in positions):
+            return ctx.result.error(message='unexpected short position', kind='position_error')
+        quantity = sum(p.size for p in positions)
+        action = 'close' if sell and quantity > 0 else 'open' if buy and quantity == 0 else None
+        confidence = params['confidence']
+        if action == 'open' and confirm is not None:
+            verdict = confirm(ctx, market, candles, signals)
+            if isinstance(verdict, StrategyResult):
+                # A read-only confirmation failure has not submitted anything.
+                if verdict.status.value == 'hold':
+                    ctx.state.set(key, {**saved, 'last_ts': stamps[-1]})
+                results.append(verdict)
+                continue
+            confidence = verdict['confidence']
+        if action is None:
+            ctx.state.set(key, {**saved, 'last_ts': stamps[-1]})
+            results.append(ctx.result.hold(reason='no_new_trade_signal'))
+            continue
+        reasoning = f'{signal.__name__}:{"buy" if action == "open" else "sell"}:{stamps[-1]}'
+        pending = {'market': market, 'timeframe': timeframe, 'candle_ts': stamps[-1],
+                   'action': action, 'quantity': quantity, 'reasoning_ref': reasoning}
+        # Persist BEFORE SDK entry: exceptions/timeouts may follow an accepted order.
+        ctx.state.set(key, {**saved, 'last_ts': stamps[-1], 'pending': pending})
+        if action == 'open':
+            receipt = ctx.trading.open_position(market=market, side='long',
+                sizing=params['sizing'], protection=params.get('protection'),
+                confidence=confidence, reasoning_ref=reasoning)
+        else:
+            receipt = ctx.trading.close_position(market=market, side='long',
+                confidence=confidence, reasoning_ref=reasoning)
+        pending = {**pending, 'receipt': receipt}
+        ctx.state.set(key, {**saved, 'last_ts': stamps[-1], 'pending': pending})
+        results.append(execution_result(ctx, receipt))
+    if not results:
+        return ctx.result.hold(reason='no_configured_markets')
+    priority = {'error': 0, 'rejected': 1, 'pending_approval': 2, 'submitted': 3, 'partial': 4, 'filled': 5, 'hold': 6}
+    result = min(results, key=lambda item: priority.get(item.status.value, 0))
+    outcomes = [item.asdict() for item in results]
+    result.metadata = {**result.metadata, 'market_results': outcomes}
+    return result

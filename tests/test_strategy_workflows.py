@@ -121,9 +121,13 @@ def test_schedule_card_timezone_survives_candidate_save_and_reload(paths):
     invalid = propose_workflow(paths, save_payload(out, changes=[
         {"node_id": "scheduler:trading", "config": {"type": "cron", "cron": "0 9 * * *", "timezone": "invented/zone", "enabled": False}},
     ]))
-    assert invalid["ok"] is False and invalid["error"] == "validation_failed"
+    assert invalid["ok"] is True
+    assert invalid["validation"]["ok"] is False
     assert "timezone" in str(invalid["validation"])
-    assert len(list_proposals(paths)) == count
+    assert len(list_proposals(paths)) == count + 1
+    saved_files, _ = source_files(paths, out["strategy_id"], invalid["proposal_id"])
+    assert yaml_io.loads(saved_files["strategy.yml"])["schedule"]["timezone"] == "invented/zone"
+    assert source_files(paths, out["strategy_id"], out["proposal_id"])[0] == before
 
 
 def test_revision_conflict_does_not_create_a_proposal(paths):

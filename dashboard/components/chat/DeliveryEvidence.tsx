@@ -1,24 +1,109 @@
 "use client";
-import { copy as i18nCopy } from "../../lib/i18n";
 
 import { useLocale } from "next-intl";
+import { copy } from "../../lib/i18n";
 import type { ChatResult } from "../../lib/chatResults";
-import { recordOf } from "../../lib/externalCalls";
+import { deliveryEvidence } from "../../lib/deliveryEvidence";
+import { CheckIcon, ClockIcon, FileIcon, ShieldCheckIcon, ShieldXIcon, ChevronDownIcon } from "../icons";
+import styles from "./DeliveryEvidence.module.css";
 
-export function DeliveryEvidence({result,onOpenFile,onReveal}:{result:ChatResult;onOpenFile?:(path:string)=>void;onReveal?:()=>void}) {
-  const zh=useLocale().startsWith("zh"), evidence=result.evidence;
-  const files=[...new Set([...(evidence?.artifacts?.created||[]),...(evidence?.artifacts?.modified||[])])];
-  const tests=evidence?.artifacts?.tests_run||[];
-  const risks=evidence?.artifacts?.unverified_risks||[];
-  const errors=evidence?.artifacts?.errors||[];
-  const failed=tests.some(raw=>{const t=recordOf(raw);return t.ok===false||(typeof t.exit_code==="number"&&t.exit_code!==0);})||errors.length>0||evidence?.verifier?.hard_status==="failed"||evidence?.verifier?.hard_passed===false;
-  return <section aria-label={i18nCopy(zh, "copy.components_chat_DeliveryEvidence.001")} data-testid="delivery-evidence" className="mb-6 space-y-3 border-b border-[color:var(--line)] pb-5 text-sm">
-    <h2 className="text-base font-semibold">{i18nCopy(zh, "copy.components_chat_DeliveryEvidence.002")}</h2>
-    <p>{failed?(i18nCopy(zh, "copy.components_chat_DeliveryEvidence.003")):evidence?.verifier?.hard_passed===true?(i18nCopy(zh, "copy.components_chat_DeliveryEvidence.004")):(i18nCopy(zh, "copy.components_chat_DeliveryEvidence.005"))}</p>
-    {failed&&evidence?.verifier?.hard_passed!==true&&<p className="text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_DeliveryEvidence.006")}</p>}
-    {files.length>0&&<div><h3 className="font-medium">{i18nCopy(zh, "copy.components_chat_DeliveryEvidence.007")}</h3><ul className="mt-1 space-y-1">{files.map(path=><li key={path} className="break-all">{onOpenFile?<button type="button" className="min-h-11 text-left underline" onClick={()=>onOpenFile(path)}>{path}</button>:<code>{path}</code>}</li>)}</ul></div>}
-    {tests.length>0&&<div><h3 className="font-medium">{i18nCopy(zh, "copy.components_chat_DeliveryEvidence.008")}</h3><ul className="mt-1 space-y-2">{tests.map((raw,i)=>{const t=recordOf(raw);return <li key={i} className="break-words"><code>{String(t.command||t.cmd||t.action||t.tool||"Validation")}</code><span className="ml-2 text-xs">{typeof t.exit_code==="number"?"exit "+t.exit_code:t.ok===true?(i18nCopy(zh, "copy.components_chat_DeliveryEvidence.009")):t.ok===false?(i18nCopy(zh, "copy.components_chat_DeliveryEvidence.010")):(i18nCopy(zh, "copy.components_chat_DeliveryEvidence.011"))}</span></li>;})}</ul></div>}
-    {(risks.length>0||errors.length>0)&&<div><h3 className="font-medium text-warn">{i18nCopy(zh, "copy.components_chat_DeliveryEvidence.012")}</h3><ul className="mt-1 list-disc space-y-1 pl-5">{[...risks,...errors].map((raw,i)=>{const r=recordOf(raw);return <li key={i}>{String(r.message||r.reason||r.kind||r.path||r.error||"Unverified")}</li>;})}</ul></div>}
-    {result.turnId&&onReveal&&<button type="button" className="inline-flex min-h-11 items-center text-[color:var(--text-muted)] underline" onClick={onReveal}>{i18nCopy(zh, "copy.components_chat_DeliveryEvidence.013")}</button>}
+const producerLabels: Record<string, string> = {
+  "Source version unchanged": "sourceBinding",
+  "Candidate and replay match admitted request": "requestScope",
+  "Strategy package structure": "packageStructure",
+  "Executed candidate tests": "candidateTests",
+  "Strategy structure and SDK contract": "sdkContract",
+  "Isolated candidate tests": "isolatedTests",
+  "Historical replay completed": "historicalRun",
+  "Persisted replay report": "reportOutput",
+  "Requested history coverage": "historyCoverage",
+  "Historical source snapshots": "historicalSources",
+  "Replay matches this source version": "replaySource",
+  "Replay execution and order accounting": "executionIntegrity",
+  "Historical trading performance evidence": "historicalPerformance",
+  "Declared source captures": "researchSources",
+  "Producer retrieval times": "researchRetrieval",
+  "Saved research report": "researchReport",
+};
+const producerMessages: Record<string, string> = {
+  "Declared captures cited by URL or exact call reference; not exhaustive question coverage.": "researchSourcesHint",
+  "Producer retrieval times within command; not current market freshness.": "researchRetrievalHint",
+  "Saved bytes match same-command write and bundle hash.": "researchReportHint",
+};
+
+export function DeliveryEvidence({ result, onOpenFile, onReveal, expanded = false }: {
+  result: ChatResult; onOpenFile?: (path: string) => void; onReveal?: () => void; expanded?: boolean;
+}) {
+  const zh = useLocale().startsWith("zh");
+  const t = (key: string, values?: Record<string, unknown>) => copy(zh, `copy.deliveryEvidence.${key}`, values);
+  const evidence = deliveryEvidence(result);
+  const Icon = evidence.status === "passed" ? ShieldCheckIcon : evidence.status === "failed" ? ShieldXIcon : ClockIcon;
+  return <section aria-label={t("title")} data-testid="delivery-evidence" data-state={evidence.status} className={styles.evidence}>
+    <div className={styles.summary}>
+      <span className={styles.signal} aria-hidden><Icon size={20}/></span>
+      <div className={styles.heading}>
+        <p className={styles.eyebrow}>{t("title")}</p>
+        <h2>{t(evidence.partialDelivery ? "partialDelivery" : evidence.executionErrors ? "executionErrors" : evidence.delivery && evidence.status === "pending" && !evidence.checks.length ? "incomplete" : evidence.status)}</h2>
+      </div>
+      <span className={styles.binding}>{t(evidence.versionBound ? "versionBound" : "recorded")}</span>
+    </div>
+    <p className={styles.explanation}>{t(evidence.partialDelivery
+      ? evidence.delivery?.completion?.allowed === false ? "partialDeliveryPendingHint" : "partialDeliveryHint"
+      : evidence.executionErrors ? "executionErrorsHint" : `${evidence.status}Hint`)}</p>
+    <div className={styles.counts}>
+      <span><FileIcon size={14}/>{t("files", { count: evidence.files.length })}</span>
+      <span><CheckIcon size={14}/>{t("passedCount", { count: evidence.passed })}</span>
+      <span>{t("unresolvedCount", { count: evidence.unresolved })}</span>
+      {evidence.completionReasons.length > 0 && <span>{t("unmetCount", { count: evidence.completionReasons.length })}</span>}
+    </div>
+    <details className={styles.details} open={expanded}>
+      <summary>{t("inspect")}<ChevronDownIcon size={14}/></summary>
+      <div className={styles.content}>
+        {evidence.completionReasons.length > 0 && <div>
+          <h3>{t("completionReasons")}</h3>
+          <ul className={styles.checks}>{evidence.completionReasons.map(reason => {
+            const label = t(`reason_${reason.code}`);
+            const subjectLabel = reason.subject ? t(`reason_${reason.subject}`) : "";
+            const displayLabel = subjectLabel && !subjectLabel.startsWith("copy.") ? subjectLabel : label;
+            return <li key={reason.raw}><div className={styles.checkBody}>
+              {label.startsWith("copy.") ? reason.raw : <>{displayLabel}{displayLabel === label && reason.subject && <>: <code>{reason.subject}</code></>}</>}
+            </div></li>;
+          })}</ul>
+        </div>}
+        {evidence.checks.length > 0 && <div>
+          <h3>{t("checks")}</h3>
+          <ul className={styles.checks}>{evidence.checks.map(check => <li key={check.id} data-state={check.state}>
+            <span className={styles.checkState}>{t(`check_${check.state}`)}</span>
+            <div className={styles.checkBody}><span>{Object.hasOwn(producerLabels, check.label) ? t(`label_${producerLabels[check.label]}`) : check.label}</span>
+              {check.message && <p>{Object.hasOwn(producerMessages, check.message) ? t(producerMessages[check.message]) : check.message}</p>}
+              {check.revision && <p className={styles.revision} title={check.revision}>{t("revision")}: <code>{check.revision.slice(0, 12)}</code></p>}
+              {check.evidenceRef && <p className={styles.revision}>{onOpenFile && !/^research(?:-report)?:/.test(check.evidenceRef) ? <button type="button" onClick={() => onOpenFile(check.evidenceRef)}>{check.evidenceRef}</button> : check.evidenceRef}</p>}
+            </div>
+          </li>)}</ul>
+        </div>}
+        {evidence.files.length > 0 && <div>
+          <h3>{t("artifacts")}</h3>
+          <ul className={styles.files}>{evidence.files.map(path => <li key={path}><FileIcon size={14}/>
+            {onOpenFile && !/^research(?:-report)?:/.test(path) ? <button type="button" onClick={() => onOpenFile(path)}>{path}</button> : <code>{path}</code>}
+          </li>)}</ul>
+        </div>}
+        {(evidence.risks.length > 0 || evidence.unverified.length > 0) && <div className={styles.limitations}>
+          <h3>{t("limitations")}</h3>
+          {evidence.risks.map(risk => {
+            const label = t(`diagnostic_${risk}`);
+            return label.startsWith("copy.") ? <p key={risk}>{risk}</p> : <div key={risk}>
+              <p>{label}</p>
+              <details><summary>{t("technicalDetails")}</summary><code>{risk}</code></details>
+            </div>;
+          })}
+          {evidence.unverified.length > 0 && <p>{evidence.unverified.map(value => {
+            const label = t(`scope_${value}`);
+            return label.startsWith("copy.") ? value.replaceAll("_", " ") : label;
+          }).join(t("scopeSeparator"))}</p>}
+        </div>}
+        <p className={styles.boundary}>{t("boundary")}</p>
+        {result.turnId && onReveal && <button type="button" className={styles.trace} onClick={onReveal}>{t("trace")}</button>}
+      </div>
+    </details>
   </section>;
 }

@@ -13,7 +13,9 @@ import type {
 import { liveEventsToBlocks } from "../../lib/chat";
 import { mergeStreamEvents } from "../../lib/streamEvents";
 import { normalizeTranscriptBlocks } from "../../lib/transcriptProjection";
-import { finalReplyText, publicReplyText } from "../../lib/chatResults";
+import { projectMessageBlocks } from "../../lib/streamTranscript";
+import { finalReplyText, publicReplyText, withoutLegacyTerminalText } from "../../lib/chatResults";
+import { isAbortedTerminal } from "../../lib/legacyTerminalSummary";
 import type { ApprovalCard } from "../../lib/clientApi";
 import {
   formatDuration,
@@ -34,7 +36,7 @@ import {
 import { RoleAvatar } from "../RoleAvatar";
 import { toolPresentation } from "../../lib/agentConversation";
 import { ExecutionTimeline } from "./ExecutionTimeline";
-import { executionSteps, executionMembers, executionArtifacts, executionDefaultOpen, partitionTranscript, enrichCommittedBlocks } from "../../lib/executionTimeline";
+import { executionSteps, executionMembers, executionArtifacts, executionDefaultOpen, partitionTranscript, enrichCommittedBlocks, renderableExecutionBlocks } from "../../lib/executionTimeline";
 import { browserCalls } from '../../lib/browserTrace';
 import { ResearchReplyCards } from './ResearchReplyCards';
 import { BacktestReplyCards } from './BacktestReplyCards';
@@ -330,6 +332,7 @@ export function UserBubble({
   onCancelEdit?: () => void;
 }) {
   const th = useTranslations("chatHistory");
+  const ta = useTranslations("assistants");
   const zh = useLocale().startsWith("zh");
   const receipt = useMemo(() => interactionReceipt(msg.text), [msg.text]);
   return (
@@ -352,6 +355,7 @@ export function UserBubble({
           <MessageAttachmentList attachments={msg.attachments} />
         </div>
         <div data-testid="user-message-meta" className="mt-1 flex min-h-7 items-center justify-end gap-2 text-[10px] text-[color:var(--text-muted)]">
+          {msg.task_message && <a data-testid="task-message-origin" className="underline" href={"/chat/"+encodeURIComponent(msg.task_message.sender_session_id)}>{ta("taskMessageOrigin")}</a>}
           {!editing ? <MessageActions text={msg.text} onEdit={msg.text ? onEdit : undefined} onDelete={onDelete} disabled={actionsDisabled} /> : null}
           {msg.external_request ? <ExternalMessageReceipt state={msg.external_request.state} /> : null}
           {!editing && onFork ? <button type="button" onClick={onFork} disabled={!msg.backend_message_id || saving || actionsDisabled} data-testid="fork-from-message" title={i18nCopy(zh, "copy.components_chat_ChatMessage.016")} className="rounded px-1 py-1 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 [@media(hover:none)]:opacity-100">{i18nCopy(zh, "copy.components_chat_ChatMessage.017")}</button> : null}
@@ -373,27 +377,29 @@ function ExternalMessageReceipt({ state }: { state: NonNullable<UserMessage['ext
 
 export function AssistantBubble({
   msg, pendingApprovals, onApprovalAction, resolvingApprovalIds, onRetry,onContinue,
+  dockApprovalId,
   onOpenResult, traceContent, traceLabel, conversationId = '', onOpenBrowser,
 }: {
   msg: AssistantMessage;
   pendingApprovals?: Map<string, ApprovalCard>;
   onApprovalAction?: (callbackData: string) => void;
   resolvingApprovalIds?: Set<string>;
+  dockApprovalId?: string;
   onRetry?: () => void; onContinue?:()=>void; onOpenResult?: () => void;
   traceContent?: ReactNode; traceLabel?: string; conversationId?: string; onOpenBrowser?: () => void;
 }) {
   const zh = useLocale().startsWith("zh");
+  const ta = useTranslations("assistants");
 
-  const executionState = msg.execution_status || (msg.loading ? "running" : msg.error ? "failed" : /cancel|interrupt/.test(String(msg.turn?.stopped_reason || "")) ? "interrupted" : "succeeded");
+  const executionState = msg.execution_status || (msg.loading ? "running" : msg.error ? "failed" : isAbortedTerminal(msg) ? "interrupted" : "succeeded");
   const finalReply = useMemo(() => finalReplyText(msg), [msg]);
   const events = useMemo(() => mergeActivityEvents(msg.turn?.activity_events ?? [], msg.live_events ?? []), [msg.turn?.activity_events, msg.live_events]);
   const streamedBlocks = useMemo(() => liveEventsToBlocks(events), [events]);
   const modelRetry = msg.loading && !msg.error
     ? latestModelRetry([...(msg.turn?.blocks || []), ...streamedBlocks]) : null;
-  const sourceBlocks = useMemo(() => normalizeTranscriptBlocks(!msg.loading && msg.turn?.blocks?.length
-    ? enrichCommittedBlocks(msg.turn.blocks, streamedBlocks)
-    : streamedBlocks.length ? streamedBlocks : msg.turn?.blocks || []), [msg.loading,msg.turn?.blocks,streamedBlocks]);
-  const {reply,work} = useMemo(() => partitionTranscript(sourceBlocks,finalReply,publicReplyText(msg,sourceBlocks)),[sourceBlocks,finalReply,msg]);
+  const sourceBlocks = useMemo(() => projectMessageBlocks(msg), [msg]);
+  const replyStreaming = Boolean(msg.loading && !msg.error && sourceBlocks.at(-1)?.block?.kind === "text" && sourceBlocks.at(-1)?.block?.completed !== true);
+  const {reply,work} = useMemo(() => partitionTranscript(withoutLegacyTerminalText(msg,renderableExecutionBlocks(sourceBlocks)),finalReply,publicReplyText(msg,sourceBlocks)),[sourceBlocks,finalReply,msg]);
   const reasoningBlocks = sourceBlocks.filter(env => (env.block?.kind || env.kind) === "thinking");
   const browserOperations = useMemo(() => browserCalls([...(msg.turn?.blocks || []), ...streamedBlocks], events), [msg.turn?.blocks,streamedBlocks,events]);
   const activityEvents = events.filter((e) => e.kind.startsWith("subagent.") || e.kind.startsWith("team."));
@@ -438,7 +444,7 @@ export function AssistantBubble({
       <StreamingDots />{i18nCopy(zh, "copy.components_chat_ChatMessage.007")}
     </div> : null}
     {msg.execution_status && !msg.assistant_task && !msg.loading && !msg.error && msg.execution_status !== "succeeded" ? <p role="status" className="mb-3 text-xs text-[color:var(--text-muted)]">{commandStateText(msg.execution_status, zh)}</p> : null}
-    {attentionBlocks.length > 0 && <NativeBlocksTrack envelopes={attentionBlocks} live={Boolean(msg.loading)} pendingApprovals={pendingApprovals} onApprovalAction={onApprovalAction} resolvingApprovalIds={resolvingApprovalIds} suppressTopProposalHoist presentation="expanded"/>}
+    {attentionBlocks.length > 0 && <NativeBlocksTrack envelopes={attentionBlocks} live={Boolean(msg.loading)} pendingApprovals={pendingApprovals} onApprovalAction={onApprovalAction} resolvingApprovalIds={resolvingApprovalIds} dockApprovalId={dockApprovalId} approvalStoppedReason={msg.turn?.stopped_reason ?? undefined} suppressTopProposalHoist presentation="expanded"/>}
     {visualBlocks.length > 0 && <NativeBlocksTrack envelopes={visualBlocks} suppressTopProposalHoist presentation="expanded"/>}
     {modelRetry ? <ModelRetryStatus retry={modelRetry} /> : null}
     {msg.turn?.attachments?.some(item => item.model_sent === false) && <p role="status" className="mb-3 text-xs text-warn">{i18nCopy(zh, "copy.components_chat_ChatMessage.022")}</p>}
@@ -448,10 +454,10 @@ export function AssistantBubble({
 
     <BacktestReplyCards message={msg} />
     {proposals.length ? <div data-turn-section="proposal-actions" className="mb-5"><StrategyProposalsHoist proposals={proposals} /></div> : null}
-    {reply ? <section data-turn-section="reply" data-message-identity={msg.id} aria-busy={Boolean(msg.loading)} aria-label={i18nCopy(zh, "copy.components_chat_ChatMessage.008")}>
+    {reply ? <section data-turn-section="reply" data-message-identity={msg.id} aria-busy={replyStreaming} aria-label={i18nCopy(zh, replyStreaming ? "copy.components_chat_ChatMessage.025" : finalReply ? "copy.components_chat_ChatMessage.008" : "copy.components_chat_ChatMessage.026")}>
+      {!msg.loading && finalReply && msg.turn?.delivery?.completion?.allowed === false ? <p role="status" data-testid="task-delivery-warning" className="mb-3 text-xs text-warn">{ta("deliveryUnconfirmed")}</p> : null}
       <div data-find-text>
-      <StreamedMarkdown text={reply} active={Boolean(msg.loading && !msg.error && sourceBlocks.at(-1)?.block?.kind === "text" && sourceBlocks.at(-1)?.block?.completed !== true)} />
-      <ResearchReplyCards message={msg} />
+      <StreamedMarkdown text={reply} active={replyStreaming} />
       </div>
       {finalReply ? <>
       {<div data-testid="result-actions" className="mt-5 flex flex-wrap items-center gap-3 border-t border-[color:var(--line)] pt-3 text-xs text-[color:var(--text-muted)]">
@@ -463,11 +469,12 @@ export function AssistantBubble({
         </button> : null}
         <time className="ml-auto text-[11px]">{formatTime(msg.ts)}</time>
       </div>}
-      </> : <p role="status" className="mt-2 text-xs text-[color:var(--text-muted)]">{msg.loading ? (i18nCopy(zh, "copy.components_chat_ChatMessage.025")) : (i18nCopy(zh, "copy.components_chat_ChatMessage.026"))}</p>}
+      </> : !msg.loading || replyStreaming ? <p role="status" className="mt-2 text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, replyStreaming ? "copy.components_chat_ChatMessage.025" : "copy.components_chat_ChatMessage.026")}</p> : null}
     </section> : !msg.loading && !msg.error && !hasTrace && !msg.execution_status && !msg.assistant_task ? <p className="py-2 text-xs text-[color:var(--text-muted)]" data-turn-section="empty-result">
       {i18nCopy(zh, "copy.components_chat_ChatMessage.011")}
     </p> : null}
 
+    <ResearchReplyCards message={msg} />
     <AssistantTaskReceipt task={msg.assistant_task} />
   </article>;
 }

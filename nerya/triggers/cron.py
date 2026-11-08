@@ -219,6 +219,13 @@ class CronScheduler:
         state_path = _state_path(self.config)
         state = _read_state(state_path)
         fired: list[dict[str, Any]] = []
+        try:
+            from ..agent.task_control import retry_due_trigger_deliveries
+            recovery = retry_due_trigger_deliveries(self.config.paths, config=self.config, now=now_ts)
+            if recovery["processed"]:
+                fired.append({"source": "task_trigger_recovery", "recovery": recovery})
+        except Exception as exc:
+            fired.append({"source": "task_trigger_recovery", "error": f"{type(exc).__name__}: {exc}"})
 
         for entry in self.list_entries():
             if entry.session_kind in {'agent','script'} and self.kernel_factory is None and self.script_runner is None and self.delivery_fn is None and entry.in_window(now_dt) and not entry.archived:
@@ -241,6 +248,28 @@ class CronScheduler:
                 if last_ts is not None else None
             )
             if not entry.is_due(now=now_dt, last_fired=last_dt):
+                continue
+
+            if entry.session_kind == "market":
+                try:
+                    from .market_source import poll
+                    market_result = poll(self.config, now=now_ts)
+                except Exception as e:  # source health is recorded by poll when possible
+                    market_result = {"ok": False, "source": "market", "emitted": [],
+                                     "errors": [{"error": f"{type(e).__name__}: {e}"}]}
+                state[entry.id] = now_ts
+                fired.append({"schedule_id": entry.id, "source": "market", "market": market_result})
+                continue
+
+            if entry.session_kind == "private_account":
+                try:
+                    from .private_account_source import poll
+                    account_result = poll(self.config, account_id=(entry.payload or {}).get("account_id"), now=now_ts)
+                except Exception as e:
+                    account_result = {"ok": False, "source": "private_account", "emitted": [],
+                                      "errors": [{"error": f"{type(e).__name__}: {e}"}]}
+                state[entry.id] = now_ts
+                fired.append({"schedule_id": entry.id, "source": "private_account", "account": account_result})
                 continue
 
             if entry.session_kind == "agent":
@@ -315,6 +344,7 @@ class CronScheduler:
 
             try:
                 ev = TriggerEvent.new(
+                    event_id=f"evt_schedule_{entry.id}_{int(now_ts)}",
                     source="schedule",
                     kind=entry.kind,
                     payload=self._augment_payload(entry),
@@ -338,6 +368,15 @@ class CronScheduler:
                               "message": f"{type(e).__name__}: {e}"},
                 })
                 continue
+            try:
+                from ..agent.task_control import dispatch_trigger
+                trigger_delivery = dispatch_trigger(
+                    self.config.paths,
+                    {**ev.asdict(), "source_cursor": f"schedule:{entry.id}:{ev.occurred_at}"},
+                    config=self.config,
+                )
+            except Exception as e:  # Trigger delivery failure is durable health, not a silent cron success.
+                trigger_delivery = {"state": "failed", "error": f"{type(e).__name__}: {e}"}
             state[entry.id] = now_ts
             jsonl.append(self.config.paths.journal("cron"), {
                 "kind": "cron.fired",
@@ -350,6 +389,7 @@ class CronScheduler:
                 "schedule_id": entry.id,
                 "event_id": ev.event_id,
                 "result": result,
+                "task_delivery": trigger_delivery,
             })
 
         if fired:

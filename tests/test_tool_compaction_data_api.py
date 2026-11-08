@@ -10,6 +10,79 @@ from nerya.llm import tool_compaction as tc
 pytestmark = pytest.mark.smoke
 
 
+def test_saved_snapshot_compaction_preserves_public_token_identity_not_credentials():
+    address = '0xa0b86991c6218b36c1d19d4a2e9eb0ce3606eb48'
+    identity = {'pool': {'token0': address, 'token1': address, 'decimals': [6, 18],
+                         'fee': 500, 'tick_spacing': 10, 'chain_id': 1, 'factory': address},
+                'token_identities': [{'address': address, 'symbol': symbol, 'decimals': decimals,
+                                      'chain_id': 1, 'identity_scope': 'current_official_catalog',
+                                      'catalog_source_sha256': 'c' * 64}
+                                     for symbol, decimals in [('USDC', 6), ('WETH', 18)]],
+                'row_contract': 'uniswap_v3_pool_history.v1', 'rows_sha256': 'b' * 64,
+                'access_token': 'private-access-value', 'api_key': 'private-api-value'}
+    output = {'count': 1, 'scope': 'current_task', 'snapshots': [{
+        'provider': 'uniswap', 'action': 'pool_history',
+        'args': {'start': '2026-10-07', 'end': '2026-11-06', 'pool_address': address,
+                 'rpc_provider': 'drpc', 'step_blocks': 4000, 'max_samples': 64,
+                 'tick_lower': 191130, 'tick_upper': 207250},
+        'coverage': {'requested_window_complete': False, 'observations': 55},
+        'requested_window': {'start': '2026-10-07', 'end': '2026-11-06'},
+        'row_count': 55, 'producer_ref': 'replay://' + 'a' * 64, 'identity': identity}],
+        'padding': 'x' * 10000}
+    kept = tc.compact_tool_result('data_api', output).kept
+    public = kept['snapshots'][0]['identity']
+    assert public['pool']['token0'] == address
+    assert public['pool']['token1'] == address
+    assert public['token_identities'] == identity['token_identities']
+    assert public['row_contract'] == identity['row_contract']
+    assert public['rows_sha256'] == identity['rows_sha256']
+    assert kept['snapshots'][0]['args'] == output['snapshots'][0]['args']
+    assert 'private-' not in json.dumps(kept)
+
+
+def test_workspace_ui_inspect_compaction_keeps_editable_manifest_and_catalog(tmp_path, monkeypatch):
+    from copy import deepcopy
+    from nerya.core.config import Config, DEFAULT_CONFIG
+    from nerya.core.paths import WorkspacePaths
+    from nerya.tools.native.workspace_ui import workspace_ui_inspect_handler
+    from nerya.tools.types import ToolCall
+    from nerya.workspace import ui
+
+    widgets = [{"id": f"ticker-{i}", "kind": "market_ticker", "title": f"Market {i}",
+                "source": "market.ticker", "config": {"venue": "binance", "market": "BTC/USDT"},
+                "read_only": True} for i in range(4)]
+    manifest = {"version": 1, "home": {"widgets": []}, "pages": [
+        {"id": "market-overview", "href": "/workspace/pages/market-overview", "title": "Markets", "nav": {"section": "primary", "order": 1},
+         "widgets": widgets}]}
+    monkeypatch.setattr(ui, "read", lambda paths: {
+        "ok": True, "status": "ready", "manifest": manifest, "revision": 7,
+        "digest": "d" * 64, "catalog": ui.catalog(), "source": "workspace",
+    })
+    config = Config(WorkspacePaths(tmp_path), deepcopy(DEFAULT_CONFIG))
+    result = workspace_ui_inspect_handler(ToolCall(name="workspace_ui_inspect", arguments={
+        "page_id": "market-overview", "include_manifest": True}), config=config)
+    assert not result.is_error
+    output = result.content[0].data
+    compacted = tc.compact_tool_result("workspace_ui_inspect", output)
+    assert not compacted.skipped
+    kept = compacted.kept
+    assert kept["revision"] == 7 and kept["digest"] == "d" * 64
+    assert kept["manifest"] == manifest
+    catalog = {row["kind"]: row for row in kept["catalog"]["widget_kinds"]}
+    assert set(catalog) == ui.WIDGET_KINDS
+    assert catalog["chart"]["config_example"] == ui.catalog()["widget_kinds"][2]["config_example"]
+    assert catalog["market_ticker"]["source"] == "market.ticker"
+    assert catalog["portfolio"]["data_contract"]["supports_account_filter"] is False
+    output["manifest"]["pages"][0]["widgets"] = widgets * 100
+    output["padding"] = "raw-body" * 10000
+    bounded = tc.compact_tool_result("workspace_ui_inspect", output).kept
+    page = bounded["manifest"]["pages"][0]
+    assert len(page["widgets"]) <= 16
+    assert page["widgets_truncated"] == 400 - len(page["widgets"])
+    assert len(json.dumps(bounded)) < 16000
+    assert "raw-body" not in json.dumps(bounded)
+
+
 def test_connector_list_compaction_keeps_connector_ids_and_next_action() -> None:
     output = {
         "count": 2,
@@ -200,7 +273,8 @@ def test_data_api_table_compaction_keeps_rows_sample() -> None:
     assert not result.skipped
     assert result.rule_id == "data_api.table"
     assert result.kept["row_count"] == 12
-    assert len(result.kept["rows_sample"]) == 5
+    assert len(result.kept["rows_sample"]) == 12
+    assert result.kept["sample_truncated"] is False
     assert result.kept["rows_sample"][0]["address"] == "addr0"
 
 
@@ -352,6 +426,64 @@ def test_backtest_compaction_keeps_dashboard_artifact_locator() -> None:
     assert result.kept["chart_path"].endswith("chart.json")
 
 
+def test_backtest_compaction_keeps_bounded_retrospective_decision_proof() -> None:
+    output = {
+        "ok": True,
+        "result_type": "backtest_result",
+        "backtest_status": "completed",
+        "execution_mode": "script",
+        "performance_evidence": False,
+        "decision_replay": {
+            "label": "current_model_retrospective_replay",
+            "decision_receipts_verified": True,
+            "model_decisions_verified": True,
+            "decision_count": 13,
+            "performance_evidence": False,
+            "binding": {
+                "source_revision": "source-hash",
+                "config_hash": "config-hash",
+                "data_hash": "data-hash",
+                "role_prompt_hash": "role-hash",
+                "model_settings_hash": "model-settings-hash",
+                "provider": "provider-body-to-drop",
+            },
+            "tape_sha256": "tape-hash",
+            "replay_passes": 1,
+            "tape": [{"response": "model-body-to-drop"}],
+        },
+        "padding": "x" * 8000,
+    }
+
+    result = tc.compact_tool_result("strategy_backtest", output, size_threshold=0)
+
+    assert result.kept["decision_replay"] == {
+        "label": "current_model_retrospective_replay",
+        "decision_receipts_verified": True,
+        "model_decisions_verified": True,
+        "decision_count": 13,
+        "performance_evidence": False,
+        "tape_sha256": "tape-hash",
+        "replay_passes": 1,
+        "binding": {
+            "source_revision": "source-hash",
+            "config_hash": "config-hash",
+            "data_hash": "data-hash",
+            "role_prompt_hash": "role-hash",
+            "model_settings_hash": "model-settings-hash",
+        },
+    }
+    malformed = tc.compact_tool_result(
+        "strategy_backtest",
+        {"decision_replay": {
+            "label": {"provider_body": "must-drop"},
+            "decision_count": "13",
+            "binding": {"data_hash": {"provider_body": "must-drop"}},
+        }, "padding": "x" * 8000},
+        size_threshold=0,
+    )
+    assert "decision_replay" not in malformed.kept
+
+
 def test_backtest_compaction_keeps_top_level_outcome_contract() -> None:
     output = {
         "ok": False,
@@ -359,6 +491,9 @@ def test_backtest_compaction_keeps_top_level_outcome_contract() -> None:
         "coverage_ok": False,
         "coverage": {"bars": 3, "required_bars": 100, "complete": False},
         "coverage_message": "historical candles are incomplete",
+        "modeled_coverage": {"covered_seconds": 7200, "requested_seconds": 10800, "complete": False},
+        "gaps": [{"start": "2026-01-01T01:00:00Z", "end": "2026-01-01T02:00:00Z", "seconds": 3600}],
+        "observation_coverage": {"leading_gap_seconds": 600, "completeness": "not_asserted"},
         "operator_summary": {
             "headline": "Insufficient coverage",
             "unit_warning": "percent values are display strings",
@@ -373,6 +508,11 @@ def test_backtest_compaction_keeps_top_level_outcome_contract() -> None:
     assert result.kept["coverage_ok"] is False
     assert result.kept["coverage"]["bars"] == 3
     assert result.kept["operator_summary"]["headline"] == "Insufficient coverage"
+    crowded = tc.compact_tool_result("strategy_backtest",
+        {**{f"counter_{i}": i for i in range(50)}, **output}, size_threshold=0)
+    for key in ("modeled_coverage", "gaps", "observation_coverage"):
+        assert result.kept[key] == output[key]
+        assert crowded.kept[key] == output[key]
     assert "padding" not in result.kept
 
 

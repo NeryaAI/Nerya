@@ -103,6 +103,74 @@ def test_backtest_config_default_and_validation():
         )
 
 
+@pytest.mark.parametrize("layer", ["defaults", "config_path", "overrides"])
+def test_backtest_config_cost_layer_precedence(tmp_path: Path, layer):
+    from nerya.core import yaml_io
+
+    costs = {"fee_bps": 10, "slippage_bps": 5,
+             "fee_bps_by_venue": {"custom": 7}, "slip_bps_by_venue": {"custom": 3}}
+    if layer == "config_path":
+        value = tmp_path / "costs.yml"
+        yaml_io.dump(value, costs)
+    else:
+        value = costs
+    cfg = load_config(preset="default", **{layer: value})
+    assert cfg.fee_bps_by_venue == {**dict.fromkeys(BacktestConfig().fee_bps_by_venue, 10),
+                                  "UNKNOWN": 10, "CUSTOM": 7}
+    assert cfg.slip_bps_by_venue == {**dict.fromkeys(BacktestConfig().slip_bps_by_venue, 5),
+                                   "UNKNOWN": 5, "CUSTOM": 3}
+    # A later map without a scalar changes only its named venue.
+    cfg = load_config(defaults=costs, overrides={"fee_bps_by_venue": {"CUSTOM": 9}})
+    assert cfg.fee_bps_by_venue["CUSTOM"] == 9
+    assert cfg.fee_bps_by_venue["BINANCE"] == cfg.fee_bps_by_venue["UNKNOWN"] == 10
+    assert cfg.slip_bps_by_venue["CUSTOM"] == 3
+    assert costs["fee_bps_by_venue"] == {"custom": 7}
+
+
+@pytest.mark.parametrize("settings, fee, slip, custom_fee, custom_slip", [
+    ({"fee_bps": 10, "slippage_bps": 5}, 10, 5, 10, 5),
+    ({"fee_bps": 0, "slippage_bps": 0}, 0, 0, 0, 0),
+    ({"fee_bps": 10, "slippage_bps": 5,
+      "fee_bps_by_venue": {"custom": 7}, "slip_bps_by_venue": {"custom": 3}},
+     10, 5, 7, 3),
+])
+def test_native_backtest_settings_cost_precedence(
+    tmp_path: Path, settings, fee, slip, custom_fee, custom_slip,
+):
+    from nerya.core import yaml_io
+    from nerya.tools.native.strategy_runtime import strategy_backtest_handler
+    from nerya.tools.types import ToolCall
+
+    root = tmp_path / "strategies" / "cost_precedence"
+    root.mkdir(parents=True)
+    yaml_io.dump(tmp_path / "nerya.yml", {"runtime": {"live_trading_enabled": False}})
+    yaml_io.dump(root / "strategy.yml", {
+        "version": 1, "strategy_id": root.name, "title": "Cost precedence fixture",
+        "mode": "paper", "entrypoint": "main.py:run", "markets": ["BINANCE:TESTUSDT"],
+        "accounts": ["fixture"], "execution_mode": "script",
+        "schedule": {"type": "none", "enabled": False},
+        "policy": {"allow_direct_order": False},
+        "backtest": {"fee_bps_by_venue": {"CUSTOM": 4}, "slip_bps_by_venue": {"CUSTOM": 2}},
+    })
+    (root / "main.py").write_text("def run(ctx): return ctx.result.hold(reason='fixture')\n")
+    yaml_io.dump(tmp_path / "replay.yml", {
+        "fee_bps_by_venue": {"CUSTOM": 6}, "slip_bps_by_venue": {"CUSTOM": 4},
+    })
+    result = strategy_backtest_handler(ToolCall(name="strategy_backtest", arguments={
+        "strategy_id": root.name, "engine": "native", "preflight_only": True,
+        "config_path": "replay.yml", "settings": settings,
+    }), config=Config(paths=WorkspacePaths(root=tmp_path)))
+    assert not result.is_error, result
+    body = result.content[0].data
+    assert body["ok"] is True and body["result_type"] == "backtest_preflight"
+    saved = yaml_io.load(Path(body["run_path"]) / "config.yml")
+    assert saved == body["config"]
+    for key, value, custom in (("fee_bps_by_venue", fee, custom_fee),
+                               ("slip_bps_by_venue", slip, custom_slip)):
+        assert saved[key] == {**dict.fromkeys((*getattr(BacktestConfig(), key), "UNKNOWN"), value),
+                              "CUSTOM": custom}
+
+
 def test_backtest_discovers_strategy_declared_default_timeframe(tmp_path: Path):
     strategy_root = tmp_path / "strategies" / "daily_team"
     strategy_root.mkdir(parents=True)
@@ -715,7 +783,39 @@ def test_strategy_backtest_handler_returns_display_metrics_to_model(monkeypatch,
     assert "warmup" in data["bar_accounting"]["note"]
 
 
-def test_strategy_backtest_handler_preserves_candidate_backtest_defaults_unless_explicitly_overridden(
+def test_manifest_timeframe_is_default_and_explicit_tf_wins(tmp_path):
+    from nerya.core import yaml_io
+    from nerya.skills.builtin.backtest.scripts.backtest_run import run_strategy_backtest
+
+    root = tmp_path / "strategies" / "manifest_timeframe"
+    root.mkdir(parents=True)
+    yaml_io.dump(tmp_path / "nerya.yml", {"runtime": {"live_trading_enabled": False}})
+    yaml_io.dump(root / "strategy.yml", {
+        "version": 1,
+        "strategy_id": root.name,
+        "title": "Manifest timeframe fixture",
+        "mode": "paper",
+        "entrypoint": "main.py:run",
+        "markets": ["BINANCE:BTCUSDT"],
+        "accounts": ["fixture"],
+        "execution_mode": "script",
+        "timeframe": "15m",
+        "schedule": {"type": "none", "enabled": False},
+        "policy": {"allow_direct_order": True},
+    })
+    (root / "main.py").write_text("def run(ctx): return ctx.result.hold(reason='fixture')\n")
+    inherited = run_strategy_backtest(
+        strategy_id=root.name, workspace=tmp_path, preflight_only=True,
+    )
+    assert inherited["config"]["tf"] == "15m"
+    overridden = run_strategy_backtest(
+        strategy_id=root.name, workspace=tmp_path, preflight_only=True,
+        settings={"tf": "1h"},
+    )
+    assert overridden["config"]["tf"] == "1h"
+
+
+def test_strategy_backtest_handler_accepts_alternate_research_windows_without_override_gate(
     monkeypatch,
     tmp_path: Path,
 ) -> None:
@@ -791,15 +891,11 @@ def test_strategy_backtest_handler_preserves_candidate_backtest_defaults_unless_
         }),
         config=Config(paths=paths),
     )
-    assert seen[0]["settings"] == {"max_run_seconds": 123}
-    assert seen[0]["data_mode"] is None
+    assert seen[0]["settings"] == hallucinated
+    assert seen[0]["data_mode"] == "download"
     data = result.content[0].data
-    assert data["candidate_backtest_defaults_applied"] is True
-    assert set(data["ignored_candidate_backtest_overrides"]) >= {
-        "window_days", "start_utc", "end_utc", "tf", "timeframes",
-        "warmup_bars", "max_open_trades", "allow_short", "coverage_policy",
-        "data_mode", "slip_bps_by_venue", "data_mode(top_level)",
-    }
+    assert data["candidate_backtest_defaults_applied"] is False
+    assert "ignored_candidate_backtest_overrides" not in data
 
     strategy_backtest_handler(
         ToolCall(name="strategy_backtest", arguments={
@@ -959,14 +1055,16 @@ def test_strategy_backtest_handler_prefers_freeform_sdk_backtest(
     assert data["ok"] is True
     assert data["kind"] == "freeform_backtest"
     assert data["paper_review_basis"] == "freeform_sdk_backtest"
-    assert data["coverage_ok"] is True
-    assert data["metrics"]["total_return_pct"] == "5.0000%"
+    assert data["coverage_ok"] is None
+    assert data["performance_evidence"] is False
+    assert "total_return_pct" not in data["metrics"]  # Unverified script output is not public performance.
     assert data["chart_panels"] == 1
     assert data["nonstandard_backtests"][0]["kind"] == "freeform_backtest"
     assert data["nonstandard_backtests"][0]["has_equity_curve"] is True
     assert data["nonstandard_backtests"][0]["has_trade_details"] is True
     raw_metrics = json.loads(Path(data["raw_metrics_file"]).read_text(encoding="utf-8"))
     assert raw_metrics["backtest_kind"] == "freeform_backtest"
+    assert raw_metrics["total_return_pct"] == 5.0
     assert raw_metrics["total_trades"] == 2
     assert _proposal_backtest_artifacts(paths, proposal.id, "s1") == []
 
@@ -1076,7 +1174,7 @@ def test_freeform_backtest_accepts_pretty_stdout_numeric_equity_curve(
     assert rows[1] == "0,10000"
 
 
-def test_freeform_backtest_accepts_fresh_script_dir_artifacts(
+def test_freeform_backtest_rejects_script_dir_artifacts(
     tmp_path: Path,
 ) -> None:
     from nerya.skills.builtin.backtest.scripts.freeform_run import run_freeform_backtest
@@ -1112,14 +1210,11 @@ def test_freeform_backtest_accepts_fresh_script_dir_artifacts(
     )
     assert generated.proposal is not None
 
-    out = run_freeform_backtest(
-        proposal_id=generated.proposal.id,
-        workspace=tmp_path,
-    )
+    from nerya.core.errors import TradingError
 
-    assert out["ok"] is True
-    assert out["equity_points"] == 2
-    assert Path(out["equity_path"]).parent == Path(out["out_dir"])
+    # Legacy writes beside __file__ are outside the isolated output contract.
+    with pytest.raises(TradingError, match='PermissionError|Operation not permitted'):
+        run_freeform_backtest(proposal_id=generated.proposal.id, workspace=tmp_path)
 
 
 def test_freeform_backtest_closes_stdin_for_scripts_that_read(tmp_path: Path) -> None:
@@ -1428,7 +1523,8 @@ def test_polymarket_strategy_prompt_path_generates_and_backtests_freeform(
     assert data["strategy_id"] == "polymarket_headline_edge"
     assert data["proposal_id"] == proposal_id
     assert data["kind"] == "freeform_backtest"
-    assert data["coverage_ok"] is True
+    assert data["coverage_ok"] is None
+    assert data["performance_evidence"] is False
     assert data["total_trades"] == 2
     assert data["metrics_are_display_strings"] is True
     assert Path(data["raw_metrics_file"]).exists()

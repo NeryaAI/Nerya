@@ -380,14 +380,8 @@ class StrategyAPI:
         proposal_id: Optional[str] = None,
     ) -> dict[str, Any]:
         if proposal_id:
-            sid, files = self._read_proposal_files(proposal_id)
-            if not files:
-                raise NeryaError(
-                    f"proposal {proposal_id!r} has no after/strategies/* tree"
-                )
-            return validate_proposal_files(
-                strategy_id=strategy_id or sid or proposal_id, files=files
-            ).asdict()
+            from ..strategies.validation_receipt import validate_proposal_receipt
+            return validate_proposal_receipt(self.config.paths, proposal_id, strategy_id=strategy_id)
         if not strategy_id:
             raise NeryaError("strategy_id or proposal_id is required")
         return validate_strategy_package(self.config.paths, strategy_id).asdict()
@@ -487,6 +481,14 @@ class StrategyAPI:
             route=RouterResult(event.event_id,'routed',event.target,None,strategy_id)
             result=admit_strategy(self.config,event,route,actor_id=operator or self.config.get('runtime.financial_actor_id'))
             return {**result.result,'status':result.status,'admission_only':True}
+        if trigger_event_id:
+            from ..trading.live_trigger import live_trigger_denial
+            # Pin the very same mode for admission and execution. A scheduled
+            # tick need not repeat the live mode stored in its manifest.
+            mode_override = mode_override or package.manifest.mode
+            denial = live_trigger_denial(self.config, strategy_id, mode_override, trigger_payload, trigger_event_id)
+            if denial:
+                return denial
         runner = StrategyRunner(config=self.config, skills=self.skills)
         record = runner.run_tick(
             strategy_id,

@@ -1,0 +1,93 @@
+# @nerya.version 1
+# @nerya.title Script-gated EMA confirmation
+# @nerya.description Confirm a closed-candle entry signal with a read-only Agent.
+# @nerya.logic Script owns entry eligibility and deterministic long exits.
+# @nerya.rationale No signal means no Agent call; a verdict cannot create a signal.
+# @nerya.scope Configured markets and timeframe; no activation or account changes.
+# @nerya.input Closed candles, saved periods, settled positions and confirmation envelope.
+# @nerya.output StrategyResult preserving SDK receipt status and reconciliation IDs.
+# @nerya.risk Model uncertainty and execution costs can invalidate the signal.
+# @nerya.validation Synthetic verdicts prove behavior only, not historical model performance.
+
+from math import isfinite
+
+from nerya.strategies.candle_view import candle_snapshots
+
+from ema_cross import ema_cross
+from strategy_execution import run_closed_signal
+
+
+def confirmation_candles(candles, context_bars, timeframe):
+    """Project the already-closed prefix to SDK OHLCV; never fill missing data.
+
+    Saved params.confirmation_context_bars defaults to 60, capped at 60.
+    This bounds candle context only; the complete signal history is retained.
+    """
+    fields = ('open', 'high', 'low', 'close', 'volume')
+    projected = []
+    for row in candles[-min(context_bars, 60):]:
+        if not isinstance(row, dict):
+            raise ValueError('candle must be an OHLCV mapping')
+        stamp = next((row[key] for key in
+                      ('ts', 'ts_ms', 'timestamp_ms', 'open_time_ms', 'timestamp')
+                      if key in row and row[key] is not None), None)
+        if any(isinstance(row[key], bool) for key in fields):
+            raise ValueError('boolean OHLCV is invalid')
+        values = {key: float(row[key]) for key in fields}
+        if not all(isfinite(value) for value in values.values()):
+            raise ValueError('non-finite OHLCV')
+        if min(values[key] for key in fields[:-1]) <= 0 or values['volume'] < 0:
+            raise ValueError('non-positive price or negative volume')
+        if (values['low'] > min(values['open'], values['close'])
+                or values['high'] < max(values['open'], values['close'])):
+            raise ValueError('inconsistent OHLC range')
+        projected.append({'ts': stamp, **values})
+    if not projected:
+        raise ValueError('missing confirmation candles')
+    normalized = candle_snapshots(projected, timeframe)
+    if any(row.get('ts') is None or row['ts'] <= 0 for row in normalized):
+        raise ValueError('invalid candle timestamp')
+    return [{key: row[key] for key in ('ts', *fields)} for row in normalized]
+
+
+def confirmation_step(ctx, market, candles, signals):
+    params = ctx.config.params
+    context_bars = params.get('confirmation_context_bars', 60)
+    if type(context_bars) is not int or context_bars < 1:
+        return ctx.result.error(message='confirmation_context_bars must be a positive integer',
+                                kind='config_error')
+    try:
+        context = confirmation_candles(candles, context_bars, ctx.config.timeframe)
+    except (KeyError, TypeError, ValueError, OverflowError):
+        return ctx.result.error(message='invalid confirmation candles', kind='confirmation_error')
+    try:
+        envelope = ctx.subagents.run(params['confirmation_agent'], payload={
+            'market': market, 'timeframe': ctx.config.timeframe,
+            'candles': context, 'signals': signals,
+            'ask': 'Return decision ENTRY or HOLD and numeric confidence from 0 to 1.',
+        })
+    except RuntimeError as exc:
+        # Preserve cancellation and typed control/SDK exceptions unchanged.
+        if type(exc) is not RuntimeError:
+            raise
+        return ctx.result.error(message="confirmation failed", kind="confirmation_error")
+    if not isinstance(envelope, dict) or envelope.get('ok') is not True:
+        return ctx.result.error(message='confirmation failed', kind='confirmation_error')
+    verdict = envelope.get('output')
+    if not isinstance(verdict, dict):
+        return ctx.result.error(message='missing confirmation output', kind='confirmation_error')
+    decision, confidence = verdict.get('decision'), verdict.get('confidence')
+    if (decision not in ('ENTRY', 'HOLD') or type(confidence) not in (int, float)
+            or not isfinite(confidence) or not 0 <= confidence <= 1):
+        return ctx.result.error(message='invalid confirmation verdict', kind='confirmation_error')
+    threshold = params['confirmation_min_confidence']
+    if type(threshold) not in (int, float) or not isfinite(threshold) or not 0 <= threshold <= 1:
+        return ctx.result.error(message='invalid confidence threshold', kind='config_error')
+    if decision != 'ENTRY' or confidence < threshold:
+        return ctx.result.hold(reason='confirmation_veto', metadata={'verdict': verdict})
+    return {'confidence': confidence}
+
+
+# @nerya.step execute | Evaluate EMA crossover | Confirm eligible entries; exit without Agent.
+def run(ctx):
+    return run_closed_signal(ctx, ema_cross, confirm=confirmation_step)

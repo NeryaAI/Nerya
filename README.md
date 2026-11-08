@@ -124,6 +124,8 @@ Push a tag matching `VERSION` (for example `v1.0.0-beta.1`) to request a release
 
 ## Project layout
 
+For subsystem contracts, see the [developer guide](docs/README.md).
+
 ```text
 nerya/              Python Agent runtime, APIs, connectors and trading services
 nerya/skills/       Built-in SKILL.md playbooks, references and executable helpers

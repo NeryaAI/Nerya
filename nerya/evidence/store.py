@@ -23,12 +23,14 @@ The matching function :func:`EvidenceStore.search` enforces these rules.
 from __future__ import annotations
 
 import json
+import hashlib
 import re
 import secrets
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterable, Optional
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from ..security.prompt_injection import wrap_untrusted  # noqa: F401  (re-export idea)
 from .schemas import EvidenceDoc, Provenance, SecurityInfo, now_iso, today_path_segment
@@ -54,6 +56,23 @@ def _redact(text: str) -> tuple[str, bool]:
 
 def _evidence_id() -> str:
     return "ev_" + secrets.token_hex(8)
+
+
+def _source_locator(value: str) -> str:
+    """Keep a source navigable without persisting URL credentials/signatures."""
+    from ..core.redaction import redact_text
+    text = str(value)[:2048]
+    if "://" in text:
+        try:
+            parsed = urlsplit(text)
+            query = [(key, "[redacted]" if any(hint in key.lower() for hint in
+                      ("token", "key", "secret", "password", "credential", "signature", "authorization")) else val)
+                     for key, val in parse_qsl(parsed.query, keep_blank_values=True)]
+            text = urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1], parsed.path,
+                               urlencode(query), parsed.fragment))
+        except ValueError:
+            return ""
+    return redact_text(_redact(text)[0])
 
 
 @dataclass
@@ -87,10 +106,21 @@ class EvidenceStore:
         route: str = "",
         created_by: str = "runtime",
         artifact_refs: Optional[list[str]] = None,
+        source_locator: str = "",
+        as_of: str = "",
+        retrieved_at: str = "",
     ) -> EvidenceDoc:
         redacted_body, body_had_secret = _redact(body or "")
         redacted_summary, summary_had_secret = _redact(summary or "")
+        locator = _source_locator(source_locator)
         evidence_id = _evidence_id()
+        # Fingerprint the persisted, redacted body, never the original secrets.
+        # A source snapshot is appended, not overwritten. Concurrent ingests may
+        # branch from the same predecessor; this is provenance, not a lock.
+        previous = next((row for row in reversed(list(self._iter_index()) if source_type == "research" else [])
+                         if row.get("source_type") == source_type and row.get("source_id") == source_id
+                         and row.get("scope", "shared") == scope
+                         and row.get("strategy_id") == strategy_id and row.get("session_id") == session_id), None)
         doc = EvidenceDoc(
             evidence_id=evidence_id,
             source_type=source_type,
@@ -103,9 +133,12 @@ class EvidenceStore:
                 session_id=session_id or "",
                 artifact_refs=list(artifact_refs or []),
                 created_by=created_by,
+                source_locator=locator,
+                as_of=_redact(str(as_of)[:128])[0],
+                retrieved_at=_redact(str(retrieved_at)[:128])[0],
             ),
             security=SecurityInfo(
-                contains_secret=body_had_secret or summary_had_secret,
+                contains_secret=body_had_secret or summary_had_secret or locator != source_locator,
                 redaction_applied=True,
             ),
             tags=list(tags or []),
@@ -114,6 +147,8 @@ class EvidenceStore:
             scope=scope,
             strategy_id=strategy_id,
             session_id=session_id,
+            content_sha256=hashlib.sha256(redacted_body.encode("utf-8")).hexdigest(),
+            previous_evidence_id=str(previous.get("evidence_id") or "") if previous else "",
         )
         doc.workspace_path = str(self._doc_path(doc).relative_to(self.workspace_root))
         self._write_markdown(doc)
@@ -131,6 +166,8 @@ class EvidenceStore:
             f"title: {doc.title}",
             f"created_at: {doc.created_at}",
             f"scope: {doc.scope}",
+            f"content_sha256: {doc.content_sha256}",
+            f"previous_evidence_id: {doc.previous_evidence_id}",
         ]
         if doc.strategy_id:
             meta_lines.append(f"strategy_id: {doc.strategy_id}")

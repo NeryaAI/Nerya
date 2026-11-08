@@ -27,9 +27,11 @@ class BacktestUnsupportedSurfaceError(RuntimeError):
             super().__init__(f"ctx.{surface} is unsupported in OHLCV backtests: {detail}")
         else:
             super().__init__(
-                f"ctx.{surface} is unsupported in OHLCV backtests; gate this call on "
-                "ctx.runmode == 'backtest' or set mock_surfaces."
-                f"{surface}.mode = 'stub'/'replay'"
+                f"ctx.{surface} is unsupported in OHLCV backtests. "
+                "Existing gated surfaces may use an explicit mode='stub' with a "
+                "contract-valid payload for simulated branch testing only, not "
+                "real AI/input performance evidence. mode='replay' is not implemented. "
+                "Do not bypass strategy gates to obtain a passing backtest."
             )
 
 
@@ -298,6 +300,23 @@ class MockTrading:
     policy: Any = None
     market_data: Any = None
     attempts: list[dict[str, Any]] = field(default_factory=list)
+    execution_records: dict[str, dict[str, Any]] = field(default_factory=dict)
+    accounts: tuple[str, ...] = ()
+
+    def execution_status(self, receipt: Any) -> dict[str, Any]:
+        from .....strategies.execution_status import scoped_ids, status_result
+        ids = scoped_ids(receipt, self.strategy_id, self.accounts)
+        if ids is None or len(ids["intent_id"]) != 1:
+            return status_result()
+        intent_id = next(iter(ids["intent_id"]))
+        record = self.execution_records.get(intent_id)
+        if not record or record.get("strategy_id") != self.strategy_id:
+            return status_result()
+        if any(ids[key] for key in ("executor_id", "session_id", "plan_id", "reservation_id")):
+            return status_result()
+        if ids["order_id"] - set(record.get("order_ids", [])):
+            return status_result()
+        return status_result(record["status"])
 
     @track_submission
     def submit_intent(self, **payload: Any) -> dict[str, Any]:
@@ -345,6 +364,9 @@ class MockTrading:
         Strategies must read ctx.portfolio on the next tick for actual holdings.
         Estimates stay explicitly separate and must not register a position.
         """
+        self.execution_records[str(record["intent_id"])] = {
+            "strategy_id": self.strategy_id, "status": "submitted", "order_ids": [],
+        }
         price = float(self.market_data.mark_price(str(record.get("market") or ""))
                       if self.market_data is not None else self.mark_price or 0.0)
         qty = self._estimate_filled_size(record, price)
@@ -865,15 +887,25 @@ class MockAudit:
 
 
 class _GatedSurface:
-    def __init__(self, name: str, cfg: MockSurfaceCfg) -> None:
+    def __init__(self, name: str, cfg: MockSurfaceCfg, audit: MockAudit | None = None) -> None:
         self.name = name
         self.cfg = cfg
+        self.audit = audit
+        self.call_counts: dict[str, int] = {}
 
     def _value(self) -> Any:
+        # Record only actual attempts, never prompts, arguments or payloads.
+        mode = self.cfg.mode
+        self.call_counts[mode] = self.call_counts.get(mode, 0) + 1
+        if self.audit:
+            self.audit.log("mock_surface_call", {"surface": self.name, "mode": mode, "count": 1})
         if self.cfg.mode == "stub":
             return self.cfg.payload
         if self.cfg.mode == "replay":
-            raise NotImplementedError(f"mock_surfaces.{self.name}.mode=replay is reserved for v2")
+            raise BacktestUnsupportedSurfaceError(self.name, detail=
+                f"mock_surfaces.{self.name}.mode='replay' is not implemented; "
+                "mode='stub' only simulates supplied payloads and is not historical "
+                "AI/input performance evidence. Do not bypass strategy gates.")
         raise BacktestUnsupportedSurfaceError(self.name)
 
 
@@ -975,6 +1007,7 @@ class MockCtx:
     strategy_root: Path | None = None
     backtest_replay: Any = None
     stream: Any = None
+    execution_records: dict[str, dict[str, Any]] = field(default_factory=dict)
 
     def __post_init__(self) -> None:
         from .....strategies.context import StrategyDedupe, StrategyRunDeadline, StrategyTriggerContext
@@ -994,6 +1027,8 @@ class MockCtx:
             mark_price=float(self.current_bar.get("close", 0.0) or 0.0),
             policy=self.policy_obj or MockPolicy(),
             market_data=self.market,
+            execution_records=self.execution_records,
+            accounts=tuple(getattr(self.config, "accounts", ())),
         )
         self.audit = MockAudit(self.audit_sink)
         from .data_cache import _tf_seconds
@@ -1004,10 +1039,10 @@ class MockCtx:
         self.dedupe = StrategyDedupe(self.state)
         self.portfolio = MockPortfolio(self.state, self.market)
         self.pnl = MockPnL(self.state)
-        self.news = MockNews("news", self.config_obj.mock_surfaces["news"])
-        self.llm = MockLLM("llm", self.config_obj.mock_surfaces["llm"])
-        self.subagents = MockSubAgents("subagents", self.config_obj.mock_surfaces["subagents"])
-        self.messages = MockMessages("messages", self.config_obj.mock_surfaces["messages"])
+        self.news = MockNews("news", self.config_obj.mock_surfaces["news"], self.audit)
+        self.llm = MockLLM("llm", self.config_obj.mock_surfaces["llm"], self.audit)
+        self.subagents = MockSubAgents("subagents", self.config_obj.mock_surfaces["subagents"], self.audit)
+        self.messages = MockMessages("messages", self.config_obj.mock_surfaces["messages"], self.audit)
         self.policy = self.policy_obj or MockPolicy()
         self.trigger = StrategyTriggerContext(source="backtest", kind="market.candle_closed",
             strategy_id=self.strategy_id, event_id=self.run_id,
@@ -1025,6 +1060,12 @@ class MockCtx:
         self.inputs = StrategyInputContext(sources=getattr(self.config, "extras", {}).get("data_sources", []),
             market=self.market, news=self.news, markets=tuple(self.config.markets),
             run_id=self.run_id, clock=self.clock)
+
+    @property
+    def mock_surface_calls(self) -> list[dict[str, Any]]:
+        return [{"surface": surface.name, "mode": mode, "count": count}
+                for surface in (self.news, self.llm, self.subagents, self.messages)
+                for mode, count in sorted(surface.call_counts.items())]
 
     @property
     def runmode(self) -> str:

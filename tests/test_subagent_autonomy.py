@@ -42,13 +42,13 @@ def test_unset_and_explicit_empty_allowlists_are_different(tmp_path):
     assert runtime._allowed_native_tool_names(spec=empty) == []
 
 
-def test_zero_call_budget_survives_parse_merge_and_roundtrip(tmp_path):
+def test_explicit_call_limit_bounds_unlimited_default_after_roundtrip(tmp_path):
     policy = SubAgentExecutionPolicy.from_dict({"max_skill_calls": 0})
     merged = policy.merged({"max_skill_calls": 50})
     restored = SubAgentExecutionPolicy.from_dict(merged.asdict())
     spec = SubAgentSpec(name="custom", prompt_path=tmp_path / "role.md", execution_policy=restored)
-    assert restored.max_skill_calls == 0
-    assert _runtime(tmp_path)._max_skill_calls(spec) == 0
+    assert restored.max_skill_calls == 50
+    assert _runtime(tmp_path)._max_skill_calls(spec) == 50
 
 
 @pytest.mark.parametrize("wall", [0.0, 0.25, 2.0])

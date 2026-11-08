@@ -20,7 +20,8 @@ def rebalance_tick(ctx, *, plan, plan_key):
     if row['state'] not in {'completed','stopped'}:
         row=ctx.financial.advance_rebalance(row['rebalance_id'],expected_revision=row['revision'])
     metadata={'rebalance_id':row['rebalance_id'],'state':row['state'],'step':row['cursor'],
-              'action_ids':row['action_ids'],'reason':row.get('reason')}
+              'action_ids':row['action_ids'],'reason':row.get('reason'),
+              'actions':row.get('actions',[])}
     if row['state']=='completed':
         return ctx.result.ok(reason='LP range adjustment confirmed',metadata=metadata)
     return ctx.result.hold(reason='LP '+row['state'],metadata=metadata)

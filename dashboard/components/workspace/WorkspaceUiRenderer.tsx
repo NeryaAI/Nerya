@@ -5,6 +5,7 @@ import { useEffect, useMemo, useState, type ReactNode } from "react";
 import { useTranslations } from "next-intl";
 import { CandleChart } from "../CandleChart";
 import { Card, Kpi, Pill, StatusDot } from "../Page";
+import { ModePill } from "../ModePill";
 import { clientApi, type SkillSummary } from "../../lib/clientApi";
 import type { PortfolioSummary, StrategyCard } from "../../lib/api";
 import type { AttentionItem } from "../../lib/operatorTypes";
@@ -135,8 +136,12 @@ function LoadingBlock() {
 function ErrorBlock({ message }: { message: string }) {
   const t = useTranslations("workspaceUi");
   return (
-    <div className="rounded-md border border-rose-500/20 bg-rose-500/5 px-3 py-2.5 text-[12px] leading-relaxed text-rose-300">
-      {t("widgetUnavailable")}: {message}
+    <div role="alert" className="rounded-md border border-danger/20 bg-danger/5 px-3 py-2.5 text-[12px] leading-relaxed text-danger">
+      <p>{t("widgetUnavailable")}: {t(/\b(?:403|451)\b|restricted location|forbidden|access denied/i.test(message) ? "marketAccessDenied" : "widgetReadFailed")}</p>
+      <details className="mt-2">
+        <summary className="cursor-pointer">{t("widgetDiagnosticDetails")}</summary>
+        <pre className="mt-2 max-h-48 overflow-auto whitespace-pre-wrap break-words text-xs">{message}</pre>
+      </details>
     </div>
   );
 }
@@ -194,10 +199,11 @@ function LinkWidget({ widget }: { widget: WorkspaceUiWidget }) {
 }
 
 function MarketChartWidget({ widget }: { widget: WorkspaceUiWidget }) {
+  const t = useTranslations("workspaceUi");
   const config = configOf(widget);
   const venue = asString(config.venue, "bybit");
   const market = asString(config.market, asString(config.symbol, "BTC/USDT"));
-  const interval = asString(config.interval, "1h");
+  const interval = asString(config.interval, asString(config.timeframe, "1h"));
   const count = Math.max(20, Math.min(500, Math.round(asNumber(config.count, 120))));
   const state = useAsyncValue(
     () => clientApi.marketCandles({ venue, market, interval, count }),
@@ -207,6 +213,16 @@ function MarketChartWidget({ widget }: { widget: WorkspaceUiWidget }) {
   const first = candles.at(0)?.close ?? 0;
   const last = candles.at(-1)?.close ?? 0;
   const delta = first ? ((last - first) / first) * 100 : 0;
+  const rawTime = Number(candles.at(-1)?.ts);
+  const timestampMs = rawTime * (rawTime > 1e12 ? 1 : 1000);
+  const lastTime = Number.isFinite(timestampMs) && timestampMs > 0 && timestampMs <= 8.64e15 ? timestampMs : null;
+  const intervalMatch = /^(\d+)([mhdw])$/.exec(interval);
+  const intervalMs = intervalMatch ? Number(intervalMatch[1]) * ({ m: 60_000, h: 3_600_000, d: 86_400_000, w: 604_800_000 }[intervalMatch[2]] ?? 0) : null;
+  const stale = lastTime !== null && intervalMs !== null && Date.now() - lastTime > intervalMs * 2;
+  const envelope = state.value?._envelope;
+  const degraded = envelope?.degraded === true || envelope?.fallback_used === true ||
+    Boolean(envelope?.mode && envelope.mode !== "live");
+  const error = state.error || state.value?.error;
   const chartType = asString(config.chart_type, "candlestick");
   const mode = ["candlestick", "line", "area"].includes(chartType)
     ? (chartType as "candlestick" | "line" | "area")
@@ -215,7 +231,7 @@ function MarketChartWidget({ widget }: { widget: WorkspaceUiWidget }) {
     <WidgetFrame
       widget={widget}
       actions={
-        <div className="flex items-center gap-2 text-[11px] text-[color:var(--text-muted)]">
+        <div className="flex flex-wrap items-center gap-2 text-[11px] text-[color:var(--text-muted)]">
           <Pill tone="neutral">{venue}</Pill>
           <span className="font-mono">{market} · {interval}</span>
           {last ? (
@@ -226,23 +242,33 @@ function MarketChartWidget({ widget }: { widget: WorkspaceUiWidget }) {
         </div>
       }
     >
-      <CandleChart
+      {!state.loading && lastTime !== null ? <p className="mb-2 text-xs text-[color:var(--text-muted)]">
+        {t("marketLastBarAt")} <time dateTime={new Date(lastTime).toISOString()}>{new Date(lastTime).toLocaleString()}</time>
+        {envelope?.source ? <span> · {envelope.source}</span> : null}
+      </p> : null}
+      {stale || degraded ? <p role="status" className="mb-2 text-xs text-warn">
+        {t(stale ? "marketHistoryStale" : "marketSourceDegraded")}
+      </p> : null}
+      {error ? <ErrorBlock message={error} /> : <CandleChart
         candles={candles}
         height={asNumber(config.height, 220)}
         mode={mode}
         showVolume={asBoolean(config.show_volume, true)}
         loading={state.loading}
-        error={state.error || state.value?.error}
-      />
+      />}
     </WidgetFrame>
   );
 }
 
 function MarketTickerWidget({ widget }: { widget: WorkspaceUiWidget }) {
+  const t = useTranslations("workspaceUi");
   const config = configOf(widget);
   const venue = asString(config.venue, "bybit");
   const market = asString(config.market, asString(config.symbol, "BTC/USDT"));
-  const state = useAsyncValue(
+  const state = useAsyncValue<Awaited<ReturnType<typeof clientApi.marketTicker>> & {
+    change?: number | string | null;
+    percentage?: number | string | null;
+  }>(
     () => clientApi.marketTicker({ venue, market }),
     [venue, market],
   );
@@ -250,16 +276,33 @@ function MarketTickerWidget({ widget }: { widget: WorkspaceUiWidget }) {
   if (state.error || state.value?.error) {
     return <WidgetFrame widget={widget}><ErrorBlock message={state.error || state.value?.error || "unknown"} /></WidgetFrame>;
   }
-  const price = Number(state.value?.last ?? state.value?.mid ?? 0);
+  const numberOrUnknown = (value: unknown): number | null => {
+    if (typeof value !== "number" && (typeof value !== "string" || !value.trim())) return null;
+    const number = Number(value);
+    return Number.isFinite(number) ? number : null;
+  };
+  const price = numberOrUnknown(state.value?.last ?? state.value?.mid);
+  const changes = [
+    { label: t("marketChange24h"), value: numberOrUnknown(state.value?.change), percent: false },
+    { label: t("marketPercentage24h"), value: numberOrUnknown(state.value?.percentage), percent: true },
+  ];
   return (
     <WidgetFrame widget={widget} actions={<Pill tone="neutral">{venue}</Pill>}>
       <Kpi
         inline
         label={market}
-        value={price ? price.toLocaleString(undefined, { maximumFractionDigits: 8 }) : "—"}
+        value={price !== null ? price.toLocaleString(undefined, { maximumFractionDigits: 8 }) : "—"}
         delta={state.value?.bid && state.value?.ask ? `bid ${state.value.bid} · ask ${state.value.ask}` : undefined}
         tone="brand"
       />
+      {asBoolean(config.show_change, true) ? <dl className="mt-3 flex flex-wrap gap-x-6 gap-y-2 text-xs">
+        {changes.map(({ label, value, percent }) => <div key={label}>
+          <dt className="text-[color:var(--text-muted)]">{label}</dt>
+          <dd className={"mt-1 tabular-nums " + (value === null || value === 0 ? "text-[color:var(--text)]" : value > 0 ? "text-ok" : "text-danger")}>
+            {value === null ? t("marketValueUnknown") : value.toLocaleString(undefined, { maximumFractionDigits: percent ? 2 : 8, signDisplay: "exceptZero" }) + (percent ? "%" : "")}
+          </dd>
+        </div>)}
+      </dl> : null}
     </WidgetFrame>
   );
 }
@@ -274,16 +317,29 @@ function PortfolioWidget({ widget }: { widget: WorkspaceUiWidget }) {
     return <WidgetFrame widget={widget}><ErrorBlock message={state.error || t("noData")} /></WidgetFrame>;
   }
   const { totals, accounts } = state.value;
-  const positions = accounts.reduce(
+  const modes = new Set(accounts.map(account => account.mode));
+  const mode = !modes.size || [...modes].some(value => value !== "paper" && value !== "live")
+    ? "unknown" : modes.size > 1 ? "mixed" : accounts[0].mode;
+  const positions = accounts.every(account => account.positions != null) ? accounts.reduce(
     (count, account) => count + Object.keys(account.positions || {}).length,
     0,
+  ) : null;
+  const amount = (value: number | null | undefined) => (
+    <span className="block max-w-full overflow-x-auto whitespace-nowrap tabular-nums">
+      {typeof value === "number" && Number.isFinite(value) ? money(value, currency) : "—"}
+    </span>
   );
   return (
-    <WidgetFrame widget={widget} actions={<Link href="/portfolio" className="text-[11px] text-brand-300 hover:text-brand-200">{t("open")}</Link>}>
-      <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
-        <Kpi inline label={t("equity")} value={money(Number(totals.equity_usd || 0), currency)} tone="brand" />
-        <Kpi inline label={t("cash")} value={money(Number(totals.cash_usd || 0), currency)} />
-        <Kpi inline label={t("positions")} value={positions} delta={t("accounts", { count: accounts.length })} />
+    <WidgetFrame widget={widget} actions={<>
+      {mode === "paper" || mode === "live" ? <ModePill mode={mode} /> : (
+        <Pill tone={mode === "mixed" ? "warn" : "neutral"}>{t(mode === "mixed" ? "portfolioModeMixed" : "portfolioModeUnknown")}</Pill>
+      )}
+      <Link href="/portfolio" className="text-[11px] text-brand-300 hover:text-brand-200">{t("open")}</Link>
+    </>}>
+      <div className="grid grid-cols-[repeat(auto-fit,minmax(min(100%,12rem),1fr))] gap-4">
+        <Kpi inline label={t("equity")} value={amount(totals?.equity_usd)} tone="brand" />
+        <Kpi inline label={t("cash")} value={amount(totals?.cash_usd)} />
+        <Kpi inline label={t("positions")} value={positions ?? "—"} delta={t("accounts", { count: accounts.length })} />
       </div>
     </WidgetFrame>
   );
@@ -460,7 +516,20 @@ function UnsupportedWidget({ widget }: { widget: WorkspaceUiWidget }) {
   );
 }
 
-function WorkspaceWidget({ widget }: { widget: WorkspaceUiWidget }) {
+function PreviewWidget({ widget }: { widget: WorkspaceUiWidget }) {
+  const t = useTranslations("workspaceUi");
+  const config = configOf(widget);
+  return <WidgetFrame widget={widget}>
+    <div className="text-xs text-[color:var(--text-muted)]">
+      {widget.kind}{asString(config.market) ? ` · ${asString(config.market)}` : ""}
+    </div>
+    <div className="py-4 text-2xl">—</div>
+    <p className="text-xs text-[color:var(--text-muted)]">{t("previewDataNotLoaded")}</p>
+  </WidgetFrame>;
+}
+
+function WorkspaceWidget({ widget, preview }: { widget: WorkspaceUiWidget; preview?: boolean }) {
+  if (preview) return <PreviewWidget widget={widget} />;
   const kind = asString(widget.kind, asString(widget.type)).toLowerCase().replaceAll("-", "_");
   if (kind === "metric" || kind === "kpi") return <MetricWidget widget={widget} />;
   if (kind === "markdown" || kind === "note" || kind === "text") return <MarkdownWidget widget={widget} />;
@@ -479,9 +548,11 @@ function WorkspaceWidget({ widget }: { widget: WorkspaceUiWidget }) {
 export function WorkspaceUiRenderer({
   widgets,
   empty,
+  preview = false,
 }: {
   widgets: WorkspaceUiWidget[];
   empty?: ReactNode;
+  preview?: boolean;
 }) {
   const safeWidgets = useMemo(
     () => widgets.filter((widget) => widget && typeof widget === "object" && widget.id && widget.kind),
@@ -493,8 +564,8 @@ export function WorkspaceUiRenderer({
   return (
     <div className="grid grid-cols-1 gap-4 md:grid-cols-2 xl:grid-cols-3">
       {safeWidgets.map((widget) => (
-        <div key={widget.id} className={spanClass(widget.span)}>
-          <WorkspaceWidget widget={widget} />
+        <div key={widget.id} className={spanClass(widget.span ?? (["chart", "market_chart", "candles"].includes(widget.kind) ? "full" : undefined))}>
+          <WorkspaceWidget widget={widget} preview={preview} />
         </div>
       ))}
     </div>

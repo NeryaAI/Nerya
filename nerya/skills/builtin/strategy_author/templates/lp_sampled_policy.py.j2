@@ -1,0 +1,46 @@
+"""Fixed-range research decisions in quote-token units, not live LP authority.
+
+No future economics, dynamic range or swaps are inferred. A requested dynamic
+rebalance strategy needs a different execution model and complete tick history.
+"""
+from decimal import Decimal
+
+
+def _number(value):
+    if isinstance(value, bool) or not isinstance(value, (str, int)):
+        raise ValueError('Exact nonnegative quote-token value required')
+    result = Decimal(value)
+    if not result.is_finite() or result < 0:
+        raise ValueError('Invalid quote-token value')
+    return result
+
+
+def decide_sampled_lp(*, policy, source, snapshot):
+    expected = {'enter_when_empty', 'exit_below_principal_token1', 'collect_min_fees_token1'}
+    if not isinstance(policy, dict) or set(policy) != expected or type(policy['enter_when_empty']) is not bool:
+        raise ValueError('Explicit fixed-range policy required')
+    floor = _number(policy['exit_below_principal_token1'])
+    threshold = _number(policy['collect_min_fees_token1'])
+    if threshold <= 0:
+        raise ValueError('Positive collection threshold required')
+    if (snapshot.get('schema') != 'lp.snapshot.v1' or snapshot.get('counterfactual') is not True
+            or snapshot.get('accounting_currency') != 'token1'
+            or any(snapshot.get(key) != source[key] for key in ('chain','protocol','pool_id'))):
+        raise ValueError('Bound counterfactual snapshot required')
+    account = snapshot['account']
+    positions = account['positions']
+    pool = snapshot['pool']
+    if len(positions) > 1 or pool['tick_lower'] != source['tick_lower'] or pool['tick_upper'] != source['tick_upper']:
+        raise ValueError('Fixed-range position required')
+    if not positions:
+        action = 'lp_add' if policy['enter_when_empty'] else 'hold'
+        return {'action':action, 'reason':'explicit_fixed_range_entry' if action == 'lp_add' else 'entry_disabled'}
+    position = positions[0]
+    principal = _number(position['principal_value_token1'])
+    fees = _number(position['owed_value_token1'])
+    cost = _number(snapshot['economics']['total_execution_cost_token1'])
+    if principal < floor:
+        return {'action':'lp_remove', 'reason':'quote_principal_floor'}
+    if fees >= threshold and fees > cost:
+        return {'action':'lp_collect', 'reason':'quote_fee_collection_threshold'}
+    return {'action':'hold', 'reason':'fixed_range_position_held'}

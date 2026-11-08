@@ -4,6 +4,7 @@ import { callApi, type AgentSession, type SkillDetail, type SkillSummary, type S
   type WorkspaceFileEntry } from "./clientApi";
 import { uuid, type ChatAttachment } from "./chat";
 import type { ComposerOption, ComposerReferenceKind } from "./composerInput";
+import { interactionTitle } from "./toolOutputPresentation";
 
 export type ComposerGroup = "files" | "skills" | "agents" | "strategies" | "sessions";
 export type ComposerCatalog = { items: ComposerOption[]; truncated?: boolean };
@@ -46,7 +47,7 @@ export async function loadComposerCatalog(group: ComposerGroup, path: string, si
       const data = await callApi<{ sessions: AgentSession[]; has_more?: boolean }>("/agent/sessions?limit=50", { signal });
       if (!Array.isArray(data.sessions)) throw new Error("sessions_unavailable");
       return { truncated: data.has_more, items: data.sessions.map(session => option("session", session.session_id,
-        typeof session.meta?.title === "string" ? session.meta.title : session.session_id,
+        typeof session.meta?.title === "string" ? interactionTitle(session.meta.title) || session.meta.title : session.session_id,
         [session.source, session.updated_at].filter(Boolean).join(" · "))) };
     }
   }

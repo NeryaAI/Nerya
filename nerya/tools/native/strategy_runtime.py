@@ -32,15 +32,21 @@ runtime without dragging the trading deps along.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
-from dataclasses import replace
+import re
+from contextlib import closing
+from pathlib import Path
 from typing import Any, Optional
+
+from jsonschema import Draft7Validator
 
 from ...core import yaml_io
 from ...core.config import Config
 from ...core.errors import NeryaError, TradingError
 from ...core.normalize import norm_key
+from ...harness.cancellation import CancelledError
 from ...evolution.patch_proposal import (
     create_proposal,
     delete_proposal,
@@ -51,6 +57,7 @@ from ...evolution.patch_proposal import (
 from ...evolution.promotion import apply_proposal
 from ...evolution.strategy_code_generator import (
     StrategyCodeGenerator,
+    StrategyGenerationInputError,
     StrategyGenerationRequest,
 )
 from ...evolution.strategy_tuning_generator import (
@@ -59,10 +66,10 @@ from ...evolution.strategy_tuning_generator import (
 )
 from ...strategies.evolution import StrategyEvolutionRunner
 from ...strategies.package import load_package
-from ...trading.accounts import load_account_profiles
 from ...strategies.proposal_files import read_proposal_strategy_files
 from ...strategies.scheduler_bridge import apply_strategy_schedules
 from ...strategies.performance import build_snapshot
+from ...db.sqlite import connect_readonly
 # NOTE: ``StrategyRunner`` is imported lazily inside the handlers below
 # to break a transitive import cycle introduced when the agent kernel
 # loads via ``nerya.charting`` (the kernel imports
@@ -74,20 +81,141 @@ from ...strategies.performance import build_snapshot
 # from ...strategies.runner import StrategyRunner  # noqa: ERA001 (lazy import)
 from ...strategies.state import StrategyKillSwitch, StrategyRunStore
 from ...strategies.validator import (
-    StrategyValidation,
     validate_proposal_files,
     validate_strategy_package,
 )
 from ..tool_errors import schema_validation_result as _usage_error
+from .paths import to_workspace_relative
 from ..types import ToolCall, ToolError, ToolErrorKind, ToolResult
 
 
 _LOG = logging.getLogger(__name__)
 
+_RETROSPECTIVE_POLICY_REASONS = frozenset({
+    "retrospective_replay_requires_operator_authorization",
+    "invalid_or_expired_retrospective_authorization",
+    "retrospective_authorization_invalid",
+    "retrospective_authorization_policy_changed",
+    "retrospective_model_route_mismatch",
+    "retrospective_backend_not_bounded",
+})
+_RETROSPECTIVE_CONSENT = "allow_current_retrospective_replay"
+_RETROSPECTIVE_DECLINE = "decline_current_retrospective_replay"
 
-# ---------------------------------------------------------------------------
-# Schemas
-# ---------------------------------------------------------------------------
+
+def _retrospective_consent(config: Config) -> bool | None:
+    """Read the current command's durable replay consent, if any."""
+    cid = str(config.get("runtime.command_id") or "").strip()
+    if not cid:
+        return None
+    from ...db.sqlite import connect_readonly
+
+    with closing(connect_readonly(config.paths.db)) as con:
+        row = con.execute(
+            "SELECT request_json FROM agent_commands WHERE command_id=?", (cid,)
+        ).fetchone()
+        if not row:
+            return None
+        request = json.loads(row[0] or "{}")
+        interaction_id = request.get("interaction_id")
+        if not interaction_id:
+            return None
+        interaction = con.execute(
+            "SELECT state,payload_json,response_json FROM agent_interactions WHERE interaction_id=? AND session_id=?",
+            (interaction_id, str(config.get("runtime.command_session_id") or "")),
+        ).fetchone()
+        if not interaction or interaction["state"] not in {"answered", "resolved"}:
+            return None
+        response = json.loads(interaction["response_json"] or "{}")
+        payload = json.loads(interaction["payload_json"] or "{}")
+        if any(q.get("id") == _RETROSPECTIVE_CONSENT for q in payload.get("questions", [])):
+            answer = (response.get("answers") or {}).get(_RETROSPECTIVE_CONSENT) or {}
+            selected = answer.get("selected") or []
+            if selected == ["允许本次模型历史回放"]:
+                return True
+            return False if selected == ["暂不继续"] else None
+        selected = response.get("selected") or []
+        if "允许本次模型历史回放" in payload.get("choices", []):
+            return "允许本次模型历史回放" in selected
+        return None
+
+
+def _retrospective_authorization_interaction(
+    call: ToolCall, config: Config, *, reason: str
+) -> ToolResult | None:
+    """Pause for a clickable, task-scoped replay authorization decision."""
+    consent = _retrospective_consent(config)
+    if consent is True or not config.get("runtime.command_id"):
+        return None
+    if consent is False:
+        result = ToolResult.from_json(
+            tool_use_id=call.id,
+            name=call.name,
+            data={
+                "ok": False,
+                "reason": "operator_declined_retrospective_replay",
+                "authorization_reason": reason,
+                "message": "Operator chose not to continue the current-model retrospective replay.",
+            },
+            semantic_success=False,
+        )
+        result.is_error = True
+        result.error = ToolError(
+            kind=ToolErrorKind.EXECUTION_ERROR,
+            message="Operator declined this retrospective replay.",
+            retryable=False,
+            recovery_hint={"action": "operator_declined_retrospective_replay"},
+        )
+        return result
+    try:
+        from ...agent.interactions import create_interaction
+
+        item = create_interaction(
+            config,
+            sid=str(config.get("runtime.command_session_id") or ""),
+            tid=str(config.get("runtime.command_turn_id") or ""),
+            call_id=call.id,
+            kind="question",
+            payload={
+                "title": "需要确认模型历史回放",
+                "message": (
+                    "本次脚本 Agent 需要使用当前模型对历史前缀做有限回放。"
+                    "这不是当时的真实决策，也不代表实盘交易绩效；只会使用已有"
+                    "operator-owned provider、模型、预算和有效期配置。"
+                    f"当前阻塞原因：{reason}"
+                ),
+                "questions": [{
+                    "id": _RETROSPECTIVE_CONSENT,
+                    "question": "允许在当前任务中重新检查授权并继续吗？",
+                    "options": ["允许本次模型历史回放", "暂不继续"],
+                    "multiple": False,
+                }],
+            },
+        )
+    except Exception:
+        _LOG.debug("retrospective authorization interaction unavailable", exc_info=True)
+        return None
+    return ToolResult.from_json(
+        tool_use_id=call.id,
+        name=call.name,
+        data={
+            "ok": False,
+            "reason": "retrospective_replay_authorization_pending",
+            "authorization_reason": reason,
+            "interaction": item,
+            "next_required_action": {
+                "tool": "strategy_backtest",
+                "arguments": {"policy_check_only": True,
+                              "policy_recheck_interaction_id": item["interaction_id"]},
+                "message": "After this interaction is answered, recheck the existing operator-owned policy once. This does not grant authorization or start replay.",
+            } if (call.arguments or {}).get("policy_check_only") is True else None,
+            "message": "等待用户确认后重新检查 operator-owned 回放授权。",
+        },
+        semantic_success=False,
+        result_protocol="user_interaction_pending",
+    )
+
+
 
 
 STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
@@ -95,6 +223,7 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
     "properties": {
         "strategy_id": {
             "type": "string",
+            "pattern": "^[a-z][a-z0-9_]+$",
             "description": "Lowercase identifier; matches ^[a-z][a-z0-9_]+$.",
         },
         "title": {"type": "string"},
@@ -192,9 +321,9 @@ STRATEGY_GENERATE_PROPOSAL_SCHEMA: dict[str, Any] = {
             ),
             "additionalProperties": {"type": "string"},
         },
-        "validate": {"type": "boolean", "default": True},
+        "validate": {"type": "boolean", "default": False},
     },
-    "required": ["strategy_id", "markets", "accounts"],
+    "required": ["strategy_id"],
 }
 
 
@@ -315,10 +444,11 @@ STRATEGY_DELETE_PROPOSAL_SCHEMA: dict[str, Any] = {
 
 STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
     "type": "object",
+    "additionalProperties": False,
     "properties": {
         "files": {
             "type": "object", "additionalProperties": {"type": "string"},
-            "description": "Complete authored files keyed by safe package-relative paths (main.py, strategy.yml, strategy.md, tests/test_contract.py). Prefer this for a fully specified new strategy: the existing generator saves and validates the bundle; no scaffold/read/rewrite cycle is needed. Never put code in prompt. Omit files only for an intentionally incomplete scaffold."
+            "description": "Optional authored files keyed by safe package-relative paths (main.py, strategy.yml, strategy.md, tests/test_contract.py). Prefer omitting files to scaffold once, then author incrementally at the returned candidate paths with edit_file/write_file. A complete inline bundle is allowed when naturally small. Never put code in prompt."
         },
         "strategy_id": {
             "type": "string",
@@ -360,10 +490,28 @@ STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
             "description": (
                 "VENUE:SYMBOL market ids. Use BYBIT_PERPETUAL:SOLUSDT for "
                 "Bybit linear/perpetual/swap/futures contracts; use "
-                "BYBIT:SOLUSDT only for Bybit spot."
+                "BYBIT:SOLUSDT only for Bybit spot. For lending rate policies, copy "
+                "the discovered pool canonical_identity.market (chain-qualified asset, not a pair)."
             ),
         },
         "accounts": {"type": "array", "items": {"type": "string"}},
+        "chain": {
+            "type": "string", "pattern": r"\S",
+            "description": "Optional structured chain identity retained in strategy.yml.",
+        },
+        "protocol": {
+            "type": "string", "pattern": r"\S",
+            "description": "Optional structured protocol identity retained in strategy.yml.",
+        },
+        "timeframe": {
+            "type": "string", "pattern": r"\S",
+            "description": (
+                "Explicit candle timeframe persisted in strategy.yml; independent of scheduling. "
+                "Omission preserves existing behavior. Must match files['strategy.yml'].timeframe "
+                "when both are supplied; conflicts are rejected. For from_strategy_id, omit "
+                "this field and edit the cloned candidate manifest instead."
+            ),
+        },
         "schedule_cron": {"type": "string", "description": "Cron schedule. Mutually exclusive with schedule_every_seconds; set only one schedule form."},
         "schedule_every_seconds": {"type": "integer", "minimum": 1, "description": "Interval schedule in seconds. Mutually exclusive with schedule_cron; set only one schedule form."},
         "news_sources": {"type": "array", "items": {"type": "string"}},
@@ -376,10 +524,14 @@ STRATEGY_DRAFT_PROPOSAL_SCHEMA: dict[str, Any] = {
         "tuning_objectives": {"type": "array", "items": {"type": "string"}},
         "extra_subagent_prompts": {
             "type": "object",
+            "additionalProperties": {"type": "string"},
             "description": "Map of subagent name -> agent.md body.",
         },
+        "validate": {"type": "boolean", "default": False,
+            "description": "Optional validation diagnostics; saving a draft does not require validation or execution."},
         "from_strategy_id": {
             "type": "string",
+            "pattern": "^[a-z][a-z0-9_]+$",
             "description": (
                 "Seed the draft from an already-promoted strategy package "
                 "instead of stock templates. Use this to iterate on an "
@@ -415,6 +567,14 @@ STRATEGY_SUBMIT_PROPOSAL_SCHEMA: dict[str, Any] = {
 STRATEGY_BACKTEST_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
+        "policy_check_only": {
+            "type": "boolean", "default": False,
+            "description": "Read-only authorization check only for historical replay that actually calls a model. Candidate creation/edits and deterministic backtests do not need it. Pass true without a strategy/proposal or replay settings; after an answered model-replay authorization question, include policy_recheck_interaction_id for one fresh check. Does not start replay, inspect remaining budget, resolve secrets or grant authorization.",
+        },
+        "policy_recheck_interaction_id": {
+            "type": "string",
+            "description": "Only with policy_check_only=true, after the user answers the replay authorization question. Use the exact persisted interaction_id from that question for one bounded recheck, including when the original policy call is cached. Not a retry nonce or authorization grant.",
+        },
         "strategy_id": {
             "type": "string",
             "description": "Backtest an already-promoted strategy package.",
@@ -427,30 +587,29 @@ STRATEGY_BACKTEST_SCHEMA: dict[str, Any] = {
             ),
         },
         "preset": {"type": "string", "default": "default"},
+        "expected_source_revision": {
+            "type": "string", "pattern": "^[a-f0-9]{64}$",
+            "description": "Bind replay to strategy_validate.verification.revision. After correcting candidate source or replay_inputs.json, validate and submit the same candidate, then use its new revision for one corrected retry. Not a retry nonce; unchanged calls remain suppressed.",
+        },
         "preflight_only": {"type": "boolean", "default": False,
-            "description": "Validate configuration, Python syntax, dependencies and known replay surfaces without downloading data or executing the strategy."},
+            "description": "Native engine only. Validate configuration, Python syntax, dependencies and known replay surfaces without downloading data or executing the strategy. Omit for freeform."},
         "data_mode": {"type": "string", "enum": ["download", "local"],
-            "description": "local reads prepared historical data without network. download prepares missing local ranges before replay."},
-        "engine": {"type": "string", "enum": ["auto", "native", "freeform"], "default": "auto",
-            "description": "Select replay explicitly. native runs the saved strategy entrypoint even if a custom replay file exists; freeform runs the strategy-local replay. Never switch engines to change the strategy thesis."},
-        "config_path": {"type": "string", "description": "Optional existing advanced config. For a normal replay use settings directly; no separate config file is required."},
+            "description": "Native engine only; omit for freeform. local reads prepared historical data without network. download prepares missing local ranges. Freeform obtains data from the saved replay_inputs.json instead."},
+        "engine": {"type": "string", "enum": ["auto", "native", "freeform", "rates"], "default": "auto",
+            "description": "native runs the saved candle entrypoint; freeform runs strategy-local research; rates runs the saved rate-policy entrypoint with host accounting and replay_inputs.json. auto selects an explicit params.rate_replay contract before custom scripts. Never switch engines to change the thesis."},
+        "config_path": {"type": "string", "description": "Native engine only; omit for freeform. Optional existing advanced config; no separate file is required for normal native replay."},
         "override_candidate_backtest_defaults": {
             "type": "boolean",
             "default": False,
             "description": (
-                "Keep false for normal proposal/strategy verification. When strategy.yml "
-                "declares backtest defaults, those assumptions are authoritative and "
-                "conflicting generated settings are ignored. Set true only when the "
-                "operator explicitly asked to evaluate a different replay assumption."
+                "Compatibility field. Explicit settings already override candidate replay defaults."
             ),
         },
         "settings": {
             "type": "object", "additionalProperties": False,
             "description": (
-                "Replay settings. Candidate strategy.yml backtest defaults remain "
-                "authoritative on normal verification; omit fields already declared by "
-                "the candidate. Explicitly changing those assumptions requires "
-                "override_candidate_backtest_defaults=true. One call preflights, "
+                "Native-engine replay settings; omit for freeform. Explicit settings override candidate defaults, "
+                "allowing separate runs for different windows and timeframes. One call preflights, "
                 "reuses/downloads history, checks coverage and runs the strategy."
             ),
             "properties": {
@@ -465,6 +624,7 @@ STRATEGY_BACKTEST_SCHEMA: dict[str, Any] = {
                 "data_mode": {"type": "string", "enum": ["download", "local"]},
                 "coverage_policy": {"type": "string", "enum": ["strict", "allow_partial"]},
                 "allow_timeframe_fallback": {"type": "boolean"},
+                "agent_replay": {"type": "boolean", "description": "Use bounded current-model retrospective replay for a script-gated confirmation role. Requires operator-owned authorization; not contemporaneous or live performance evidence."},
                 "max_run_seconds": {"type": "number", "exclusiveMinimum": 0},
                 "fee_bps": {"type": "number", "minimum": 0,
                     "description": "Scalar fee shorthand applied to every venue unless fee_bps_by_venue overrides it."},
@@ -642,9 +802,218 @@ def _execution_error(call: ToolCall, message: str) -> ToolResult:
     )
 
 
-def _backtest_error(call: ToolCall, exc: Exception, *, reason: str, strategy_id: str | None, proposal_id: str | None) -> ToolResult:
+def _backtest_public_message(exc: Exception, reason: str) -> str:
+    """Return short operator-facing copy; raw diagnostics stay in the receipt."""
+    if reason == "backtest_sdk_unsupported" and getattr(exc, "surface", None) == "subagents":
+        return "历史回放不支持 Agent 确认面，已停止普通回放；需要受授权的 Agent 回放。"
+    if reason == "decision_budget_exhausted":
+        return "受授权的模型回放预算不可用，已停止重试；部分回放证据已保留。"
+    if reason in {
+        "retrospective_authorization_invalid",
+        "retrospective_authorization_policy_changed",
+        "invalid_or_expired_retrospective_authorization",
+        "retrospective_replay_requires_operator_authorization",
+    }:
+        return "模型回放授权不可用或已变化，已停止重试；请先检查授权状态。"
+    if reason == "decision_request_unconfirmed":
+        return "模型回放存在未确认的请求，已停止重试；请先核对已有执行记录。"
+    if reason == "lp_cadence_data_incomplete":
+        return "LP 回放所需状态或区间证据尚未齐备，已停止重试；请先补齐缺失证据并核对状态冲突。"
+    if reason == "model_quota_exhausted":
+        return "范围核对所需的模型路由额度已耗尽，回放尚未执行；请恢复该模型路由后再继续。"
+    return "回放未完成，已保留候选和执行证据；具体恢复动作见执行详情。"
+
+
+def _backtest_artifact_refs(exc: Exception, workspace_root: Path) -> dict[str, str]:
+    root = Path(workspace_root).resolve()
+    refs: dict[str, str] = {}
+    for key in ("run_receipt", "failure_path"):
+        raw = getattr(exc, key, None)
+        if not isinstance(raw, str) or not raw:
+            continue
+        try:
+            path = Path(raw).resolve()
+            path.relative_to(root)
+        except (OSError, RuntimeError, ValueError):
+            continue
+        if path.is_file():
+            refs[key] = to_workspace_relative(path, root)
+    return refs
+
+
+def _backtest_bounded_diagnostics(exc: Exception) -> dict[str, Any]:
+    from ...core.redaction import redact_display_dict
+    from ...skills.builtin.backtest.scripts.lp_state_requirements import LPDataIncomplete
+    from ...skills.builtin.backtest.scripts.process_replay import ReplayWorkerError
+    receipt = getattr(exc, "receipt", None)
+    if not isinstance(receipt, dict):
+        return {}
+    if isinstance(exc, LPDataIncomplete):
+        return {key: receipt[key] for key in (
+            "required_state_count", "matched_state_count", "missing_state_count",
+            "conflicting_state_count", "interval_count", "verified_interval_count",
+            "missing_interval_count", "pending_state_interval_count",
+        ) if type(receipt.get(key)) is int and receipt[key] >= 0}
+    allowed = {"provider", "action", "reason", "failure_stage", "rpc_provider",
+               "rpc_method", "request_count", "http_status", "rpc_error_code",
+               "coverage_complete", "safe_to_retry", "stop_reason"}
+    if isinstance(exc, ReplayWorkerError):
+        allowed.update({"type", "message", "surface"})
+    diagnostics = redact_display_dict({key: receipt[key] for key in allowed if key in receipt
+                                       and isinstance(receipt[key], (str, int, bool))})
+    # A response digest is a public integrity identifier, not a credential.
+    # Restore its bounded 64-hex representation after generic redaction so
+    # recovery receipts remain comparable without exposing provider content.
+    response_sha256 = receipt.get("response_sha256")
+    if isinstance(response_sha256, str) and re.fullmatch(r"[0-9a-fA-F]{64}", response_sha256):
+        diagnostics["response_sha256"] = response_sha256.lower()
+    return {key: value[:1000] if isinstance(value, str) else value
+            for key, value in diagnostics.items()}
+
+
+def _project_backtest_error(result: ToolResult) -> ToolResult:
+    """Keep recovery visible when a consumer projects only ToolError.message."""
+    body = result.content[0].data
+    error = result.error
+    # The producer receipt and the compact recovery summary are distinct views.
+    # Reprojection must not replace the already-sanitized receipt with the summary.
+    body.setdefault('diagnostics', error.recovery_hint.get('diagnostics', {}))
+    detail = {key: body[key] for key in (
+        'reason', 'backtest_status', 'strategy_id', 'proposal_id', 'next_required_action')}
+    detail.update({key: error.recovery_hint[key] for key in ('artifacts', 'diagnostics')
+                   if key in error.recovery_hint})
+    detail['retryable'] = error.retryable
+    if error.retryable is False:
+        detail['retry_instruction'] = 'Stop; do not repeat the unchanged replay.'
+    body.update({key: detail[key] for key in ('retryable', 'retry_instruction') if key in detail})
+    error.detail = detail
+    # Authorization/reconciliation failures already expose their bounded
+    # recovery contract through the structured tool body and recovery_hint.
+    # Keep the public message short so consumers that render only
+    # ToolError.message do not dump the same JSON diagnostic as prose.
+    if body.get('reason') in {
+        'retrospective_replay_requires_operator_authorization',
+        'invalid_or_expired_retrospective_authorization',
+        'retrospective_authorization_invalid',
+        'retrospective_authorization_policy_changed',
+        'decision_budget_exhausted',
+        'retrospective_deadline',
+    }:
+        error.message = body['message']
+    else:
+        error.message = body['message'] + '\n' + json.dumps(detail, ensure_ascii=False)
+    return result
+
+
+def _backtest_receipt_diagnostics(exc: Exception, summary: dict[str, Any]) -> dict[str, Any]:
+    from ...core.redaction import redact_display_dict
+    from ...skills.builtin.backtest.scripts.data_cache import NoHistoricalDataError
+    from ...skills.builtin.backtest.scripts.decision_producer import DecisionProducerError
+
+    receipt = getattr(exc, 'receipt', None)
+    if not isinstance(receipt, dict):
+        return dict(summary)
+    if isinstance(exc, DecisionProducerError):
+        fields = {'reason', 'label', 'performance_evidence', 'authorization_id',
+                  'calls', 'max_calls', 'reserved_tokens', 'max_tokens',
+                  'remaining_calls', 'remaining_tokens', 'required_reservation_tokens',
+                  'deadline', 'request_sent', 'deadline_source',
+                  'requires_receipt_reconciliation'}
+        diagnostics = {key: value for key, value in receipt.items()
+                       if key in fields and isinstance(value, (str, int, float, bool))}
+        if isinstance(receipt.get('exhausted_limits'), list):
+            diagnostics['exhausted_limits'] = [value for value in receipt['exhausted_limits']
+                                              if value in ('calls', 'tokens', 'deadline')]
+    elif isinstance(exc, NoHistoricalDataError):
+        fields = {'market', 'timeframe', 'status', 'start', 'end', 'end_exclusive',
+                  'data_mode', 'requests', 'rows', 'missing_bars', 'expected_bars',
+                  'cached_rows', 'derived_rows', 'downloaded_rows', 'offline', 'resumable',
+                  'job_id', 'complete', 'first_timestamp', 'last_timestamp'}
+        diagnostics = {key: value for key, value in receipt.items()
+                       if key in fields and isinstance(value, (str, int, float, bool))}
+        for key in ('markets', 'timeframes'):
+            if isinstance(receipt.get(key), list):
+                diagnostics[key] = [value for value in receipt[key][:100] if isinstance(value, str)]
+        if isinstance(receipt.get('downloads'), dict):
+            diagnostics['downloads'] = {market: {tf: {
+                key: value for key, value in download.items()
+                if key in fields and isinstance(value, (str, int, float, bool))
+            } for tf, download in timeframes.items() if isinstance(download, dict)}
+                for market, timeframes in receipt['downloads'].items() if isinstance(timeframes, dict)}
+    else:
+        return dict(summary)
+    return {**redact_display_dict(diagnostics), **summary}
+
+
+def _backtest_error(call: ToolCall, exc: Exception, *, reason: str, strategy_id: str | None,
+                    proposal_id: str | None, workspace_root: Path | None = None) -> ToolResult:
     """Keep diagnostics and target identity even when no report was produced."""
-    message = f"backtest failed: {type(exc).__name__}: {exc}"
+    from ...skills.builtin.backtest.scripts.decision_producer import DecisionProducerError, ResponseFailure
+    from ...skills.builtin.backtest.scripts.decision_tape import DecisionTapeError
+    from ...skills.builtin.backtest.scripts.lp_state_requirements import LPDataIncomplete
+    from ...strategies.execution_contract import IncompleteStrategyError
+    from ...skills.builtin.backtest.scripts.preflight import BacktestPreflightError
+
+    protocol_gap = isinstance(exc, BacktestPreflightError) and any(
+        isinstance(row, dict) and row.get('code') == 'protocol_replay_model_required'
+        for row in exc.receipt.get('blockers', []))
+    if protocol_gap:
+        reason = 'protocol_replay_model_required'
+    history_gap = not protocol_gap and isinstance(exc, BacktestPreflightError) and any(
+        isinstance(row, dict) and row.get('code') == 'incomplete_history'
+        for row in exc.receipt.get('blockers', []))
+    if history_gap:
+        reason = 'backtest_data_incomplete'
+
+    # Match producer-owned errors, never a strategy's arbitrary error text.
+    producer_reasons = {
+        "decision_budget_exhausted": "decision_budget_exhausted",
+        "decision_provider_exceeded_budget": "decision_provider_exceeded_budget",
+        "decision input exceeds per-call budget": "decision_input_budget_exceeded",
+        "invalid decision output budget": "decision_output_budget_invalid",
+        "invalid decision reasoning policy": "decision_reasoning_policy_invalid",
+        "invalid retrospective replay authorization": "retrospective_authorization_invalid",
+        "authorization policy changed": "retrospective_authorization_policy_changed",
+    }
+    policy_reasons = {
+        "retrospective_replay_requires_operator_authorization",
+        "invalid_or_expired_retrospective_authorization",
+        "retrospective_model_route_mismatch",
+        "retrospective_backend_not_bounded",
+    }
+    reconciliation_reasons = {
+        "decision_request_unconfirmed; reconcile before retry": "decision_request_unconfirmed",
+        "decision_response_ledger_conflict": "decision_response_ledger_conflict",
+        "unsafe decision ledger": "decision_ledger_unsafe",
+    }
+    code = str(exc)
+    retrospective_action = None
+    if isinstance(exc, DecisionProducerError):
+        if code in producer_reasons:
+            reason = producer_reasons[code]
+            retrospective_action = "review_retrospective_authorization"
+        elif code in reconciliation_reasons:
+            reason = reconciliation_reasons[code]
+            retrospective_action = "reconcile_retrospective_request"
+        else:
+            reason = (code if code in {failure.value for failure in ResponseFailure}
+                      else "decision_request_failed_response" if code == "decision_request_failed_response; no automatic retry"
+                      else "decision_producer_failed")
+            retrospective_action = "inspect_retrospective_response"
+    elif (isinstance(exc, TradingError) and code in policy_reasons
+          or isinstance(exc, DecisionTapeError) and exc.code == "retrospective_deadline"):
+        reason = code
+        retrospective_action = "review_retrospective_authorization"
+    retrospective_blocked = retrospective_action in {
+        "review_retrospective_authorization", "reconcile_retrospective_request",
+    }
+    incomplete = isinstance(exc, IncompleteStrategyError)
+    if incomplete:
+        reason = 'strategy_implementation_incomplete'
+    lp_cadence_gap = isinstance(exc, LPDataIncomplete)
+    if lp_cadence_gap:
+        reason = 'lp_cadence_data_incomplete'
+    message = _backtest_public_message(exc, reason)
     next_required_action = (
         {
             "type": "restart_service_before_replay",
@@ -660,73 +1029,198 @@ def _backtest_error(call: ToolCall, exc: Exception, *, reason: str, strategy_id:
             "message": "Do not retry the unchanged call or invent performance. Preserve the strategy thesis and risk controls; fix the indicated contract or use a documented historical execution model, then rerun.",
         }
     )
+    if reason == "model_quota_exhausted":
+        next_required_action = {
+            "type": "restore_scope_model_quota", "automatic": False,
+            "preserve_candidate": True, "preserve_requested_constraints": True,
+            "message": (
+                "The model route used for request-scope extraction is quota exhausted. "
+                "The backtest did not start. Restore the admitted model route or its quota, "
+                "then retry this same request once; do not change the candidate, scope, "
+                "window or replay inputs and do not switch routes automatically."
+            ),
+        }
+    if reason == "backtest_sdk_unsupported" and getattr(exc, "surface", None) == "subagents":
+        next_required_action = {
+            "type": "inspect_agent_replay_policy",
+            "tool": "Skill",
+            "arguments": {"skill": "backtest", "file": "references/replay-capabilities.md"},
+            "message": (
+                "Load the documented script confirmation replay policy. Preserve the same candidate, "
+                "window, markets, sizing and risk controls unchanged. Do not replace Agent decisions "
+                "with a stub, a pure-signal strategy, or mock_surfaces.subagents.mode='replay'. "
+                "Only with an existing operator-authorized bounded model replay, merge settings.agent_replay=true "
+                "into the same strategy_backtest request; the producer validates authorization and limits. "
+                "This hint does not establish authorization or enable a fallback. If authorization is absent "
+                "or rejected, keep replay blocked and report that producer reason. Do not search source, "
+                "credential files or ledgers, change policy, restart services, or repeat an unchanged failure."
+            ),
+        }
+        target = {"proposal_id": proposal_id} if proposal_id else {"strategy_id": strategy_id} if strategy_id else {}
+        if target:
+            next_required_action["conditional_replay"] = {
+                "tool": "strategy_backtest",
+                "arguments_patch": {**target, "settings": {"agent_replay": True}},
+                "merge_settings": True,
+                "preserve_requested_constraints": True,
+                "requires_operator_authorization": True,
+                "automatic": False,
+            }
+    if history_gap:
+        next_required_action = {
+            'type': 'prepare_historical_data', 'tool': 'historical_data',
+            'automatic': False, 'reason': reason,
+            'preserve_candidate': True, 'preserve_requested_constraints': True,
+            'message': 'Inspect the receipt datasets with historical_data action=inspect using their exact '
+                       'market, timeframe and full start/end bounds, including warmup. With existing download '
+                       'permission, use action=download for that same window; retained rows are reused and only '
+                       'missing ranges are fetched. Preserve the candidate and replay config. Do not shorten '
+                       'the window, fabricate history, enable mock data or substitute a proxy. Do not rerun '
+                       'replay until the producer verifies complete coverage.',
+        }
+    if incomplete:
+        next_required_action = {
+            'type': 'implement_candidate', 'preserve_candidate': True,
+            'files': [exc.path], 'skill': 'strategy_author', 'reference': exc.template,
+            'message': 'Implement the requested strategy in the saved candidate, then call strategy_validate. '
+                       'Its unchanged scaffold cannot be submitted or replayed. Preserve the requested resource, '
+                       'window and risk controls. Do not retry unchanged code or change data sources to bypass this check.',
+        }
+    if protocol_gap:
+        next_required_action = {
+            'type': 'provide_protocol_replay', 'preserve_candidate': True,
+            'reason': 'protocol_replay_model_required',
+            'skill': 'backtest', 'file': 'references/replay-capabilities.md',
+            'message': 'This replay requires protocol history and a matching execution model. '
+                       'Preserve the candidate, market and requested window. Candles or APY alone '
+                       'cannot establish pool/reserve state, fees, liquidity or cashflows. '
+                       'Keep the replay blocked until a supported producer supplies those inputs; '
+                       'do not retry unchanged or substitute a different protocol.',
+        }
+        from ...core.paths import WorkspacePaths
+        if workspace_root is not None and _target_has_freeform_backtest_script(
+                WorkspacePaths(workspace_root), strategy_id=strategy_id, proposal_id=proposal_id):
+            next_required_action = {
+                'type': 'select_existing_replay', 'tool': 'strategy_backtest',
+                'reason': reason, 'automatic': False, 'preserve_candidate': True,
+                'preserve_requested_constraints': True,
+                'arguments_patch': {**({'proposal_id': proposal_id} if proposal_id else
+                                      {'strategy_id': strategy_id}), 'engine': 'auto', 'allow_mock': False},
+                'message': 'Native candle preflight rejected the selected engine before execution. '
+                    'This same package already has a custom replay script. Use engine=auto on the '
+                    'same candidate to select its saved implementation; no new protocol producer is needed '
+                    'for this routing correction. Preserve the exact window and producer_ref with matching '
+                    'original args. Normal input, scope and execution checks still apply; this grants '
+                    'no acquisition, trading or model-call permission. Do not repeat engine=native.',
+            }
+    if lp_cadence_gap:
+        target = {"proposal_id": proposal_id} if proposal_id else {"strategy_id": strategy_id} if strategy_id else {}
+        next_required_action = {
+            "type": "inspect_lp_cadence_data", "automatic": False,
+            "preserve_candidate": True, "preserve_requested_constraints": True, "preserve_schedule": True,
+            "skill": "backtest", "file": "references/history-data.md",
+            "tool": "historical_data" if target else "Skill",
+            "arguments": ({"action": "inspect", "dataset_kind": "lp_state_requirements", **target}
+                          if target else {"skill": "backtest", "file": "references/history-data.md"}),
+            "replay_model": {"selected": "cadence", "configured_by": "params.lp_replay.mode",
+                "legacy_default": "saved execution cron when mode is absent",
+                "supported": ["cadence", "sampled"],
+                "sampled_reference": {"skill": "strategy_author", "file": "references/lp-sampled-research.md"}},
+            "message": (
+                "The selected replay model is cadence. If the admitted task is observation-driven sampled "
+                "research rather than scheduled execution, declare params.lp_replay.mode=sampled in the same "
+                "candidate, select a task-bound snapshot with matching original args, validate and replay. "
+                "This produces partial research only, never cadence coverage or performance evidence. "
+                "Preserve an explicitly requested cadence; changing modes cannot satisfy that request. "
+                "Inspect the saved candidate's LP state requirements and read the backtest Skill's history-data reference. "
+                "Preserve the candidate, window, schedule, pool, tick range and risk controls. "
+                "Repair only through the inspector's bounded producer cursor (next_download_args), within existing authorization; "
+                "do not invent timestamps, reset budgets or start a new job without authorization. "
+                "Do not repeat the unchanged replay until the producer verifies all required states and intervals are ready."
+            ),
+        }
+    if retrospective_action:
+        guidance = {
+            "review_retrospective_authorization": (
+                "Retrospective replay is blocked by its authorization, budget or deadline. "
+                "Stop replay and report the producer reason for operator review."
+            ),
+            "reconcile_retrospective_request": (
+                "Reconcile the existing decision request and budget ledger with the provider outcome "
+                "through the operator before any retry. A new authorization does not resolve this request."
+            ),
+            "inspect_retrospective_response": (
+                "Inspect the producer's recorded response diagnostics and report the failed decision. "
+                "A rejected response remains charged; it is not a strategy validation failure."
+            ),
+        }
+        next_required_action = {
+            "type": retrospective_action,
+            "reason": reason,
+            "automatic": False,
+            "preserve_requested_constraints": True,
+            "preserve_partial_artifacts": True,
+            "message": guidance[retrospective_action] + (
+                " Preserve the partial decision tape, run/failure "
+                "receipts, ledger and candidate/window/risk constraints; replay verification is incomplete. "
+                "Do not retry automatically, reset budgets, extend deadlines, create a new authorization, "
+                "or change the strategy or time window. Further model calls require an explicit operator decision."
+            ),
+        }
+        if retrospective_action == "review_retrospective_authorization":
+            next_required_action["requires_operator_authorization"] = True
+        elif retrospective_action == "reconcile_retrospective_request":
+            next_required_action["requires_operator_reconciliation"] = True
+    recovery_hint = {"action": next_required_action["type"], **next_required_action,
+                     "next_required_action": next_required_action}
+    if workspace_root is not None:
+        artifacts = _backtest_artifact_refs(exc, workspace_root)
+        if artifacts:
+            recovery_hint["artifacts"] = artifacts
+    diagnostics = _backtest_bounded_diagnostics(exc)
+    if history_gap:
+        diagnostics.update({key: exc.receipt[key] for key in (
+            'requested_start_utc', 'requested_end_utc', 'requested_window_complete',
+            'end_exclusive', 'coverage_policy',
+        ) if isinstance(exc.receipt.get(key), (str, bool, int))})
+        diagnostics['datasets'] = [{
+            **{key: row[key] for key in (
+                'market', 'timeframe', 'start', 'end', 'end_exclusive',
+                'rows', 'expected_bars', 'missing_bars', 'complete',
+            ) if isinstance(row.get(key), (str, bool, int))},
+            'missing_ranges': [{key: gap[key] for key in ('start', 'end', 'bars')
+                                if type(gap.get(key)) is int}
+                               for gap in row.get('missing_ranges', [])[:32] if isinstance(gap, dict)],
+            'download': {key: row.get('download', {})[key] for key in ('job_id', 'resumable')
+                         if isinstance(row.get('download', {}).get(key), (str, bool))},
+        } for row in exc.receipt.get('datasets', [])[:100] if isinstance(row, dict)]
+    if diagnostics:
+        recovery_hint["diagnostics"] = (
+            {key: value for key, value in diagnostics.items() if key != 'reason'}
+            if isinstance(exc, DecisionProducerError) else diagnostics)
     result = ToolResult.from_json(tool_use_id=call.id, name=call.name,
         semantic_success=False,
         data={"result_type": "backtest_result", "ok": False,
-            "backtest_status": "blocked" if reason in {"runtime_version_changed", "backtest_sdk_unsupported", "backtest_dependency_missing", "backtest_preflight_failed", "backtest_data_incomplete", "backtest_data_invalid", "backtest_invalid_input"} else "failed",
+            "backtest_status": "blocked" if incomplete or protocol_gap or lp_cadence_gap or retrospective_blocked or reason in {"runtime_version_changed", "backtest_sdk_unsupported", "backtest_dependency_missing", "backtest_preflight_failed", "backtest_data_incomplete", "backtest_data_invalid", "backtest_invalid_input"} else "failed",
             "strategy_id": strategy_id, "proposal_id": proposal_id,
             "reason": reason, "message": message,
             "surface": getattr(exc, "surface", None),
             "phase": getattr(exc, "replay_phase", None),
             "run_receipt": getattr(exc, "run_receipt", None),
             "failure_path": getattr(exc, "failure_path", None),
-            "diagnostics": getattr(exc, "receipt", None),
+            "diagnostics": _backtest_receipt_diagnostics(exc, diagnostics),
             "missing_module": getattr(exc, "module", None),
             "next_required_action": next_required_action})
     result.is_error = True
     result.error = ToolError(
         kind=ToolErrorKind.EXECUTION_ERROR,
         message=message,
-        retryable=False if reason == "runtime_version_changed" else None,
-        recovery_hint=(
-            {"action": next_required_action["type"], **next_required_action}
-            if reason == "runtime_version_changed" else {}
-        ),
+        retryable=False if incomplete or protocol_gap or lp_cadence_gap or retrospective_action or reason == "runtime_version_changed" else None,
+        recovery_hint=recovery_hint,
     )
-    return result
+    return _project_backtest_error(result)
 
 
-def _strategy_validation_blockers_error(
-    call: ToolCall,
-    *,
-    strategy_id: str,
-    validation: StrategyValidation,
-    files: list[str],
-) -> ToolResult:
-    """Return the create-time validation blockers without a pending proposal.
-
-    The package failed validation, so no proposal was written. We hand the
-    structured blockers back to the agent as a schema-validation error so the
-    loop fixes ``files`` and re-calls ``strategy_generate_proposal``; the
-    proposal only enters the pending-review queue once validation passes.
-    """
-
-    blockers = validation.blockers
-    lines: list[str] = []
-    for issue in blockers:
-        where = f" [{issue.where}]" if issue.where else ""
-        lines.append(f"- {issue.message}{where}")
-    detail = "\n".join(lines) if lines else "- (no blocker detail reported)"
-    message = (
-        "strategy_generate_proposal did not create a pending proposal: the "
-        f"generated package for {strategy_id!r} has {len(blockers)} validation "
-        "blocker(s). Fix the strategy files and call strategy_generate_proposal "
-        "again with the corrected `files`; the proposal only enters the "
-        "pending-review queue once validation passes.\n"
-        f"Blockers:\n{detail}"
-    )
-    return _usage_error(
-        call,
-        message,
-        recovery_hint={
-            "action": "fix_validation_blockers_and_retry",
-            "tool_name": "strategy_generate_proposal",
-            "strategy_id": strategy_id,
-            "files": files,
-            "validation": validation.asdict(),
-            "blockers": [issue.asdict() for issue in blockers],
-        },
-    )
 
 
 def _manifest_execution_mode(content: str) -> str:
@@ -739,121 +1233,37 @@ def _manifest_execution_mode(content: str) -> str:
     return norm_key(str(raw.get("execution_mode") or ""))
 
 
-def _auto_bind_default_accounts(
-    paths: Any, request: StrategyGenerationRequest
-) -> tuple[tuple[str, ...], list[dict[str, str]]]:
-    """Resolve default accounts for a new draft when the caller omitted them.
-
-    Returns ``(resolved_account_ids, available_accounts)``. We auto-bind every
-    *active, non-real-money* account whose mode matches the request and whose
-    venue matches one of the requested markets — this saves the agent an extra
-    ``account_list`` round-trip on the common paper-draft flow. Real-money
-    modes (live/canary) are never auto-bound; the caller falls back to a
-    directive error that lists the available accounts so the agent can pick in
-    a single step. ``available_accounts`` is always returned (even on success)
-    so callers can surface it in recovery hints.
-    """
-    try:
-        profiles = load_account_profiles(paths)
-    except Exception:  # pragma: no cover - defensive: missing/corrupt roster
-        return (), []
-    req_mode = (request.mode or "paper").strip().lower()
-    venues = {
-        str(market).split(":")[0].strip().lower()
-        for market in request.markets
-        if str(market).strip()
-    }
-    venues.discard("")
-    available: list[dict[str, str]] = []
-    matches: list[str] = []
-
-    def venue_matches(profile_venue: str) -> bool:
-        if not venues:
-            return True
-        if profile_venue in venues:
-            return True
-        if profile_venue == "bybit" and venues.intersection(
-            {"bybit_perpetual", "bybit_perp", "bybit_linear"}
-        ):
-            return True
-        return False
-
-    for profile in profiles.values():
-        if str(getattr(profile, "status", "")).strip().lower() != "active":
-            continue
-        p_mode = str(getattr(profile, "mode", "")).strip().lower()
-        p_venue = str(getattr(profile, "venue", "")).strip().lower()
-        available.append({"id": profile.id, "venue": p_venue, "mode": p_mode})
-        # Only auto-bind safe, mode-matched accounts whose venue is in scope.
-        if getattr(profile, "is_real_money", False):
-            continue
-        if p_mode != req_mode:
-            continue
-        if not venue_matches(p_venue):
-            continue
-        matches.append(profile.id)
-    matches.sort()
-    available.sort(key=lambda row: str(row.get("id") or ""))
-    return tuple(matches), available
-
-
-def _missing_account_error(
-    call: ToolCall,
-    *,
-    request: StrategyGenerationRequest,
-    available: list[dict[str, str]],
-) -> ToolResult:
-    req_mode = (request.mode or "paper").strip().lower()
-    venues = sorted(
-        {
-            str(market).split(":")[0].strip().lower()
-            for market in request.markets
-            if str(market).strip()
-        }
-        - {""}
-    )
-    if available:
-        listing = ", ".join(
-            f"{row['id']} ({row['venue']}/{row['mode']})" for row in available[:8]
-        )
-        avail_text = f"Available accounts: {listing}."
-    else:
-        avail_text = (
-            "No accounts are configured yet — create a paper one with "
-            "account_upsert."
-        )
-    venue_text = f" for venue(s) {venues}" if venues else ""
-    return _usage_error(
-        call,
-        (
-            "strategy_draft_proposal needs an account for the new strategy. No "
-            f"active {req_mode} account matched the requested market(s){venue_text}. "
-            f"{avail_text} Pass accounts=[...] (or from_strategy_id to iterate "
-            "an existing strategy)."
-        ),
-        recovery_hint={
-            "action": "select_account_and_retry",
-            "tool_name": "strategy_draft_proposal",
-            "requested_mode": req_mode,
-            "requested_venues": venues,
-            "available_accounts": available,
-        },
-    )
 
 
 def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
     strategy_class = str(args.get("strategy_class") or "scalping").strip().lower()
     execution_mode = str(args.get("execution_mode") or "").strip().lower()
+    prompt = str(args.get("prompt") or "")
+    requested_subagents = tuple(str(s) for s in (args.get("subagents") or ()))
+    # The replay producer requires the role declared by the script-gated Agent
+    # contract. Preserve ordinary scripts, but make the canonical role explicit
+    # when the user's request names this workflow and the caller omitted it.
+    prompt_key = prompt.casefold()
+    script_agent_request = (
+        execution_mode in {"", "script"}
+        and strategy_class == "trend"
+        and ("script-driven agent" in prompt_key or "脚本驱动 agent" in prompt_key)
+    )
+    if script_agent_request and not requested_subagents:
+        requested_subagents = ("market_analyst",)
     return StrategyGenerationRequest(
         strategy_id=str(args.get("strategy_id") or "").strip(),
         title=str(args.get("title") or ""),
         description=str(args.get("description") or ""),
-        prompt=str(args.get("prompt") or ""),
+        prompt=prompt,
         strategy_class=strategy_class,
         execution_mode=execution_mode,
         mode=str(args.get("mode") or "paper").strip().lower(),
         markets=tuple(str(m) for m in (args.get("markets") or ())),
         accounts=tuple(str(a) for a in (args.get("accounts") or ())),
+        chain=(str(args["chain"]).strip() if args.get("chain") is not None else None),
+        protocol=(str(args["protocol"]).strip() if args.get("protocol") is not None else None),
+        timeframe=args.get("timeframe"),
         schedule_cron=str(args.get("schedule_cron") or "").strip(),
         schedule_every_seconds=(
             int(args.get("schedule_every_seconds"))
@@ -861,7 +1271,7 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
             else None
         ),
         news_sources=tuple(str(s) for s in (args.get("news_sources") or ())),
-        subagents=tuple(str(s) for s in (args.get("subagents") or ())),
+        subagents=requested_subagents,
         policy_overrides=dict(args.get("policy_overrides") or {}),
         llm_policy_overrides=dict(args.get("llm_policy_overrides") or {}),
         create_tuning=bool(args.get("create_tuning", False)),
@@ -879,37 +1289,6 @@ def _request_from_args(args: dict[str, Any]) -> StrategyGenerationRequest:
     )
 
 
-_PLACEHOLDER_BACKTEST_MARKERS = (
-    "示例输出",
-    "示例框架",
-    "模拟回测结果",
-    "模拟交易",
-    "实际应",
-    "placeholder",
-    "demo framework",
-    "synthetic",
-    "fake candle",
-    "random price",
-)
-
-
-def _sdk_files_placeholder_error(request: StrategyGenerationRequest) -> str:
-    for path, content in request.files.items():
-        rel = str(path).replace("\\", "/").lower()
-        if not rel.startswith("backtests/"):
-            continue
-        lowered = str(content or "").lower()
-        for marker in _PLACEHOLDER_BACKTEST_MARKERS:
-            if marker.lower() in lowered:
-                return (
-                    "wallet/on-chain/meme/prediction-market strategy backtests cannot be "
-                    f"placeholder or simulated examples ({marker!r} found in "
-                    f"{path}). Use real wallet/on-chain evidence already "
-                    "gathered in the conversation, emit a minimal "
-                    "NERYA_FREEFORM_RESULT_JSON payload with equity_curve and "
-                    "trades, and state limitations explicitly."
-                )
-    return ""
 
 
 def _read_proposal_files(
@@ -1414,214 +1793,57 @@ def _target_backtest_defaults(paths, *, strategy_id: str | None, proposal_id: st
     return dict(raw) if isinstance(raw, dict) else {}
 
 
-def _protect_candidate_backtest_settings(
-    defaults: dict[str, Any],
-    settings: dict[str, Any] | None,
-    *,
-    allow_override: bool,
-) -> tuple[dict[str, Any] | None, dict[str, Any]]:
-    """Prevent model-generated settings from silently mutating candidate evidence.
-
-    Candidate ``backtest`` is part of the strategy under review. A normal Agent
-    replay therefore preserves it. An operator can still request an alternate
-    assumption explicitly through ``override_candidate_backtest_defaults``.
-    """
-    if settings is None:
-        return None, {}
-    incoming = dict(settings)
-    if not defaults or allow_override:
-        return incoming, {}
-
-    protected = set(defaults)
-    if protected & {"window_days", "start_utc", "end_utc"}:
-        protected.update({"window_days", "start_utc", "end_utc"})
-    if protected & {"tf", "timeframes"}:
-        protected.update({"tf", "timeframes"})
-
-    ignored: dict[str, Any] = {}
-    for key in sorted(protected):
-        if key in incoming:
-            ignored[key] = incoming.pop(key)
-    return incoming, ignored
-
-
-def _proposal_requires_standard_backtest(
-    strategy_id: str | None,
-    files: dict[str, str],
-) -> bool:
-    try:
-        manifest = yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}
-    except Exception:
-        manifest = {}
-    from ...strategies.continuous_config import is_continuous
-    if is_continuous(manifest):
-        return False
-    markets = manifest.get("markets") if isinstance(manifest, dict) else None
-    if isinstance(markets, str):
-        market_values = [markets]
-    elif isinstance(markets, list):
-        market_values = [str(item) for item in markets if str(item).strip()]
-    else:
-        market_values = []
-    if not market_values:
-        return False
-    if _proposal_uses_event_replay(strategy_id, files):
-        return False
-    return True
-
-
-def _proposal_nonstandard_replay_next_action() -> dict[str, Any]:
-    return {
-        "type": "paper_replay_or_custom_evidence",
-        "message": (
-            "This strategy is for meme/on-chain/new-pool discovery, so a "
-            "standard OHLCV backtest is not required before review. Provide "
-            "a paper replay plan or custom replay evidence from real pool, "
-            "wallet, liquidity, concentration, and slippage observations."
-        ),
-    }
-
-
-# ---------------------------------------------------------------------------
-# Handlers
-# ---------------------------------------------------------------------------
 
 
 def strategy_generate_proposal_handler(
     call: ToolCall, *, config: Config
 ) -> ToolResult:
+    from ...strategies.tool_verification import attach_inline_validation
+    return attach_inline_validation(_strategy_generate_proposal_handler(call, config=config), config=config)
+
+
+def _strategy_generate_proposal_handler(
+    call: ToolCall, *, config: Config
+) -> ToolResult:
     args = call.arguments or {}
     try:
         request = _request_from_args(args)
-    except Exception as exc:  # type errors etc.
-        return _usage_error(call, f"invalid request: {type(exc).__name__}: {exc}")
-    placeholder_error = _sdk_files_placeholder_error(request)
-    if placeholder_error:
-        return _usage_error(call, placeholder_error)
-
-    do_validate = bool(args.get("validate", True))
-    try:
-        generator = StrategyCodeGenerator(config.paths)
-        result = generator.generate(
-            request,
-            validate=do_validate,
-            create_proposal_record=True,
-            # Validate immediately on create: when blockers exist we do not
-            # leave a pending proposal behind, we hand the blockers straight
-            # back to the agent so it can fix the package and call this tool
-            # again. A proposal only enters the pending-review queue once the
-            # generated files pass validation.
-            require_valid=do_validate,
-        )
+        result = StrategyCodeGenerator(config.paths).generate(
+            request, validate=bool(args.get("validate", False)), create_proposal_record=True)
+    except StrategyGenerationInputError as exc:
+        return _draft_input_error(call, exc.field, exc.correction)
     except NeryaError as exc:
         return _usage_error(call, str(exc))
     except Exception as exc:
-        return _execution_error(
-            call, f"generator failed: {type(exc).__name__}: {exc}"
-        )
-
-    if (
-        do_validate
-        and result.proposal is None
-        and result.validation is not None
-        and not result.validation.ok
-    ):
-        return _strategy_validation_blockers_error(
-            call,
-            strategy_id=result.request.strategy_id,
-            validation=result.validation,
-            files=list(result.files.keys()),
-        )
-
+        return _execution_error(call, f"generator failed: {type(exc).__name__}: {exc}")
     payload = {
-        "strategy_id": result.request.strategy_id,
+        "ok": True, "strategy_id": result.request.strategy_id,
         "strategy_class": result.request.strategy_class,
-        "execution_mode": result.files.get("strategy.yml")
-        and _manifest_execution_mode(result.files["strategy.yml"])
-        or result.request.execution_mode,
+        "execution_mode": _manifest_execution_mode(result.files["strategy.yml"]),
         "proposal_id": result.proposal.id if result.proposal else None,
-        "validation": (
-            result.validation.asdict() if result.validation is not None else None
-        ),
-        "files": list(result.files.keys()),
+        "validation": result.validation.asdict() if result.validation is not None else None,
+        "files": list(result.files), "backtest_required": False,
     }
     if result.proposal:
         payload["proposal_paths"] = _proposal_strategy_paths(
-            config.paths,
-            result.proposal.id,
-            request.strategy_id,
-        )
-    if result.proposal and result.validation is not None and result.validation.ok:
-        standard_backtest_required = _proposal_requires_standard_backtest(
-            result.request.strategy_id,
-            result.files,
-        )
-        payload["backtest_required"] = True
-        if standard_backtest_required:
-            payload["next_required_action"] = _proposal_backtest_next_action(result.proposal.id)
-        else:
-            payload["backtest_required"] = False
-            payload["next_required_action"] = _proposal_nonstandard_replay_next_action()
-    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
-
-
-# ---------------------------------------------------------------------------
-# File-authoring lane: strategy_draft_proposal + strategy_submit_proposal
-#
-# Instead of dumping every package file inline through one large tool call
-# (high-context and brittle), the agent scaffolds a *draft* proposal, edits
-# the staged files in place with read_file/edit_file/write_file (they live
-# under evolution/proposals/<pid>/after/strategies/<id>/ which the workspace
-# mutation guard allows), validates, and submits. A proposal only enters the
-# pending-review queue once it passes validation.
-# ---------------------------------------------------------------------------
+            config.paths, result.proposal.id, request.strategy_id)
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name,
+                                data=payload, semantic_success=True)
 
 
 _DRAFT_SEED_SKIP_DIRS = {"runs", "logs", "state", "versions", "backtests"}
 
 
-def _draft_next_steps(proposal_id: str, paths_map: dict[str, str]) -> list[str]:
-    main_path = paths_map.get("main_path") or "<proposal>/after/strategies/<id>/main.py"
-    strategy_id = paths_map.get("strategy_root", "").rsplit("/", 1)[-1]
-    from urllib.parse import urlencode
-    workflow_url = "/strategies?" + urlencode({"strategy_id": strategy_id, "proposal_id": proposal_id})
+def _draft_next_steps(
+    proposal_id: str,
+    paths_map: dict[str, str],
+    file_paths: list[str] | None = None,
+) -> list[str]:
     return [
-        (
-            "This proposal is visible in the editable strategy workflow at "
-            f"{workflow_url}. Read strategy_author/references/workflows.md for "
-            "multi-script, script-driven Agent and scheduler-driven Agent authoring. "
-            "Resource cards derive from actual package files and SDK calls; "
-            "workflow.json contains layout and annotation edges, not executable logic."
-        ),
-        (
-            "The scaffold is a GENERIC momentum example, not your strategy yet. "
-            f"Edit the staged files in place with edit_file (e.g. {main_path}); "
-            "they live under the proposal's after/strategies tree and are NOT "
-            "live. Keep the public run(ctx) signature, but replace unrelated "
-            "template logic in one coherent write. Observation-only requests "
-            "must remove order calls and trading tools, not keep them. Replace "
-            "any stale build_agent_task function too: it takes precedence over "
-            "run for Agent tasks. Consume editable data_sources parameters from "
-            "ctx.config.extras, and preserve execution_mode plus agent_task.enabled."
-        ),
-        (
-            "Author real SDK logic in main.py using StrategyContext / "
-            "StrategyResult (and StrategyAgentTask for agent decisions). Read "
-            "positions via ctx.portfolio.positions(market) — it returns a list, "
-            "so iterate or select a row, never call .get on it — and the "
-            "configured account via ctx.config.accounts[0] (there is no "
-            "ctx.account_id)."
-        ),
-        (
-            f'Run strategy_validate({{"proposal_id": "{proposal_id}"}}) and fix '
-            "any blockers by editing the files."
-        ),
-        (
-            "When validation passes, call "
-            f'strategy_submit_proposal({{"proposal_id": "{proposal_id}"}}) to '
-            "move it into the pending-review queue, unless the user requested "
-            "an unsubmitted draft. This is not approval, activation or trading. "
-        ),
+        "Editable candidate saved. Use proposal_paths to implement or revise this same package.",
+        f"Submit for review with strategy_submit_proposal(proposal_id='{proposal_id}') when useful; "
+        "validation and backtests are available independently when requested.",
+        "Saving or submitting does not promote, schedule, activate or trade.",
     ]
 
 
@@ -1672,12 +1894,16 @@ def _draft_from_promoted(
                 "or omit from_strategy_id to scaffold a brand-new strategy."
             ),
         )
-    try:
-        validation: Optional[StrategyValidation] = validate_proposal_files(
-            strategy_id=strategy_id, files=seed
-        )
-    except Exception:
-        validation = None
+    seed.update(args.get("files") or {})
+    manifest = yaml_io.loads(seed.get("strategy.yml", ""), default={}) or {}
+    manifest["strategy_id"] = strategy_id
+    if "id" in manifest:
+        manifest["id"] = strategy_id
+    if "timeframe" in args:
+        manifest["timeframe"] = args["timeframe"]
+    seed["strategy.yml"] = yaml_io.dumps(manifest)
+    validation = (validate_proposal_files(strategy_id=strategy_id, files=seed)
+                  if args.get("validate", False) else None)
     extra_files: dict[str, str] = {}
     for rel, content in seed.items():
         extra_files[f"after/strategies/{strategy_id}/{rel}"] = content
@@ -1720,6 +1946,7 @@ def _draft_from_promoted(
         )
     paths_map = _proposal_strategy_paths(paths, proposal.id, strategy_id)
     payload = {
+        "ok": True,
         "action": "strategy_draft_proposal",
         "proposal_id": proposal.id,
         "strategy_id": strategy_id,
@@ -1730,264 +1957,143 @@ def _draft_from_promoted(
         "files": sorted(seed.keys()),
         "validation": validation.asdict() if validation is not None else None,
         "proposal_paths": paths_map,
-        "next_steps": _draft_next_steps(proposal.id, paths_map),
+        "file_paths": [
+            f"{paths_map['strategy_root']}/{name}" for name in sorted(seed)
+        ],
+        "next_steps": _draft_next_steps(
+            proposal.id,
+            paths_map,
+            [f"{paths_map['strategy_root']}/{name}" for name in sorted(seed)],
+        ),
     }
-    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload, semantic_success=True)
 
 
 def strategy_draft_proposal_handler(
     call: ToolCall, *, config: Config
 ) -> ToolResult:
-    args = call.arguments or {}
+    from ...strategies.tool_verification import attach_inline_validation
+    return attach_inline_validation(_strategy_draft_proposal_handler(call, config=config), config=config)
+
+
+
+
+def _draft_input_error(
+    call: ToolCall, field: list[str | int], correction: str
+) -> ToolResult:
+    return _usage_error(
+        call,
+        f"strategy_draft_proposal invalid field {field!r}: {correction} "
+        "Correct only this field; retain strategy_id and all other supplied arguments/files.",
+        recovery_hint={
+            "action": "correct_arguments",
+            "tool_name": "strategy_draft_proposal",
+            "field": field,
+            "correction": correction,
+            "preserve_other_arguments": True,
+        },
+    )
+
+
+def _strategy_draft_proposal_handler(
+    call: ToolCall, *, config: Config
+) -> ToolResult:
+    args = call.arguments if call.arguments is not None else {}
+    error = next(Draft7Validator(STRATEGY_DRAFT_PROPOSAL_SCHEMA).iter_errors(args), None)
+    if error is not None:
+        field = list(error.absolute_path)
+        if error.validator == "required":
+            field.append(next(key for key in error.validator_value if key not in error.instance))
+        elif error.validator == "additionalProperties":
+            field.append(next(key for key in error.instance if key not in error.schema.get("properties", {})))
+        return _draft_input_error(call, field, error.message)
     strategy_id = str(args.get("strategy_id") or "").strip()
-    from_strategy_id = str(args.get("from_strategy_id") or "").strip()
     if not strategy_id:
         return _usage_error(call, "strategy_draft_proposal requires strategy_id")
-
-    paths = config.paths
+    from_strategy_id = str(args.get("from_strategy_id") or "").strip()
     if from_strategy_id:
-        if args.get("files"):
-            return _usage_error(call, "files applies to new authored bundles; clone an existing strategy first, then edit its returned candidate paths")
-        return _draft_from_promoted(
-            call,
-            paths,
-            strategy_id=strategy_id,
-            from_strategy_id=from_strategy_id,
-            args=args,
-        )
-
+        return _draft_from_promoted(call, config.paths, strategy_id=strategy_id,
+                                    from_strategy_id=from_strategy_id, args=args)
     try:
         request = _request_from_args(args)
-    except Exception as exc:
-        return _usage_error(call, f"invalid request: {type(exc).__name__}: {exc}")
-    if not request.markets:
-        return _usage_error(
-            call,
-            (
-                "strategy_draft_proposal requires at least one market for a new "
-                "strategy (or pass from_strategy_id to iterate an existing one)."
-            ),
-        )
-    auto_selected_accounts: list[str] = []
-    if not request.accounts:
-        resolved, available = _auto_bind_default_accounts(paths, request)
-        if resolved:
-            request = replace(request, accounts=resolved)
-            auto_selected_accounts = list(resolved)
-        else:
-            return _missing_account_error(
-                call, request=request, available=available
-            )
-
-    try:
-        generator = StrategyCodeGenerator(paths)
-        gen = generator.generate(
-            request,
-            validate=True,
-            create_proposal_record=True,
-            require_valid=False,
-            initial_state="draft",
-        )
+        gen = StrategyCodeGenerator(config.paths).generate(
+            request, validate=bool(args.get("validate", False)),
+            create_proposal_record=True, initial_state="draft")
+    except StrategyGenerationInputError as exc:
+        return _draft_input_error(call, exc.field, exc.correction)
     except NeryaError as exc:
         return _usage_error(call, str(exc))
     except Exception as exc:
-        return _execution_error(
-            call, f"draft scaffold failed: {type(exc).__name__}: {exc}"
-        )
-
-    proposal = gen.proposal
-    if proposal is None:
+        return _execution_error(call, f"draft scaffold failed: {type(exc).__name__}: {exc}")
+    if gen.proposal is None:
         return _execution_error(call, "draft proposal was not created")
-    paths_map = _proposal_strategy_paths(paths, proposal.id, strategy_id)
-    payload = {
-        "action": "strategy_draft_proposal",
-        "proposal_id": proposal.id,
-        "strategy_id": strategy_id,
-        "state": "draft",
-        "kind": "strategy_package_proposal",
+    paths_map = _proposal_strategy_paths(config.paths, gen.proposal.id, strategy_id)
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, semantic_success=True, data={
+        "ok": True, "action": "strategy_draft_proposal",
+        "proposal_id": gen.proposal.id, "strategy_id": strategy_id,
+        "state": "draft", "kind": "strategy_package_proposal",
         "seeded_from": "provided_files" if request.files else "template",
-        "strategy_class": gen.request.strategy_class,
-        "files": list(gen.files.keys()),
+        "strategy_class": gen.request.strategy_class, "files": list(gen.files),
         "validation": gen.validation.asdict() if gen.validation is not None else None,
         "proposal_paths": paths_map,
-        "next_steps": _draft_next_steps(proposal.id, paths_map),
-    }
-    if request.files and "main.py" in request.files and gen.validation and gen.validation.ok:
-        payload["next_steps"] = [
-            "The provided source bundle has been saved and validated. Do not rewrite it or repeat validation unless source changes.",
-            f"Call strategy_submit_proposal with proposal_id={proposal.id!r}, unless draft-only was requested, then perform the requested backtest with the same candidate and settings. This is not promotion or trading.",
-        ]
-    if auto_selected_accounts:
-        payload["auto_selected_accounts"] = auto_selected_accounts
-    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+        "file_paths": [f"{paths_map['strategy_root']}/{name}" for name in sorted(gen.files)],
+        "next_steps": _draft_next_steps(gen.proposal.id, paths_map),
+    })
 
 
-def _strategy_submit_validation_blockers_error(
-    call: ToolCall,
-    *,
-    proposal_id: str,
-    strategy_id: str,
-    validation: StrategyValidation,
-    files: list[str],
-    paths_map: dict[str, str],
-) -> ToolResult:
-    blockers = validation.blockers
-    lines: list[str] = []
-    for issue in blockers:
-        where = f" [{issue.where}]" if issue.where else ""
-        lines.append(f"- {issue.message}{where}")
-    detail = "\n".join(lines) if lines else "- (no blocker detail reported)"
-    main_path = paths_map.get("main_path") or "the after/strategies files"
-    message = (
-        f"strategy_submit_proposal kept proposal {proposal_id!r} in draft: the "
-        f"package for {strategy_id!r} still has {len(blockers)} validation "
-        f"blocker(s). Edit the staged files (e.g. {main_path}) with "
-        "edit_file / write_file, re-run strategy_validate, and call "
-        "strategy_submit_proposal again once validation passes. The proposal "
-        "only enters the pending-review queue when validation is clean.\n"
-        f"Blockers:\n{detail}"
-    )
-    return _usage_error(
-        call,
-        message,
-        recovery_hint={
-            "action": "fix_validation_blockers_and_resubmit",
-            "tool_name": "strategy_submit_proposal",
-            "proposal_id": proposal_id,
-            "strategy_id": strategy_id,
-            "proposal_paths": paths_map,
-            "files": files,
-            "validation": validation.asdict(),
-            "blockers": [issue.asdict() for issue in blockers],
-        },
-    )
 
 
 def strategy_submit_proposal_handler(
     call: ToolCall, *, config: Config
 ) -> ToolResult:
+    from ...strategies.tool_verification import attach_inline_validation, source_binding
+    before = source_binding(config, call)
+    return attach_inline_validation(_strategy_submit_proposal_handler(call, config=config), config=config, before=before)
+
+
+def _strategy_submit_proposal_handler(
+    call: ToolCall, *, config: Config
+) -> ToolResult:
     args = call.arguments or {}
     proposal_id = str(args.get("proposal_id") or "").strip()
-    note = str(args.get("note") or "").strip()
     if not proposal_id:
         return _usage_error(call, "strategy_submit_proposal requires proposal_id")
-
-    paths = config.paths
-    target = None
-    for proposal in list_proposals(paths):
-        if proposal.id == proposal_id:
-            target = proposal
-            break
-    if target is None:
-        return _usage_error(
-            call,
-            f"proposal {proposal_id!r} not found",
-            recovery_hint={"action": "strategy_draft_proposal"},
-        )
-    if target.kind != "strategy_package_proposal":
-        return _usage_error(
-            call,
-            (
-                f"proposal {proposal_id!r} is a {target.kind}, not a strategy "
-                "package proposal; strategy_submit_proposal only submits "
-                "strategy packages."
-            ),
-        )
-
+    target = next((p for p in list_proposals(config.paths) if p.id == proposal_id), None)
+    if target is None or target.kind != "strategy_package_proposal":
+        return _usage_error(call, "strategy package proposal not found")
     try:
-        sid, files = _read_proposal_files(paths, proposal_id)
+        sid, files = _read_proposal_files(config.paths, proposal_id)
+        if not files:
+            return _usage_error(call, "proposal has no strategy files to submit")
+        validation = validate_proposal_files(strategy_id=sid, files=files,
+                                             smoke_test=False, run_tests=False).asdict()
+    except NeryaError as exc:
+        return _usage_error(call, str(exc))
     except Exception as exc:
-        return _execution_error(
-            call, f"failed to read proposal files: {type(exc).__name__}: {exc}"
-        )
-    if not files:
-        return _usage_error(
-            call,
-            (
-                f"proposal {proposal_id!r} has no after/strategies/* files to "
-                "submit. Scaffold it with strategy_draft_proposal first, then "
-                "edit the staged files."
-            ),
-        )
-    strategy_id = sid or "unknown"
-    try:
-        validation = validate_proposal_files(strategy_id=strategy_id, files=files)
-    except Exception as exc:
-        return _execution_error(
-            call, f"validation failed: {type(exc).__name__}: {exc}"
-        )
-
-    paths_map = _proposal_strategy_paths(paths, proposal_id, strategy_id)
-    if not validation.ok:
-        return _strategy_submit_validation_blockers_error(
-            call,
-            proposal_id=proposal_id,
-            strategy_id=strategy_id,
-            validation=validation,
-            files=sorted(files.keys()),
-            paths_map=paths_map,
-        )
-
-    try:
-        (target.path / "validation_report.json").write_text(
-            json.dumps(validation.asdict(), indent=2, ensure_ascii=False),
-            encoding="utf-8",
-        )
-    except Exception:  # pragma: no cover - report write is best-effort
-        pass
-    set_state(
-        paths,
-        proposal_id,
-        "pending_review",
-        note=note or "submitted for review via strategy_submit_proposal",
-    )
-
-    standard_backtest_required = _proposal_requires_standard_backtest(
-        strategy_id,
-        files,
-    )
-    payload = {
-        "action": "strategy_submit_proposal",
-        "proposal_id": proposal_id,
-        "strategy_id": strategy_id,
-        "kind": "strategy_package_proposal",
-        "state": "pending_review",
-        "summary": target.summary,
-        "validation": validation.asdict(),
-        "files": sorted(files.keys()),
-        "proposal_paths": paths_map,
-        "backtest_required": standard_backtest_required,
-        "next_required_action": (
-            _proposal_backtest_next_action(proposal_id)
-            if standard_backtest_required
-            else _proposal_nonstandard_replay_next_action()
-        ),
-    }
-    from ...strategies.verification import completed_replay_receipt
-    try:
-        current_replay = completed_replay_receipt(
-            target.path / "after" / "strategies" / strategy_id, strategy_id, proposal_id)
-    except (OSError, ValueError):
-        # An unreadable optional report cannot turn the completed save into a
-        # tool exception or certify it. Retain the explicit verification step.
-        current_replay = None
-    if standard_backtest_required and current_replay is not None:
-        payload["backtest_required"] = False
-        payload["next_required_action"] = None
-        payload["backtest_evidence"] = current_replay
-        payload["verification_note"] = (
-            "This source revision already has a complete historical calculation. "
-            "An economic FAIL is not an execution failure: report it, do not tune or "
-            "rerun unchanged code. A newly requested period still needs its own replay.")
-    from ...strategies.continuous_config import is_continuous
-    if is_continuous(yaml_io.loads(files.get("strategy.yml", ""), default={}) or {}):
-        payload["next_required_action"] = None
-        payload["verification_required"] = ["isolated_listener_lifecycle", "event_dedupe_and_cancellation", "agent_to_paper_order_if_trading"]
-        payload["verification_note"] = "Continuous candidate submitted, not activated or runtime-verified. Do not run the infinite listener in an OHLCV backtest or promote it merely to test. Use bounded isolated tests."
-    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=payload)
+        return _execution_error(call, f"failed to inspect proposal: {type(exc).__name__}: {exc}")
+    (target.path / "validation_report.json").write_text(
+        json.dumps(validation, indent=2, ensure_ascii=False), encoding="utf-8")
+    set_state(config.paths, proposal_id, "pending_review",
+              note=str(args.get("note") or "").strip() or "submitted for review")
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, semantic_success=True, data={
+        "ok": True, "action": "strategy_submit_proposal", "proposal_id": proposal_id,
+        "strategy_id": sid, "kind": "strategy_package_proposal", "state": "pending_review",
+        "summary": target.summary, "validation": validation, "files": sorted(files),
+        "proposal_paths": _proposal_strategy_paths(config.paths, proposal_id, sid),
+        "backtest_required": False,
+    })
 
 
 def strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
+    from ...strategies.tool_verification import source_binding, attach_strategy_checks, attach_saved_replay
+    before = source_binding(config, call)
+    result = _strategy_validate_handler(call, config=config)
+    after = source_binding(config, call)
+    result = attach_strategy_checks(result, before=before, after=after, kind="validation", config=config)
+    return attach_saved_replay(result, config=config, binding=after) if before == after else result
+
+
+def _strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
     args = call.arguments or {}
     proposal_id = (args.get("proposal_id") or "").strip()
     strategy_id = (args.get("strategy_id") or "").strip()
@@ -1996,15 +2102,8 @@ def strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
 
     try:
         if proposal_id:
-            sid, files = _read_proposal_files(config.paths, proposal_id)
-            if not files:
-                return _usage_error(
-                    call, f"proposal {proposal_id!r} has no after/strategies/* tree"
-                )
-            target_sid = strategy_id or sid or "unknown"
-            validation = validate_proposal_files(
-                strategy_id=target_sid, files=files
-            )
+            from ...strategies.validation_receipt import validate_proposal_receipt
+            report = validate_proposal_receipt(config.paths, proposal_id, strategy_id=strategy_id)
         else:
             validation = validate_strategy_package(config.paths, strategy_id)
     except NeryaError as exc:
@@ -2013,9 +2112,31 @@ def strategy_validate_handler(call: ToolCall, *, config: Config) -> ToolResult:
         return _execution_error(
             call, f"validation failed: {type(exc).__name__}: {exc}"
         )
-    return ToolResult.from_json(
-        tool_use_id=call.id, name=call.name, data=validation.asdict()
+    report = report if proposal_id else validation.asdict()
+    passed = report.get("ok") is True
+    result = ToolResult.from_json(
+        tool_use_id=call.id, name=call.name, data=report, semantic_success=passed,
     )
+    if not passed:
+        hint = {
+            "action": "repair_candidate_and_validate", "tool_name": "strategy_validate",
+            "proposal_id": proposal_id or None,
+            "strategy_id": report.get("strategy_id") or strategy_id,
+            "preserve_candidate": True,
+            "blockers": report.get("blockers", []),
+            "message": "Edit the reported files in this same candidate, then validate the saved version. "
+                       "Do not retry unchanged inputs or claim submission, replay, coverage or returns from this failed validation.",
+        }
+        report["next_required_action"] = hint
+        detail = "; ".join(f"{b.get('code')}: {b.get('message')} [{b.get('where')}]"
+                           for b in hint["blockers"] if isinstance(b, dict))[:3000]
+        result.is_error = True
+        result.error = ToolError(
+            kind=ToolErrorKind.EXECUTION_ERROR,
+            message=f"Strategy validation failed. {hint['message']} Blockers: {detail}",
+            recovery_hint=hint,
+        )
+    return result
 
 
 def strategy_import_external_handler(call: ToolCall, *, config: Config) -> ToolResult:
@@ -2070,13 +2191,106 @@ def strategy_import_external_handler(call: ToolCall, *, config: Config) -> ToolR
     )
 
 
+def strategy_backtest_dedupe_context(
+    call: ToolCall, prior: ToolResult | None, *, config: Config
+) -> str | None:
+    """Observe changed operator policy only for reads and known replay failures.
+
+    The wire ledger still owns exact-once admission; completed and unconfirmed
+    replay calls retain their original tool cache regardless of policy changes.
+    """
+    from ..result_contracts import tool_json_data
+
+    args = call.arguments or {}
+    if args.get("policy_check_only") is not True:
+        if (args.get("settings") or {}).get("agent_replay") is not True:
+            return None
+        if prior is not None:
+            reason = (tool_json_data(prior) or {}).get("reason")
+            if not prior.is_error or reason not in _RETROSPECTIVE_POLICY_REASONS | {
+                "decision_response_truncated", "decision_request_failed_response",
+            }:
+                return None
+    policy = config.get("backtest.retrospective_replay") or {}
+    if not isinstance(policy, dict):
+        return None
+    relevant = {key: policy.get(key) for key in (
+        "enabled", "authorization_id", "provider", "model", "key_ref", "tier",
+        "reasoning_effort", "max_calls", "max_tokens", "deadline",
+    )}
+    relevant["max_output_tokens"] = policy.get("max_output_tokens", 4096)
+    return hashlib.sha256(json.dumps(relevant, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
 def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
+    args = call.arguments or {}
+    if args.get("policy_check_only") is True:
+        if set(args) - {"policy_check_only", "policy_recheck_interaction_id"}:
+            return _usage_error(call, "Pass policy_check_only=true alone, without candidate or replay arguments.")
+        if "policy_recheck_interaction_id" in args:
+            cid = str(config.get("runtime.command_id") or "")
+            if not cid:
+                return _usage_error(call, "Policy recheck requires a durable command.")
+            with closing(connect_readonly(config.paths.db)) as con:
+                row = con.execute("SELECT request_json FROM agent_commands WHERE command_id=?", (cid,)).fetchone()
+            iid = json.loads(row[0] or "{}").get("interaction_id") if row else None
+            if not iid or args["policy_recheck_interaction_id"] != iid or _retrospective_consent(config) is not True:
+                return ToolResult.from_error(tool_use_id=call.id, name=call.name, error=ToolError(
+                    kind=ToolErrorKind.EXECUTION_ERROR,
+                    message="Policy recheck requires the current command's answered replay-consent interaction.",
+                    retryable=False))
+        from ...skills.builtin.backtest.scripts.authorized_replay import authorized_policy
+        try:
+            policy = authorized_policy(config)
+        except TradingError as exc:
+            result = _backtest_error(call, exc, reason=str(exc), strategy_id=None, proposal_id=None)
+            pending = _retrospective_authorization_interaction(call, config, reason=str(exc))
+            return pending or result
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={
+            "result_type": "retrospective_authorization_policy", "ok": True,
+            "authorization_valid": True, "replay_started": False,
+            "budget_remaining_verified": False, "execution_readiness_verified": False,
+            "performance_evidence": False,
+            "policy": {key: policy[key] for key in (
+                "authorization_id", "provider", "model", "max_calls", "max_tokens", "deadline")
+                } | {"max_output_tokens": policy.get("max_output_tokens", 4096)},
+        })
+    if "policy_recheck_interaction_id" in args:
+        return _usage_error(call, "policy_recheck_interaction_id is only valid with policy_check_only=true.")
+    from ...strategies.tool_verification import source_binding, attach_strategy_checks
+    before = source_binding(config, call)
+    expected = (call.arguments or {}).get("expected_source_revision")
+    if expected is not None and (before["revision"] == "unbound" or expected != before["revision"]):
+        return ToolResult.from_error(tool_use_id=call.id, name=call.name, error=ToolError(
+            kind=ToolErrorKind.EXECUTION_ERROR, message="Candidate source changed; validate and submit the corrected candidate before replay.",
+            retryable=False, recovery_hint={"reason": "source_revision_conflict",
+                "action": "validate_corrected_candidate", "side_effects": "none",
+                "preserve_candidate": True}))
+    result = _strategy_backtest_handler(call, config=config)
+    if result.is_error and result.error:
+        body = result.content[0].data if result.content and isinstance(result.content[0].data, dict) else {}
+        reason = str(body.get("reason") or result.error.recovery_hint.get("reason") or "")
+        if reason in _RETROSPECTIVE_POLICY_REASONS:
+            pending = _retrospective_authorization_interaction(call, config, reason=reason)
+            if pending is not None:
+                return pending
+    if result.is_error and result.error and result.error.recovery_hint.get("reason") == "request_scope_mismatch":
+        result.error.recovery_hint["corrected_retry"] = {
+            "tool": "strategy_backtest", "revision_from": "strategy_validate.verification.revision",
+            "argument": "expected_source_revision",
+            "message": "Correct only the diagnosed candidate/replay_inputs.json fields, validate and submit the same candidate, then retry once with the new source revision. Preserve admitted scope; do not retry unchanged inputs or invent a revision.",
+        }
+    return attach_strategy_checks(result, before=before, after=source_binding(config, call), kind="backtest",
+                                  preflight_only=bool((call.arguments or {}).get("preflight_only")), config=config)
+
+
+def _strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
     args = call.arguments or {}
     if args.get("settings") is not None and not isinstance(args["settings"], dict):
         return _usage_error(call, "settings must be an object")
     engine = str(args.get("engine") or "auto").lower()
-    if engine not in {"auto", "native", "freeform"}:
-        return _usage_error(call, "engine must be auto, native or freeform")
+    if engine not in {"auto", "native", "freeform", "rates"}:
+        return _usage_error(call, "engine must be auto, native, freeform or rates")
     strategy_id = (args.get("strategy_id") or "").strip() or None
     proposal_id = (args.get("proposal_id") or "").strip() or None
     # Agents frequently pass BOTH ids right after submitting a proposal
@@ -2114,35 +2328,19 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
         strategy_id=strategy_id,
         proposal_id=proposal_id,
     )
-    allow_candidate_override = bool(args.get("override_candidate_backtest_defaults", False))
-    effective_settings, ignored_candidate_overrides = _protect_candidate_backtest_settings(
-        candidate_backtest_defaults,
-        args.get("settings"),
-        allow_override=allow_candidate_override,
+    use_rates = engine == 'rates'
+    if engine == 'auto':
+        from ...strategies.request_scope import target_manifest
+        try:
+            saved = target_manifest(config, {'strategy_id':strategy_id,'proposal_id':proposal_id})
+            use_rates = isinstance((saved.get('params') or {}).get('rate_replay'), dict)
+        except (KeyError, ValueError, NeryaError, OSError):
+            pass  # The selected producer owns its normal missing-source error.
+    use_freeform = engine == "freeform" or engine == "auto" and not use_rates and _target_has_freeform_backtest_script(
+        config.paths, strategy_id=strategy_id, proposal_id=proposal_id,
     )
+    effective_settings = args.get("settings")
     effective_data_mode = args.get("data_mode")
-    if (
-        candidate_backtest_defaults
-        and not allow_candidate_override
-        and "data_mode" in candidate_backtest_defaults
-        and effective_data_mode is not None
-    ):
-        ignored_candidate_overrides["data_mode(top_level)"] = effective_data_mode
-        effective_data_mode = None
-    if (
-        candidate_backtest_defaults
-        and not allow_candidate_override
-        and args.get("config_path")
-    ):
-        return _usage_error(
-            call,
-            (
-                "This strategy declares authoritative strategy.yml backtest defaults. "
-                "An alternate config_path would change the evidence assumptions. "
-                "Set override_candidate_backtest_defaults=true only when the operator "
-                "explicitly requested a different replay configuration."
-            ),
-        )
     try:
         from ...skills.builtin.backtest.scripts.backtest_run import (
             run_strategy_backtest,
@@ -2156,21 +2354,42 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
         )
         from ...skills.builtin.backtest.scripts.mock_ctx import BacktestUnsupportedSurfaceError
 
-        use_freeform = engine == "freeform" or engine == "auto" and _target_has_freeform_backtest_script(
-            config.paths,
-            strategy_id=strategy_id,
-            proposal_id=proposal_id,
-        )
-        if use_freeform:
-            if args.get("preflight_only") or effective_data_mode or effective_settings:
-                raise ValueError("preflight_only/data_mode/settings apply to the native replay. Choose engine='native' or inspect the custom replay's explicit data contract.")
-            if args.get("config_path"):
-                raise ValueError("config_path configures the native engine, but this package selected a custom freeform replay. "
-                    "Choose engine='native' to replay the saved strategy with that config, or configure the custom script explicitly. No settings were silently ignored.")
+        if use_rates:
+            native_only = [key for key in ('data_mode','settings','config_path','preflight_only') if args.get(key) is not None]
+            if native_only or args.get('allow_mock'):
+                return _usage_error(call,'Rate replay uses the saved params.rate_replay and replay_inputs.json only; remove native-only settings and never enable mock input.',
+                    recovery_hint={'action':'correct_tool_arguments','preserve_requested_constraints':True,
+                                   'remove_fields':native_only,'side_effects':'none'})
+            from ...skills.builtin.backtest.scripts.rate_replay import run_rate_backtest
+            from .historical_data import tool_progress
+            result = run_rate_backtest(workspace=config.paths.root,proposal_id=proposal_id,strategy_id=strategy_id,
+                runtime_config=config,
+                progress=tool_progress(call),cancel_token=call.metadata.get('cancel_token'))
+        elif use_freeform:
+            native_only = [key for key in ("preflight_only", "data_mode", "settings", "config_path") if args.get(key)]
+            if native_only:
+                # Do not silently discard history/fee constraints or change the
+                # engine. Give the model the exact correction, not a generic
+                # execution error that invites the same invalid retry.
+                retry_args = {"proposal_id": proposal_id} if proposal_id else {"strategy_id": strategy_id}
+                retry_args.update(engine="freeform", allow_mock=False)
+                return _usage_error(call,
+                    "Freeform replay did not start. Remove these native-only arguments: "
+                    + ", ".join(native_only) + ". Preserve the candidate and requested history. "
+                    "First ensure dates/data requests are saved in replay_inputs.json and calculation assumptions "
+                    "are read from strategy.yml by the custom script; then call strategy_backtest with exactly "
+                    + json.dumps(retry_args) + ". Do not switch to native merely to clear this error.",
+                    recovery_hint={"action": "correct_tool_arguments", "tool": "strategy_backtest",
+                        "remove_fields": native_only, "suggested_arguments": retry_args,
+                        "preserve_requested_constraints": True, "side_effects": "none"})
+            from .historical_data import tool_progress
             result = run_freeform_backtest(
+                runtime_config=config,
                 strategy_id=strategy_id,
                 proposal_id=proposal_id,
                 workspace=config.paths.root,
+                cancel_token=call.metadata.get("cancel_token"),
+                progress=tool_progress(call),
             )
         else:
             from .historical_data import tool_progress
@@ -2186,29 +2405,29 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                 settings=effective_settings,
                 progress=tool_progress(call),
                 cancel_token=call.metadata.get("cancel_token"),
+                runtime_config=config,
             )
             if args.get("preflight_only"):
                 if candidate_backtest_defaults:
-                    result["candidate_backtest_defaults_applied"] = not allow_candidate_override
-                if ignored_candidate_overrides:
-                    result["ignored_candidate_backtest_overrides"] = ignored_candidate_overrides
+                    result["candidate_backtest_defaults_applied"] = not bool(effective_settings or args.get("config_path"))
                 return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=result)
-        result["engine"] = "freeform" if use_freeform else "native"
+        result["engine"] = "rates" if use_rates else "freeform" if use_freeform else "native"
         if candidate_backtest_defaults and not use_freeform:
-            result["candidate_backtest_defaults_applied"] = not allow_candidate_override
-        if ignored_candidate_overrides and not use_freeform:
-            result["ignored_candidate_backtest_overrides"] = ignored_candidate_overrides
+            result["candidate_backtest_defaults_applied"] = not bool(effective_settings or args.get("config_path"))
+    except CancelledError:
+        raise
     except FreeformDependencyError as exc:
         return _backtest_error(call, exc, reason="backtest_dependency_missing",
-            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id,
+            workspace_root=config.paths.root)
     except NoHistoricalDataError as exc:
-        if getattr(exc, "replay_phase", None) == "preparing_data":
-            failed = _backtest_error(call, exc, reason="backtest_data_incomplete",
-                strategy_id=strategy_id, proposal_id=proposal_id)
-            failed.content[0].data["next_required_action"] = {
-                "type": "prepare_historical_data", "tool": "historical_data",
-                "message": "Inspect the requested local window, then download or resume only its missing ranges. An empty cache or download timeout does not prove the source lacks history. Keep the same candidate and replay config; do not silently shorten the window or enable mock data."}
-            return failed
+        # Capability is producer-owned; neither exception prose nor venue names
+        # establish it. Keep the phase fallback for older download producers.
+        unsupported = exc.reason == 'historical_provider_unsupported'
+        incomplete = not unsupported and (exc.reason == 'backtest_data_incomplete'
+            or getattr(exc, 'replay_phase', None) == 'preparing_data')
+        reason = 'historical_provider_unsupported' if unsupported else 'backtest_data_incomplete' if incomplete else 'no_historical_data'
+        retryable = False if unsupported else True if incomplete else exc.retryable
         next_required_action: dict[str, Any] = {
             "type": "report_data_gap",
             "message": (
@@ -2225,7 +2444,27 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
             "skill": "backtest",
             "file": "references/replay-capabilities.md",
         }
-        if proposal_id:
+        if unsupported:
+            next_required_action = {
+                'type': 'provide_historical_capability',
+                'message': 'The configured provider cannot supply the requested historical market. '
+                           'Preserve the same candidate, chain, venue, pair, timeframe, window and risk controls. '
+                           'Keep replay blocked until a provider capability change supplies exact historical inputs '
+                           'and a supported execution model. Do not repeat the unchanged backtest or historical_data '
+                           'download, search configuration/source broadly, enable mock data, map to token/USD, '
+                           'or substitute another venue or proxy. This diagnostic grants no proxy permission. '
+                           'Report the producer receipt as blocked if that capability is unavailable.',
+                'skill': 'backtest', 'file': 'references/replay-capabilities.md',
+            }
+        elif incomplete:
+            next_required_action = {
+                'type': 'prepare_historical_data', 'tool': 'historical_data',
+                'message': 'Inspect the requested local window, then download or resume only its missing ranges. '
+                           'An empty cache or download timeout does not prove the source lacks history. '
+                           'Keep the same candidate and replay config; do not silently shorten the window, '
+                           'enable mock data or substitute a proxy. Rerun replay only after coverage is complete.',
+            }
+        if proposal_id and not incomplete:
             try:
                 sid, files = _read_proposal_files(config.paths, proposal_id)
                 generic_markets = _proposal_generic_onchain_markets(files)
@@ -2272,30 +2511,43 @@ def strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
                     }
             except Exception:
                 pass
-        return ToolResult.from_json(
-            tool_use_id=call.id,
-            name=call.name,
-            data={
-                "ok": False,
-                "reason": "no_historical_data",
-                "result_type": "backtest_result",
-                "backtest_status": "blocked",
-                "strategy_id": strategy_id,
-                "proposal_id": proposal_id,
-                "coverage_ok": False,
-                "coverage_message": str(exc),
-                "next_required_action": next_required_action,
-            },
-        )
+        next_required_action.update(reason=reason, safe_to_retry=retryable is True,
+            preserve_candidate=True, preserve_requested_constraints=True)
+        data = {'ok': False, 'reason': reason, 'result_type': 'backtest_result',
+                'backtest_status': 'blocked', 'strategy_id': strategy_id, 'proposal_id': proposal_id,
+                'coverage_ok': False, 'coverage_message': _backtest_public_message(exc, reason),
+                'next_required_action': next_required_action}
+        if reason == 'no_historical_data':
+            return ToolResult.from_json(tool_use_id=call.id, name=call.name,
+                data=data, semantic_success=False)
+        failed = _backtest_error(call, exc, reason=reason,
+            strategy_id=strategy_id, proposal_id=proposal_id, workspace_root=config.paths.root)
+        failed.content[0].data.update(data)
+        failed.error.retryable = retryable
+        failed.error.recovery_hint = {
+            'action': next_required_action['type'], **next_required_action,
+            'next_required_action': next_required_action,
+        }
+        if config.paths.root:
+            artifact_refs = _backtest_artifact_refs(exc, config.paths.root)
+            if artifact_refs:
+                failed.error.recovery_hint['artifacts'] = artifact_refs
+        diagnostics = _backtest_bounded_diagnostics(exc)
+        if diagnostics:
+            failed.error.recovery_hint['diagnostics'] = diagnostics
+        return _project_backtest_error(failed)
     except BacktestUnsupportedSurfaceError as exc:
         return _backtest_error(call, exc, reason="backtest_sdk_unsupported",
-            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id,
+            workspace_root=config.paths.root)
     except (NeryaError, TradingError, ValueError) as exc:
         return _backtest_error(call, exc, reason=getattr(exc, "reason", "backtest_invalid_input"),
-            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id,
+            workspace_root=config.paths.root)
     except Exception as exc:
         return _backtest_error(call, exc, reason=getattr(exc, "reason", "backtest_execution_failed"),
-            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id)
+            strategy_id=strategy_id or args.get("strategy_id"), proposal_id=proposal_id,
+            workspace_root=config.paths.root)
     model_result = _model_facing_backtest_result(result)
     if proposal_id:
         target_sid = strategy_id or str(result.get("strategy_id") or "").strip() or None

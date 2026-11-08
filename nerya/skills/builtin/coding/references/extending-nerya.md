@@ -1,5 +1,11 @@
 # Extending Nerya — adding data sources, exchanges, wallets, dashboards
 
+For a panel, account overview, dashboard page or existing widget, first use
+`references/native-panels.md`: `workspace_ui_inspect` → `workspace_ui_propose`.
+This constructs a pending-review layout using server-backed widgets. Continue
+with source extension only when the inspected catalog lacks a required capability
+and the operator requested implementing that capability.
+
 Read this when the user says things like *"add support for X exchange"*,
 *"plug in this new data source"*, *"connect my new on-chain wallet"*, or
 *"the dashboard should also show Y"*. Nerya's whole point is to be
@@ -8,24 +14,23 @@ get the running system to pick up the change without a restart.
 
 ## Step 0 — Always check what's already integrated FIRST
 
-Before claiming a venue / data source is missing, call `connector_list`
-(or `connector_view <id>`). Polymarket, Binance, Bybit, OKX, Hyperliquid,
-BSC, Solana, EVM (Ethereum / Arbitrum / Polygon / Base) and 100+ more
-via the CCXT bridge are *already* registered under
-`nerya/connectors/` — promoting one of them to a strategy is just
-"reference it from `accounts.yml` / strategy YAML", **not** a coding
-task.
+Choose the catalog matching the missing capability: `connector_list` /
+`connector_view` for exchange providers, `financial_components` for financial
+components, and `data_api` list/schema for data actions. An empty exchange
+catalog does not establish that a wallet component or historical data action
+is missing. A registered venue does not establish historical coverage either.
 
-Decision tree:
+Inspect the matching schema and current source before extending it. For
+historical-data gaps, load
+`Skill(skill="research", file="references/onchain-data-discovery.md")`
+to resolve the observation, official API and acquisition requirements. Reuse
+an existing implementation when it supports those requirements.
 
-1. `connector_list query="<vendor>"` → if `count >= 1` the venue is
-  wired. Use `connector_view id=<id>` to learn endpoint URLs / method
-   names, then use it directly. Do **not** re-author it.
-2. If `count == 0` the venue really is missing → keep reading.
-3. The same rule applies to data sources (Yahoo, akshare, CryptoCompare,
-  Glassnode, …) — they live under `nerya/research/datasets/` /
-   `nerya/markets/`. `grep` / `glob` first; only author a new one if
-   nothing matches.
+The implementation paths and reload examples below describe integration
+mechanics, not permission to install agent-authored code. Stage runtime
+extensions through the applicable proposal tool (`exchange_author` or
+`plugin_author`) and retain its approval boundary. A historical read adapter
+also needs host replay admission before its output can certify a backtest.
 
 Mock data and one-shot scripts are forbidden. The only acceptable
 output is a real Connector / dataset class that the rest of the system
@@ -42,7 +47,8 @@ of forever.
 | New market dataset / data source | `nerya/research/datasets/<adapter>.py` + register at boot — or call `DatasetRouter.register_adapter(market, dataset)` at runtime | `register_adapter()` is itself the hot-update; no rescan needed                                          |
 | New skill                        | `workspace/skills/<name>/SKILL.md` (Anthropic-spec)                                                                              | `nerya.skills.kernel.SkillKernel.reload()`                                                               |
 | New LLM model entry              | edit `nerya/llm/model_registry` config                                                                                           | `nerya.llm.model_registry.reload()`                                                                      |
-| Dashboard widget / page          | `dashboard/app/...` and `dashboard/components/...`                                                                               | Next.js `npm run dev` auto-reloads on file save; `npm run build && npm run start` for production refresh |
+| Dashboard panel / page with existing widgets | `workspace_ui_inspect` then `workspace_ui_propose` | Operator reviews and applies the proposal |
+| New widget renderer capability | `dashboard/app/...` and `dashboard/components/...` | Separately authorized source implementation and deployment |
 
 
 If a request doesn't fit any row, that's a strong signal it needs a
@@ -256,6 +262,10 @@ invocation pattern in the skill's body. The skill loader does *not*
 auto-import the script; the agent invokes it via `run_shell`.
 
 ## Dashboard changes
+
+Normal panel composition uses `references/native-panels.md` and requires no
+source edits, process changes, or frontend rebuild. The following applies only
+to an explicitly requested implementation of a missing renderer capability.
 
 The Next.js dashboard runs in dev mode with HMR. While editing:
 

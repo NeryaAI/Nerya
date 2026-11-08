@@ -1,0 +1,145 @@
+# @nerya.version 1
+# @nerya.title Configured LP lifecycle strategy
+# @nerya.description Explicit LP snapshot policy using installed financial execution.
+# @nerya.logic Evaluate initial entry, principal exit, collection and persistent range rebalance.
+# @nerya.rationale Reuse the durable coordinator and financial risk/approval gates.
+# @nerya.scope Reviewed manifest resources only; no activation or historical-data generation.
+# @nerya.input lp_policy/lp_source/lp_execution and declared lp.snapshot.v1 input.
+# @nerya.output StrategyResult with LP decisions and original financial operation receipts.
+# @nerya.risk Missing source, ownership claims, resource permission or approval closes execution.
+# @nerya.validation Offline entry/hold/exit/recovery checks do not establish live readiness or returns.
+"""Save as main.py beside lp_range_policy.py, risk_rules.py, lp_rebalance.py.
+
+lp_source.source_id selects a declared/prepublished snapshot. Live replaces
+snapshot.account with ctx.financial.account_state(account_request); simulation
+uses the explicit account fixture and never touches financial APIs. Schema and
+required manifest fields are documented in mainstream-strategies.md, LP work.
+One immutable operation_key/plan per reviewed cycle; no automatic retry with
+new deadlines or keys. A completed cycle stays latched until explicitly changed.
+"""
+from copy import deepcopy
+from decimal import InvalidOperation
+
+from lp_range_policy import decide_lp
+from lp_rebalance import rebalance_tick
+
+
+def _receipt(ctx, receipt):
+    state = receipt.get('state') or receipt.get('status')
+    metadata = {'financial_action': receipt, 'financial_execution_allowed': True}
+    if state == 'confirmed':
+        return ctx.result.ok(reason='LP action confirmed', metadata=metadata)
+    if state in {'prepared', 'awaiting_approval', 'approval_required', 'awaiting_prerequisite',
+                 'prerequisite_required', 'submitted', 'confirming', 'submitting', 'unconfirmed'}:
+        return ctx.result.hold(reason='LP action: ' + state, metadata=metadata)
+    return ctx.result.error(message='Recover original LP action; do not resubmit',
+                            kind='execution_unknown', metadata=metadata)
+
+
+def _resume(ctx, saved, *, fresh=False):
+    if saved['kind'] == 'lp_rebalance':
+        return rebalance_tick(ctx, plan=saved['payload'], plan_key=saved['key'])
+    action_id = saved.get('action_id')
+    if action_id:
+        receipt = ctx.financial.get(action_id)
+    else:
+        # Same frozen request/key recovers an interrupted prepare. Never mint
+        # a second identity or recompute a deadline after an uncertain write.
+        receipt = ctx.financial.prepare(saved['payload'], client_request_id=saved['key'])
+        saved = {**saved, 'action_id': receipt['action_id']}
+        ctx.state.set('lp_operation', saved)
+    if receipt.get('state') in {'submitted', 'confirming', 'unconfirmed', 'needs_recovery'}:
+        receipt = ctx.financial.reconcile(receipt['action_id'])
+    elif fresh and receipt.get('state') == 'prepared':
+        receipt = ctx.financial.execute(receipt['action_id'], quote_hash=receipt['quote_hash'])
+    return _receipt(ctx, receipt)
+
+
+def _payload(execution, action, source):
+    payload = deepcopy(execution['rebalance_plan'] if action == 'lp_rebalance'
+                       else execution['requests'][action])
+    requests = [payload['exit'], payload['entry']] if action == 'lp_rebalance' else [payload]
+    for request in requests:
+        if any(request.get(k) != source[k] for k in ('wallet_id', 'chain', 'protocol')):
+            raise ValueError('LP request resource mismatch')
+        if request.get('component_id') != source['component_binding']['id']:
+            raise ValueError('LP request component mismatch')
+        parameters = request['parameters']
+        if parameters['pool_id'] != source['pool_id']:
+            raise ValueError('LP request pool mismatch')
+        if request['kind'] in {'lp_remove', 'lp_collect'}:
+            if source['token_id'] is None or str(parameters['token_id']) != str(source['token_id']):
+                raise ValueError('LP request NFT mismatch')
+        elif request['kind'] != 'lp_add' or parameters.get('token_id') is not None:
+            raise ValueError('LP entry must mint a new range')
+    if action == 'lp_rebalance':
+        if (payload['exit']['kind'], payload['entry']['kind']) != ('lp_remove', 'lp_add'):
+            raise ValueError('LP rebalance exit/entry required')
+    elif payload['kind'] != action:
+        raise ValueError('LP request kind must match decision')
+    return payload
+
+
+# @nerya.step lp_lifecycle | Evaluate configured LP policy | Recover original actions before reading fresh attested inputs.
+def run(ctx):
+    simulated = ctx.mode in {'paper', 'shadow', 'backtest'}
+    policy_key = 'lp_policy_state:' + ctx.mode
+    metadata = {'financial_execution_allowed': False, 'funds_sent': False}
+    saved = ctx.state.get('lp_operation')
+    if not simulated and ctx.mode != 'live':
+        return ctx.result.error(message='Unsupported LP mode', kind='configuration_required', metadata=metadata)
+    if not simulated and saved:
+        # Reconcile the original operation before reading new inputs/config.
+        try:
+            result = _resume(ctx, saved)
+            completed = result.metadata.get('state') == 'completed' or (
+                result.metadata.get('financial_action', {}).get('state') == 'confirmed')
+            if completed:
+                timing = ctx.state.get(policy_key, {})
+                if timing.get('completed_key') != saved['key']:
+                    ctx.state.set(policy_key, {**timing, 'outside_since': None,
+                        'last_rebalance': ctx.clock.now().timestamp(), 'completed_key': saved['key']})
+            # Recovery always runs first. Only a terminal confirmed cycle may
+            # yield to another explicitly saved operation_key on a later tick.
+            next_cycle = ctx.config.params.get('lp_execution', {}).get('operation_key') if completed else None
+            if not completed or not next_cycle or next_cycle == saved['cycle']:
+                return result
+        except Exception:
+            return ctx.result.error(message='Original LP recovery unavailable; preserve operation identity',
+                                    kind='execution_unknown', metadata={'lp_operation': saved})
+    try:
+        params = ctx.config.params
+        source, policy, execution = (params[k] for k in ('lp_source', 'lp_policy', 'lp_execution'))
+        key = execution['operation_key']
+        if not isinstance(key, str) or not key.strip() or len(key) > 80:
+            raise ValueError('Explicit LP operation_key required')
+        account_request = source['account_request']
+        if (any(account_request.get(k) != source[k] for k in ('wallet_id', 'chain', 'protocol'))
+                or account_request.get('component_id') != source['component_binding']['id']
+                or account_request['parameters']['pool_id'] != source['pool_id']):
+            raise ValueError('LP account request binding mismatch')
+        snapshot = ctx.inputs.source(source['source_id'])
+        account = snapshot['account'] if simulated else ctx.financial.account_state(account_request)
+        decision, timing = decide_lp(policy=policy, source=source, snapshot=snapshot, account=account,
+                                    state=ctx.state.get(policy_key, {}), now=ctx.clock.now().timestamp())
+        ctx.state.set(policy_key, timing)
+        metadata['lp_decision'] = decision
+        if simulated or decision['action'] in {'hold', 'recover_data'}:
+            return ctx.result.hold(reason=decision['reason'], metadata=metadata)
+        payload = _payload(execution, decision['action'], source)
+        saved = {'key': 'lp:' + key, 'cycle': key, 'kind': decision['action'], 'payload': payload}
+        ctx.state.set('lp_operation', saved)
+    except (KeyError, TypeError, ValueError, InvalidOperation):
+        return ctx.result.error(message='LP configuration or attested inputs missing/invalid',
+                                kind='data_error', metadata=metadata)
+    except Exception:
+        return ctx.result.error(message='LP resource/source unavailable; execution closed',
+                                kind='resource_binding', metadata=metadata)
+    try:
+        result = _resume(ctx, saved, fresh=True)
+        result.metadata['lp_decision'] = decision
+        return result
+    except Exception as exc:
+        return ctx.result.error(message='LP operation blocked or uncertain; recover original identity',
+                                kind='execution_unknown', metadata={'lp_operation': saved, 'lp_decision': decision,
+                                    'blocker_code': getattr(exc, 'code', 'execution_unavailable')})

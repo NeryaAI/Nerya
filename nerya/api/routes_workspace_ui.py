@@ -36,6 +36,10 @@ def _propose_handler(client, payload):
     return workspace_ui.propose(client.config.paths, payload or {})
 
 
+def _preview_handler(client, query):
+    return workspace_ui.preview(client.config.paths, (query or {}).get("proposal_id"))
+
+
 def _apply_handler(client, payload):
     body = payload or {}
     return workspace_ui.apply(client.config.paths, body.get("proposal_id"))
@@ -44,6 +48,7 @@ def _apply_handler(client, payload):
 def routes():
     return [
         ("GET", "/workspace/ui", _read_handler),
+        ("GET", "/workspace/ui/preview", _preview_handler),
         ("POST", "/workspace/ui/propose", _propose_handler),
         ("POST", "/workspace/ui/apply", _apply_handler),
     ]

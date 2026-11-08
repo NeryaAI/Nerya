@@ -30,6 +30,70 @@ def _json_payload(result):
     return result.content[0].data
 
 
+@pytest.mark.parametrize(
+    ("status", "retryable", "malformed", "expected"),
+    [(403, False, False, True), (401, False, True, True),
+     (403, True, False, False), (403, None, False, False),
+     (429, False, False, False), ("403", False, False, False),
+     (True, False, False, False)],
+)
+def test_terminal_access_denial_preserves_only_safe_recovery_in_projection(
+    status, retryable, malformed, expected,
+):
+    import json
+
+    from nerya.agent.loop import WorkspaceNativeAgentLoop
+    from nerya.agent.tool_projection import project_tool_results
+    from nerya.data_api.registry import DataApiRegistry
+    from nerya.data_api.types import DataActionSpec, DataApiError
+
+    secret = "private-sentinel/token?key=hidden"
+    detail = {
+        "http_status": status, "error_code": 9876,
+        "error_category": "access_denied", "error_name": "client_refused",
+        "owner_action_required": True, "source_url": secret,
+        "body": secret, "path": secret, "args": {"token": secret},
+        "provider": secret, "action": secret,
+    }
+    if malformed:
+        detail.update(error_code=True, error_category=secret,
+                      error_name={"body": secret}, owner_action_required="true")
+
+    def denied(_context, _args):
+        raise DataApiError(secret, retryable=retryable, detail=detail)
+
+    registry = DataApiRegistry()
+    registry.register_action(DataActionSpec(
+        provider="fixture", action="history", title="Fixture",
+        description="Offline fixture", input_schema={"type": "object"},
+        handler=denied,
+    ))
+    result = data_api_handler(ToolCall(
+        id="denied-read", name="data_api", arguments={
+            "op": "call", "provider": "fixture", "action": "history",
+            "args": {"token": secret},
+        },
+    ), registry=registry)
+    assert result.is_error
+    loop = object.__new__(WorkspaceNativeAgentLoop)
+    projection = project_tool_results(
+        [result], render_tool_result=loop._render_tool_result,
+        rendered_tool_result_text=loop._rendered_tool_result_text,
+    )
+    recovery = projection.event_blocks[0]["recovery"]
+    if not expected:
+        assert recovery is None
+        return
+    diagnostics = {"provider": "fixture", "action": "history", "http_status": status}
+    if not malformed:
+        diagnostics.update(error_code=9876, error_category="access_denied",
+                           error_name="client_refused", owner_action_required=True)
+    assert recovery == {"action": "inspect_configuration", "safe_to_retry": False,
+                        "diagnostics": diagnostics}
+    assert recovery == result.error.recovery_hint
+    assert secret not in json.dumps(recovery)
+
+
 def test_data_api_lists_and_schemas_akshare_without_importing_dependency(tmp_path) -> None:
     cfg = _config(tmp_path)
 
@@ -119,6 +183,73 @@ def test_data_api_lists_financial_datasets_equity_actions(tmp_path) -> None:
     actions = {row["action"] for row in payload["actions"]}
     assert "filings" in actions
     assert any("sec" in " ".join(row.get("tags") or []) for row in payload["actions"])
+
+
+def test_data_api_natural_language_dex_request_finds_bounded_pool_route(tmp_path) -> None:
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "list",
+                    "query": "帮我做一个 Jupiter SOL/USDC 趋势策略，回测最近30天，不启用交易。",
+                    "limit": 20,
+                },
+            ),
+            config_like=_config(tmp_path),
+        )
+    )
+    actions = {(row["provider"], row["action"]) for row in payload["actions"]}
+    assert actions == {
+        ("geckoterminal", "pair_discover"),
+        ("geckoterminal", "pool_discover"),
+        ("geckoterminal", "pool_ohlcv"),
+    }
+    row = next(row for row in payload["actions"] if row["action"] == "pool_ohlcv")
+    description = row["description"].lower()
+    assert "pool prices for simulated fills" in description
+    assert "jupiter route/fill evidence" in description
+
+
+def test_data_api_provider_scoped_keyword_list_finds_pool_history(tmp_path) -> None:
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "list",
+                    "provider": "uniswap",
+                    "query": "history pool tick liquidity fee",
+                    "limit": 20,
+                },
+            ),
+            config_like=_config(tmp_path),
+        )
+    )
+    assert payload["provider"] == "uniswap"
+    actions = {row["action"] for row in payload["actions"]}
+    assert "pool_history" in actions
+
+
+def test_data_api_provider_scoped_query_empty_result_names_filter_not_missing_action(tmp_path) -> None:
+    payload = _json_payload(
+        data_api_handler(
+            ToolCall(
+                name="data_api",
+                arguments={
+                    "op": "list",
+                    "provider": "uniswap",
+                    "query": "completely unrelated gibberish tokens",
+                    "limit": 20,
+                },
+            ),
+            config_like=_config(tmp_path),
+        )
+    )
+    assert payload["count"] == 0
+    assert payload["actions"] == []
+    assert "filtered all of them out" in payload["hint"]
+    assert "pool_history" in payload["hint"] or "registered" in payload["hint"]
 
 
 def test_data_api_financial_datasets_schema_exposes_statement_and_filing_args(tmp_path) -> None:

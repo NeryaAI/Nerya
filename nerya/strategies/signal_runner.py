@@ -43,6 +43,16 @@ def indicator_parameters(signal, parameters):
     return values
 
 
+def minimum_closed_history(parameters: dict[str, Any]) -> int | None:
+    """Return the minimum closed-bar window for a fast/slow crossover."""
+    if not isinstance(parameters, dict) or not {"fast_period", "slow_period"} <= parameters.keys():
+        return None
+    periods = [parameters[name] for name in ("fast_period", "slow_period")]
+    if any(type(period) is not int or period < 1 for period in periods):
+        raise ValueError("EMA periods must be positive integers")
+    return max(periods) + 1
+
+
 def run_signal_strategy(ctx, signal: Callable[..., Mapping[str, Any]], *,
                         parameters: dict[str, Any] | None = None,
                         sizing: dict[str, Any] | None = None,

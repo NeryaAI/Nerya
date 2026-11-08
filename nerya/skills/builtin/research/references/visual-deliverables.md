@@ -1,7 +1,9 @@
 # Interactive research deliverables
 
 Use this contract for investment research, market comparisons, flow analysis
-and strategy creation. The dashboard already understands `chart_blocks`; do
+and requested strategy visuals. Source-only briefs, historical-gap findings and
+status follow-ups use their requested format without unrelated price charts.
+The dashboard already understands `chart_blocks`; do
 not change the Agent Loop, prompts, routing or tool schemas to render a chart.
 
 ## Required completion sequence
@@ -33,8 +35,8 @@ not change the Agent Loop, prompts, routing or tool schemas to render a chart.
    data once; otherwise report the specific limitation. A saved PNG alone is
    not an interactive deliverable.
 5. Finish with the finding, uncertainty and what the charts establish. Each
-   relevant assistant reply MUST publish its own instruments and price charts,
-   including follow-up replies. The UI attaches a compact name/price/change/
+   market-visual reply publishes its own instruments and relevant charts,
+   including follow-ups that request those visuals. The UI attaches a compact name/price/change/
    sparkline card to THAT reply; clicking it opens that reply's snapshot on the
    right. Non-price studies appear under Research charts on the left. Nothing
    goes below the input box. Do not output a fake Markdown image or card HTML.

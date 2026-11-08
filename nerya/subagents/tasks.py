@@ -133,8 +133,8 @@ class TaskStore:
         # NativeToolDeps/API readers can be recreated for the next turn.
         # Reuse process ownership across those instances, scoped by workspace.
         with _LIVE_LOCK:
-            self._lock, self._cancel_events, self._processes = _LIVE_TASKS.setdefault(
-                str(paths.root.resolve()), (threading.RLock(), {}, {}),
+            self._lock, self._cancel_events, self._processes, self._threads = _LIVE_TASKS.setdefault(
+                str(paths.root.resolve()), (threading.RLock(), {}, {}, {}),
             )
 
     def _path(self, task_id: str) -> Path:
@@ -247,7 +247,33 @@ class TaskStore:
                 with self._lock:
                     self._processes.pop(task_id, None)
 
-        run_in_thread(complete, name=f"shell-task-{task_id}", daemon=False)
+        thread = run_in_thread(complete, name=f"shell-task-{task_id}", daemon=False)
+        self.attach_thread(task_id, thread)
+
+    def attach_thread(self, task_id: str, thread: threading.Thread) -> None:
+        """Share a real process-local worker owner across stores for this workspace."""
+        if not isinstance(thread, threading.Thread):
+            raise TypeError("task owner must be a Thread")
+        with self._lock:
+            record = self.load(task_id)
+            if record is not None and not record.is_terminal():
+                self._threads[task_id] = thread
+
+    def wait_for_completion(
+        self, task_id: str, check_cancel: Callable[[], None] | None = None,
+    ) -> Optional[TaskRecord]:
+        """Wait only while an attached worker is alive; never infer ownership from disk."""
+        while True:
+            record = self.load(task_id)
+            if record is None or record.is_terminal():
+                return record
+            with self._lock:
+                thread = self._threads.get(task_id)
+            if thread is None or thread is threading.current_thread() or not thread.is_alive():
+                return self.load(task_id)
+            if check_cancel is not None:
+                check_cancel()
+            thread.join(timeout=0.1)
 
     def list(
         self,
@@ -377,6 +403,7 @@ class TaskStore:
         )
         with self._lock:
             self._cancel_events.pop(task_id, None)
+            self._threads.pop(task_id, None)
         return rec
 
     def request_stop(self, task_id: str) -> bool:

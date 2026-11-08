@@ -47,7 +47,8 @@ from dataclasses import dataclass, field
 from pathlib import PurePosixPath
 from typing import Any, Iterable
 
-from .verifier import is_validation_command
+from .verifier import is_validation_command, verify_hard
+from ..tools.verification import read_verification_receipt
 
 _DESTRUCTIVE_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
     re.compile(p, re.IGNORECASE)
@@ -279,29 +280,44 @@ def build_artifact_index(blocks: Iterable[dict[str, Any]]) -> ArtifactIndex:
     test_count = len(index.tests_run)
 
     for p in edited_paths:
+        last_edit = max(i for i, (kind, block, _) in enumerate(events)
+            if kind == "tool_use" and block.get("action") in {"edit_file", "write_file"}
+            and _normalize_path(str((block.get("payload") or {}).get("path") or "")) == p)
+        source_checks = []
+        for kind, block, _ in events[last_edit + 1:]:
+            if kind != "tool_result":
+                continue
+            receipt = read_verification_receipt(block.get("verification"))
+            if receipt is None or receipt["revision"] == "unbound":
+                continue
+            source_checks.append(block)
+        verified, evidence = verify_hard(blocks=source_checks)
+        bound_artifacts = {check["artifact_id"] for check in evidence["checks"]
+            if check["check_id"] == "source_binding" and check["status"] == "passed"
+            and (ref := check.get("evidence_ref"))
+            and ".." not in ref.replace("\\", "/").split("/")
+            and (p == _normalize_path(ref) or p.startswith(_normalize_path(ref) + "/"))}
+        if verified and any(check["required"] and check["check_id"] != "source_binding"
+                            and check["artifact_id"] in bound_artifacts for check in evidence["checks"]):
+            continue
         post_edit_read = False
-        # We re-walk events to check for read AFTER the edit.
-        seen_edit = False
-        for kind, block, _env in events:
+        # A source reread is useful, but is not validation.
+        for kind, block, _env in events[last_edit + 1:]:
             if kind != "tool_use":
                 continue
             action = str(block.get("action") or "")
             payload = block.get("payload") or {}
             path = _normalize_path(str(payload.get("path") or ""))
-            if not seen_edit:
-                if action in {"edit_file", "write_file"} and path == p:
-                    seen_edit = True
-                continue
             if action == "read_file" and path == p:
                 post_edit_read = True
                 break
-        if not post_edit_read and test_count == 0:
+        if test_count == 0:
             index.unverified_risks.append(
                 {
                     "kind": "edit_without_verification",
                     "detail": (
-                        f"{p}: edited but never re-read and no test "
-                        f"runner invoked this turn"
+                        f"{p}: edited without source-bound producer verification "
+                        f"or a test runner this turn"
                     ),
                 }
             )

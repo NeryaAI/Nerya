@@ -106,7 +106,19 @@ def assemble_metrics(result: BacktestResult) -> dict[str, Any]:
     activity = counts.get("ok", 0) + counts.get("dispatch", 0)
     metrics["evaluation_mode"] = cfg.evaluation_mode
     metrics["execution_mode"] = result.execution_mode
-    metrics["performance_evidence"] = cfg.evaluation_mode == "trading" and result.execution_mode == "script"
+    surface_counts: dict[tuple[str, str], int] = defaultdict(int)
+    for decision in result.decisions:
+        for call in decision.get("mock_surface_calls", []):
+            surface_counts[(call["surface"], call["mode"])] += call["count"]
+    surface_calls = [{"surface": surface, "mode": mode, "count": count}
+                     for (surface, mode), count in sorted(surface_counts.items())]
+    # OHLCV provenance does not authenticate stubbed model/news inputs.
+    # Configured but unused mocks do not change a trade-only replay's scope.
+    mocked_inputs = any(call["surface"] in {"llm", "subagents", "news"} for call in surface_calls)
+    metrics["performance_evidence"] = (cfg.evaluation_mode == "trading"
+        and result.execution_mode == "script" and not mocked_inputs)
+    if mocked_inputs:
+        metrics["flags"].append("mocked_inputs_not_performance_evidence")
     reason_counts: dict[str, int] = defaultdict(int)
     for decision in result.decisions:
         reason_counts[str(decision.get("reason") or decision.get("status") or "unknown")] += 1
@@ -115,7 +127,8 @@ def assemble_metrics(result: BacktestResult) -> dict[str, Any]:
         "errors": errors, "observations_or_dispatches": activity,
         "order_attempts": result.order_attempts,
         "agent_execution": "not_run", "schedule_execution": "not_run",
-        "scope": "historical_code_replay_only",
+        "scope": "mocked_inputs_code_replay_only" if mocked_inputs else "historical_code_replay_only",
+        "mock_surface_calls": surface_calls,
         "dispatches": counts.get("dispatch", 0),
         "skipped": counts.get("skip", 0) + counts.get("hold", 0),
         "inputs_validated": result.execution_mode == "agent",

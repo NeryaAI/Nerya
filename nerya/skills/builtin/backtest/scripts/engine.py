@@ -232,6 +232,7 @@ def run_backtest(
     portfolio = PortfolioState(config.initial_capital_usd)
     state = MockState()
     pending: list[dict[str, Any]] = []
+    execution_records: dict[str, dict[str, Any]] = {}
     result = BacktestResult(strategy_id=strategy_id, strategy_root=strategy_root, config=config)
     audit_sink = append_jsonl(Path(artefacts_dir) / "logs" / "engine.log") if artefacts_dir else None
     benchmark_initial: dict[str, float] = {}
@@ -265,6 +266,16 @@ def run_backtest(
             bar_fills = fills
             result.trades.extend(fills)
             result.rejected_signals.extend(rejects)
+            # Only settlement establishes terminal execution, never a caller's
+            # saved receipt or a coincidentally changed portfolio position.
+            for fill in fills:
+                record = execution_records.get(str(fill.get("intent_id")))
+                if record is not None:
+                    record.update(status="filled", order_ids=[fill["order_id"]])
+            for rejected in rejects:
+                record = execution_records.get(str(rejected.get("intent_id")))
+                if record is not None:
+                    record.update(status="rejected")
             for fill in fills:
                 _sync_state_after_fill(state, portfolio, str(fill["market"]))
         from .historical_protection import settle_protections
@@ -331,27 +342,30 @@ def run_backtest(
                 policy_obj=policy_view,
                 config=strategy_view,
                 strategy_root=strategy_root,
+                execution_records=execution_records,
             )
             pending_before = len(pending)
             try:
                 decision = _resolve_strategy_decision(strategy_run(ctx))
+                if result.execution_mode == "agent":
+                    from .....strategies.agent_task import prepare_agent_task
+                    decision = prepare_agent_task(decision, ctx,
+                        context_config=strategy_view.extras.get("agent_context", {}),
+                        roles=strategy_view.extras.get("subagents", ()))
+                if _status_of(decision) == "error":
+                    raise RuntimeError(f"strategy returned error at {ts} ({market}): {_reason_of(decision)}")
             except Exception as exc:
                 exc.market = market
                 exc.bar_ts = ts
                 exc.receipt = {"market": market, "bar_ts": ts, "bars_processed": i,
                     "orders_attempted": result.order_attempts + len(ctx.trading.attempts),
-                    "recorded_fills": len(result.trades), "performance_evidence": False}
+                    "recorded_fills": len(result.trades), "performance_evidence": False,
+                    "mock_surface_calls": ctx.mock_surface_calls}
                 raise
-            if result.execution_mode == "agent":
-                from .....strategies.agent_task import prepare_agent_task
-                decision = prepare_agent_task(decision, ctx,
-                    context_config=strategy_view.extras.get("agent_context", {}),
-                    roles=strategy_view.extras.get("subagents", ()))
-            if _status_of(decision) == "error":
-                raise RuntimeError(f"strategy returned error at {ts} ({market}): {_reason_of(decision)}")
             decision_row = _decision_row(ctx.clock.ts, market, decision)
             decision_row.update(order_attempts=len(ctx.trading.attempts),
-                orders_submitted=len(pending) - pending_before, action_counts=action_counts(decision))
+                orders_submitted=len(pending) - pending_before, action_counts=action_counts(decision),
+                mock_surface_calls=ctx.mock_surface_calls)
             for event in ctx.trading.attempts:
                 event["trigger_market"] = market
             result.order_events.extend(ctx.trading.attempts)

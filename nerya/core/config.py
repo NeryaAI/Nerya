@@ -26,6 +26,7 @@ from .paths import WorkspacePaths, resolve_workspace
 log = logging.getLogger("nerya.core.config")
 
 DEFAULT_CONFIG: dict[str, Any] = {
+    "backtest": {"retrospective_replay": {"enabled": False}},
     # Workspace plugins (nerya.harness.loader). Same trust model as
     # hooks/ and providers/: enabled by default, opt-out here, and a
     # broken plugin is journaled to journals/plugins.jsonl — never fatal.

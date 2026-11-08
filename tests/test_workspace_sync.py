@@ -210,6 +210,35 @@ def test_webdav_provider_round_trip(monkeypatch, tmp_path):
     second_sync.run("push")
 
 
+def test_workspace_file_preview_distinguishes_utf8_text_from_binary(tmp_path):
+    client = SimpleNamespace(config=SimpleNamespace(paths=WorkspacePaths(root=tmp_path)))
+    read = next(handler for method, path, handler in routes_workspace.routes()
+                if method == "GET" and path == "/workspace/file")
+    report = ("# 验收报告\n\n中文策略执行证据，保留原始内容。\n" * 100).encode("utf-8")
+    cases = [
+        ("report.md", report, False),
+        ("unicode.bin", "中文、café、🙂\n".encode("utf-8"), False),
+        ("boundary.md", b"# " + "中".encode("utf-8") * 2000, False),
+        ("ascii.txt", b"# Report\n\nAccepted.\n", False),
+        ("empty.md", b"", False),
+        ("nul.md", b"# Report\n\x00binary", True),
+        ("controls.md", b"\x01\x02\x03\x04" * 100, True),
+        ("invalid_utf8.md", b"\xff\xfe\x80\x81" * 100, True),
+        ("late_nul.md", b"a" * 4096 + b"\x00", True),
+        ("late_invalid_utf8.md", b"a" * 4096 + b"\xff", True),
+    ]
+    for name, blob, binary in cases:
+        (tmp_path / name).write_bytes(blob)
+        assert read(client, {"path": name}) == {
+            "ok": True,
+            "path": name,
+            "binary": binary,
+            "size": len(blob),
+            "content": "" if binary else blob.decode("utf-8"),
+            "truncated": False,
+        }, name
+
+
 def test_workspace_sync_routes_and_scopes(tmp_path):
     config = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
     client = SimpleNamespace(config=config)

@@ -40,7 +40,7 @@ from ...connectors.provider_spec import CredentialField, ExchangeProviderSpec, g
 from ...connectors.registry import build_connector
 from ...core.market_defaults import resolve_market_defaults
 from ...core.truth import degraded_envelope, live_envelope
-from ...data.candles import canonical_venue, fetch_candles, fetch_public_ticker
+from ...data.candles import _ticker_number, canonical_venue, fetch_candles, fetch_public_ticker
 from ...data.features import compute_features
 from ..tool_errors import schema_validation_result as _usage_error
 from ..types import ToolCall, ToolResult
@@ -509,7 +509,12 @@ _PUBLIC_MARKET_DATA_VENUES = frozenset(
 )
 
 
-def _venue_has_public_market_feed(venue: str) -> bool:
+def _venue_has_public_market_feed(
+    venue: str,
+    *,
+    capability: str,
+    config_like: Any | None = None,
+) -> bool:
     """True when ``venue`` serves keyless public OHLCV / ticker.
 
     Read-only market data for these venues never needs trading API keys, so
@@ -522,7 +527,20 @@ def _venue_has_public_market_feed(venue: str) -> bool:
     preserved.
     """
 
-    return canonical_venue(venue) in _PUBLIC_MARKET_DATA_VENUES
+    if canonical_venue(venue) in _PUBLIC_MARKET_DATA_VENUES:
+        return True
+    spec = get_registry(getattr(getattr(config_like, "paths", None), "root", None)).find(venue)
+    if spec is None:
+        return False
+    supports = spec.supports or {}
+    explicit = supports.get(f"public_{capability}")
+    if explicit is not None:
+        return explicit is True
+    return bool(
+        not spec.id.startswith("user:")
+        and spec.runtime == "python_ccxt"
+        and supports.get(capability) is True
+    )
 
 
 def _public_connector(
@@ -747,7 +765,7 @@ def _market_candles(args: dict[str, Any], *, config_like: Any | None) -> dict[st
     interval = str(args.get("interval") or "1m")
     count = _count(args)
     timeout_s = _market_timeout_s(args)
-    if not _venue_has_public_market_feed(venue):
+    if not _venue_has_public_market_feed(venue, capability="klines", config_like=config_like):
         missing = _credential_missing_payload(
             venue,
             market,
@@ -797,7 +815,7 @@ def _market_candles(args: dict[str, Any], *, config_like: Any | None) -> dict[st
 def _market_ticker(args: dict[str, Any], *, config_like: Any | None) -> dict[str, Any]:
     venue, market = _market_id(args, config_like=config_like)
     timeout_s = _market_timeout_s(args)
-    if not _venue_has_public_market_feed(venue):
+    if not _venue_has_public_market_feed(venue, capability="ticker", config_like=config_like):
         missing = _credential_missing_payload(
             venue,
             market,
@@ -807,26 +825,31 @@ def _market_ticker(args: dict[str, Any], *, config_like: Any | None) -> dict[str
         if missing is not None:
             return missing
     last_error = "venue_unavailable"
+    quote = None
     connector = _public_connector(venue, config_like=config_like, timeout_s=timeout_s)
     if connector is not None:
         try:
             t = connector.get_ticker(market)
-            return {
+            quote = {
                 "venue": getattr(t, "venue", venue),
                 "market": market,
                 "bid": t.bid,
                 "ask": t.ask,
                 "mid": t.mid,
                 "last": t.last,
+                "change": _ticker_number(getattr(t, "change", None)),
+                "percentage": _ticker_number(getattr(t, "percentage", None)),
                 "ts_ms": getattr(t, "ts_ms", 0),
                 "_envelope": live_envelope(
                     source=venue.lower(), venue=venue.lower()
                 ).as_dict(),
             }
+            if quote["change"] is not None or quote["percentage"] is not None:
+                return quote
         except Exception as exc:
             last_error = f"{type(exc).__name__}: {exc}"
-    # Keyless public REST fallback so public venues still resolve a quote even
-    # when an account-scoped connector cannot be built or errors out.
+    # The shared public REST snapshot also supplies provider-native 24h fields
+    # absent from the legacy Ticker dataclass. Keep fields from one snapshot.
     snap = fetch_public_ticker(market, allow_mock=False, config_like=config_like)
     if snap and snap.get("price"):
         return {
@@ -836,10 +859,14 @@ def _market_ticker(args: dict[str, Any], *, config_like: Any | None) -> dict[str
             "ask": snap.get("ask"),
             "mid": snap.get("mid") or snap.get("price"),
             "last": snap.get("last") or snap.get("price"),
+            "change": snap.get("change"),
+            "percentage": snap.get("percentage"),
             "ts_ms": snap.get("ts_ms") or 0,
             "_envelope": snap.get("_envelope")
             or live_envelope(source=venue.lower(), venue=venue.lower()).as_dict(),
         }
+    if quote is not None:
+        return quote
     return {
         "venue": venue,
         "market": market,
@@ -978,21 +1005,30 @@ def connector_list_handler(call: ToolCall, *, config_like: Any | None = None) ->
             "count": len(rows),
             "query": query,
             "connectors": rows,
+            "inventory_scope": "exchange_providers",
+            "financial_components_included": False,
+            "financial_component_discovery": {
+                "tool": "financial_components", "skill": "financial_ops",
+            },
             **(
                 {"suggested_data_api_checks": suggested_data_api_checks}
                 if suggested_data_api_checks
                 else {}
             ),
             "hint": (
-                "If a venue / data source is in this list it is *already "
-                "integrated* — wire the strategy to it directly. If it is "
-                "missing, first check whether it is exposed by a "
+                "This lists exchange-provider specs only. A listed provider is integrated; "
+                "its credential_status separately reports configuration. An empty result "
+                "does not establish unsupported or unconfigured financial execution. "
+                "For DEX swaps or protocol strategies load financial_ops and inspect "
+                "financial_components (paper/backtest mode for authoring); wallet/data_api "
+                "catalogs do not include all financial components. For market data, "
+                "check whether it is exposed by a "
                 "provider-specific data_api surface via op='list' and "
                 "op='schema'. Use concrete call shapes returned by those "
-                "tool results instead of guessing provider routes. Only "
-                "after connector and data_api surfaces are missing should "
-                "you load the adapter Skill and stage a workspace provider "
-                "proposal. CEX providers must reuse CcxtConnector. "
+                "tool results instead of guessing provider routes. Check historical "
+                "coverage separately from execution support. Only after the relevant "
+                "catalogs establish a missing capability should you load the adapter "
+                "Skill for a scoped proposal. CEX providers must reuse CcxtConnector. "
                 "Do not inspect or edit host repository files from the workspace sandbox. Do not mock the data and do not "
                 "ship a temp script."
             ),
@@ -1049,8 +1085,9 @@ def connector_view_handler(call: ToolCall, *, config_like: Any | None = None) ->
 
     info = _spec_to_dict(spec, include_source_path=True, config_like=config_like)
     info["found"] = True
-    if _venue_has_public_market_feed(spec.id) or any(
-        _venue_has_public_market_feed(alias) for alias in spec.aliases
+    if _venue_has_public_market_feed(spec.id, capability="klines", config_like=config_like) or any(
+        _venue_has_public_market_feed(alias, capability="klines", config_like=config_like)
+        for alias in spec.aliases
     ):
         info["public_market_data"] = {
             "available": True,

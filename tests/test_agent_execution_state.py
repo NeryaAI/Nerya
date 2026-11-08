@@ -137,6 +137,47 @@ def test_artifact_index_uses_verifier_validation_catalogue() -> None:
     ]
 
 
+def test_artifact_index_uses_source_bound_producer_receipt_after_last_edit() -> None:
+    from copy import deepcopy
+    from nerya.agent.tool_projection import project_tool_results
+    from nerya.tools.types import ToolResult
+    from nerya.tools.verification import attach_verification, verification_receipt
+
+    root = "evolution/proposals/prp_fixture/after/strategies/candidate"
+    path = root + "/main.py"
+    edit = [
+        {"kind": "tool_use", "call_id": "edit", "action": "edit_file", "payload": {"path": path}},
+        {"kind": "tool_result", "call_id": "edit", "action": "edit_file", "ok": True},
+    ]
+    result = ToolResult.from_json(tool_use_id="check", name="validate_package", data={"ok": True})
+    attach_verification(result, verification_receipt(
+        artifact_id="package:candidate", revision="a" * 64, scope="Saved source package",
+        checks=[{"check_id": "source_binding", "status": "passed", "evidence_ref": root},
+                {"check_id": "contract", "status": "passed"}]))
+    producer = list(project_tool_results([result],
+        render_tool_result=lambda value: {"content": value.text()},
+        rendered_tool_result_text=lambda block: block["content"]).event_blocks)
+    blocks = edit + [{"kind": "tool_use", "call_id": "check", "action": "validate_package"}] + producer
+    assert build_artifact_index(blocks).unverified_risks == []
+
+    late_edit = deepcopy(edit)
+    for block in late_edit:
+        block["call_id"] = "late-edit"
+    assert build_artifact_index(blocks + late_edit).unverified_risks[0]["kind"] == "edit_without_verification"
+    unrelated = deepcopy(edit)
+    unrelated[0]["payload"]["path"] = root + "-other/main.py"
+    assert build_artifact_index(unrelated + blocks[2:]).unverified_risks
+    for status in ("failed", "pending", "missing", "stale"):
+        failed = deepcopy(blocks)
+        failed[-1]["verification"]["checks"][1]["status"] = status
+        assert build_artifact_index(failed).unverified_risks
+    unverified = deepcopy(blocks)
+    unverified[-1].pop("verification")  # JSON content/ok:true cannot certify source.
+    assert build_artifact_index(unverified).unverified_risks
+    reread = [{"kind": "tool_use", "action": "read_file", "payload": {"path": path}}]
+    assert build_artifact_index(edit + reread).unverified_risks
+
+
 def test_artifact_index_moves_recovered_tool_errors_out_of_final_errors() -> None:
     blocks = [
         {

@@ -9,8 +9,8 @@ Covers the four new surfaces:
 3. The default ``web_researcher`` role: light tier, browser + search
    skill surface, alias routing, and the light tier actually accepting
    ``subagent_analysis``.
-4. Declarative execution policies for tool exposure/defaults, a locked
-   light tier, and generic delegation-depth enforcement.
+4. Declarative execution policies for tool exposure/defaults, model selection
+   inheritance, and generic delegation-depth enforcement.
 """
 
 from dataclasses import dataclass
@@ -179,9 +179,9 @@ def test_web_researcher_default_role_shape():
     bundled = load_bundle()
     assert bundled.subagents["web_researcher"] == prompt
     policy = DEFAULT_SUBAGENT_EXECUTION_POLICIES["web_researcher"]
-    assert policy.locked_tier == "light"
+    assert policy.locked_tier == ""
     assert policy.allow_model_override is True
-    assert policy.model_override_scope == "tier_routes"
+    assert policy.model_override_scope == "any"
     assert not hasattr(policy, "runtime")
     assert policy.tool_argument_defaults["web_fetch"]["save_raw"] is True
     assert "research_run" not in (
@@ -189,7 +189,7 @@ def test_web_researcher_default_role_shape():
     )
 
 
-def test_web_researcher_tier_is_locked_for_inline_overrides(tmp_path):
+def test_web_researcher_honours_inline_overrides(tmp_path):
     spec = build_inline_spec(
         WorkspacePaths(tmp_path),
         name="web_researcher",
@@ -199,12 +199,12 @@ def test_web_researcher_tier_is_locked_for_inline_overrides(tmp_path):
         execution_policy={"max_iterations": 99, "llm_max_attempts": 9},
     )
 
-    assert spec.tier == "light"
+    assert spec.tier == "high"
     assert spec.provider == "openai"
     assert spec.model == "gpt-5-mini"
-    assert spec.execution_policy.model_override_scope == "tier_routes"
-    assert spec.execution_policy.max_iterations == 4
-    assert spec.execution_policy.llm_max_attempts == 1
+    assert spec.execution_policy.model_override_scope == "any"
+    assert spec.execution_policy.max_iterations == 99
+    assert spec.execution_policy.llm_max_attempts == 9
 
 
 def test_non_collector_role_keeps_custom_model_override(tmp_path):
@@ -219,7 +219,7 @@ def test_non_collector_role_keeps_custom_model_override(tmp_path):
     assert spec.model == "gpt-5-mini"
 
 
-def test_collector_model_override_must_belong_to_light_tier(tmp_path):
+def test_collector_model_override_can_select_another_tiers_model(tmp_path):
     config = Config(
         paths=WorkspacePaths(tmp_path),
         data={
@@ -250,7 +250,7 @@ def test_collector_model_override_must_belong_to_light_tier(tmp_path):
         provider="gemini",
         model="gemini-flash",
     )
-    rejected = build_inline_spec(
+    other_tier = build_inline_spec(
         WorkspacePaths(tmp_path),
         name="web_researcher",
         provider="openai",
@@ -258,7 +258,98 @@ def test_collector_model_override_must_belong_to_light_tier(tmp_path):
     )
 
     assert runtime._model_override(allowed) == ("gemini", "gemini-flash")
-    assert runtime._model_override(rejected) == (None, None)
+    assert runtime._model_override(other_tier) == ("openai", "gpt-5-pro")
+
+
+@pytest.mark.parametrize("child_model,parent_model,effort,expected", [
+    ("inline", True, "high", ("operator", "role-model", None, None)),
+    ("saved", True, "high", ("operator", "role-model", None, None)),
+    (None, True, "high", ("parent", "selected-model", "high", "detailed")),
+    (None, True, None, ("parent", "selected-model", None, None)),
+    (None, False, "high", (None, None, None, None)),
+])
+def test_new_child_routing_uses_trusted_selection_and_route_reasoning(
+    tmp_path, monkeypatch, child_model, parent_model, effort, expected,
+):
+    from nerya.agent.tool_phase import ToolCallBuildContext, build_tool_calls
+
+    parent = LoopConfig(
+        model_provider="parent" if parent_model else None,
+        model_id="selected-model" if parent_model else None,
+        reasoning_effort=effort, reasoning_summary="detailed" if effort else None,
+        tool_call_metadata={"parent_model_selection": {"provider": "spoofed"}},
+    )
+    call = build_tool_calls([{
+        "id": "delegate", "name": "research_run",
+        "input": {"parent_model_selection": {"provider": "spoofed", "model": "bad"}},
+    }], context=ToolCallBuildContext(
+        turn_id="route-test", iteration=1, caller="test", session_id=None,
+        strategy_id=None, trigger_event_id=None, original_user_prompt="collect",
+        deadline=None, remaining_wall_seconds=None, wall_time_final_synthesis_seconds=0,
+        metadata=parent.tool_call_metadata,
+    ))[0]
+    config = Config(paths=WorkspacePaths(tmp_path), data={
+        "llm": {"tiers": {
+            "light": {
+                "provider": "mock", "model": "default", "reasoning_effort": "off",
+                "allowed_tasks": ["subagent_analysis"],
+            },
+            "high": {"routes": [
+                {"provider": "operator", "model": "role-model", "reasoning_effort": "low"},
+                {"provider": "parent", "model": "selected-model", "reasoning_effort": "medium"},
+            ]},
+        }},
+    })
+    # Exercise the dispatcher/runtime boundary without creating persistent child state.
+    monkeypatch.setattr(SubAgentRuntime, "run", SubAgentRuntime._run)
+    captured = []
+
+    def stop_at_loop(self, **kwargs):
+        captured.append(kwargs["config"])
+        raise RuntimeError("route captured before execution")
+
+    monkeypatch.setattr(WorkspaceNativeAgentLoop, "__init__", stop_at_loop)
+    dispatcher = native_agents._child_dispatcher(
+        call, config=config, skills=SimpleNamespace(),
+        tool_registry=ToolRegistry(), executor=object(),
+    )
+    if child_model == "saved":
+        save_role(config.paths, name="web_researcher", prompt="Collect.",
+                  provider="operator", model="role-model")
+    spec = build_inline_spec(
+        config.paths, name="web_researcher",
+        provider="operator" if child_model == "inline" else None,
+        model="role-model" if child_model == "inline" else None,
+    )
+    dispatcher.dispatch(
+        "subagent:web_researcher", payload={}, inline_spec=spec,
+        context_scope="explicit_payload_only",
+    )
+    assert len(captured) == 1
+    child = captured[0]
+    assert (child.model_provider, child.model_id, child.reasoning_effort, child.reasoning_summary) == expected
+    assert child.tier == "light"
+    assert child.tool_call_metadata["parent_model_selection"]["provider"] == expected[0]
+
+    from nerya.llm.gateway import LLMGateway
+    seen = []
+
+    def backend(self, tier, **kwargs):
+        route = kwargs["route_cfg"]
+        def respond(request):
+            seen.append((route["provider"], route["model"], request.reasoning_effort))
+            return MessagesResponse(content=[], provider=route["provider"], model=route["model"])
+        return respond
+
+    monkeypatch.setattr(LLMGateway, "_resolve_messages_backend", backend)
+    LLMGateway(config).call_messages(
+        **child.model_options(), system="collect", messages=[{"role": "user", "content": "collect"}],
+    )
+    assert seen == [
+        ("operator", "role-model", "low") if child_model
+        else ("parent", "selected-model", effort or "medium") if parent_model
+        else ("mock", "default", "none")
+    ]
 
 
 def test_web_researcher_aliases_route_to_lane():
@@ -499,7 +590,8 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(
         id="t1",
         name="research_run",
         arguments={"query": "TSLA deliveries", "urls": ["https://ir.tesla.com"]},
-        metadata={"delegation_depth": 0, "remaining_wall_seconds": 42.0},
+        metadata={"delegation_depth": 0, "remaining_wall_seconds": 42.0,
+                  "parent_model_selection": {"provider": "parent", "model": "selected"}},
     )
     registry = _FakeRegistry([
         _FakeDescriptor(
@@ -515,6 +607,7 @@ def test_research_run_handler_uses_descriptor_target_and_metadata_depth(
 
     assert result.is_error is False
     assert captured["target"] == "subagent:web_researcher"
+    assert captured["kwargs"]["parent_model_selection"] == {"provider": "parent", "model": "selected"}
     assert "__research_depth" not in captured["payload"]
     assert captured["dispatch_kwargs"]["delegation_depth"] == 1
     assert 0.0 <= captured["dispatch_kwargs"]["max_wall_seconds"] <= 42.0
@@ -708,7 +801,7 @@ def test_subagent_run_handler_forwards_parent_wall_budget(monkeypatch, tmp_path)
 
     class _FakeDispatcher:
         def __init__(self, **kwargs):  # noqa: ARG002
-            pass
+            captured["constructor"] = kwargs
 
         def dispatch(self, target, *, payload, **kwargs):
             captured["target"] = target
@@ -727,7 +820,8 @@ def test_subagent_run_handler_forwards_parent_wall_budget(monkeypatch, tmp_path)
             id="subagent-parent-budget",
             name="subagent_run",
             arguments={"name": "analyst", "payload": {"task": "inspect"}},
-            metadata={"remaining_wall_seconds": 42.0},
+            metadata={"remaining_wall_seconds": 42.0,
+                      "parent_model_selection": {"provider": "parent", "model": "selected"}},
         ),
         config=SimpleNamespace(paths=WorkspacePaths(tmp_path)),
         skills=SimpleNamespace(),
@@ -735,6 +829,7 @@ def test_subagent_run_handler_forwards_parent_wall_budget(monkeypatch, tmp_path)
 
     assert result.is_error is False
     assert captured["target"] == "subagent:analyst"
+    assert captured["constructor"]["parent_model_selection"] == {"provider": "parent", "model": "selected"}
     assert 0.0 <= captured["dispatch_kwargs"]["max_wall_seconds"] <= 42.0
 
 def test_research_run_handler_rejects_success_without_persisted_capture(
@@ -932,9 +1027,10 @@ def test_expert_policy_preloads_lens_and_allows_autonomous_research_delegate(
 
 
 def test_team_result_preserves_member_provider_and_model(monkeypatch, tmp_path):
+    captured = {}
     class _FakeDispatcher:
         def __init__(self, **_kwargs):
-            pass
+            captured.update(_kwargs)
 
         def dispatch(self, target, **_kwargs):
             return {
@@ -960,6 +1056,7 @@ def test_team_result_preserves_member_provider_and_model(monkeypatch, tmp_path):
         name="team_run",
         arguments={"task": "analyse", "roles": [{"name": "analyst"}]},
         turn_id="turn-models",
+        metadata={"parent_model_selection": {"provider": "parent", "model": "selected"}},
     )
 
     result = native_agents.team_run_handler(
@@ -971,3 +1068,4 @@ def test_team_result_preserves_member_provider_and_model(monkeypatch, tmp_path):
 
     assert member["provider"] == "openai"
     assert member["model"] == "gpt-5-mini"
+    assert captured["parent_model_selection"] == {"provider": "parent", "model": "selected"}

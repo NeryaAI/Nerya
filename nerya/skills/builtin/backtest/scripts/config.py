@@ -127,11 +127,12 @@ class BacktestConfig:
     start_utc: str | None = None
     end_utc: str | None = None
     data_mode: str = "download"
-    coverage_policy: str = "strict"
+    coverage_policy: str = "allow_partial"
     allow_timeframe_fallback: bool = False
     download_timeout_seconds: float = 300.0
     max_run_seconds: float = 600.0
     max_bars: int = 2_000_000
+    agent_replay: bool = False
 
     @classmethod
     def from_raw(cls, raw: dict[str, Any] | None) -> "BacktestConfig":
@@ -188,16 +189,19 @@ class BacktestConfig:
             start_utc=str(raw["start_utc"]) if raw.get("start_utc") is not None else None,
             end_utc=str(raw["end_utc"]) if raw.get("end_utc") is not None else None,
             data_mode=str(raw.get("data_mode", "download")),
-            coverage_policy=str(raw.get("coverage_policy", "strict")),
+            coverage_policy=str(raw.get("coverage_policy", "allow_partial")),
             allow_timeframe_fallback=raw.get("allow_timeframe_fallback", False),
             download_timeout_seconds=float(raw.get("download_timeout_seconds", 300)),
             max_run_seconds=float(raw.get("max_run_seconds", 600)),
             max_bars=int(raw.get("max_bars", 2_000_000)),
+            agent_replay=raw.get("agent_replay", False),
         )
         cfg.validate()
         return cfg
 
     def validate(self) -> None:
+        if type(self.agent_replay) is not bool:
+            raise BacktestConfigError("agent_replay must be boolean")
         if self.data_mode not in {"download", "local"}:
             raise BacktestConfigError("data_mode must be download or local")
         if self.coverage_policy not in {"strict", "allow_partial"}:
@@ -271,21 +275,32 @@ def load_config(
             loaded = yaml_io.load(path, default={})
             if not isinstance(loaded, dict):
                 raise BacktestConfigError(f"{path}: preset must be a mapping")
-            raw = _deep_merge(raw, loaded)
+            raw = _merge_config(raw, loaded)
     if defaults:
-        raw = _deep_merge(raw, dict(defaults))
+        raw = _merge_config(raw, dict(defaults))
     if config_path:
         if not Path(config_path).is_file():
             raise BacktestConfigError(f"backtest config not found: {config_path}")
         loaded = yaml_io.load(Path(config_path), default={})
         if not isinstance(loaded, dict):
             raise BacktestConfigError(f"{config_path}: config must be a mapping")
-        raw = _deep_merge(raw, loaded)
+        raw = _merge_config(raw, loaded)
     if overrides:
-        raw = _deep_merge(raw, dict(overrides))
+        raw = _merge_config(raw, dict(overrides))
     if markets:
         raw["markets"] = list(markets)
     return BacktestConfig.from_raw(raw)
+
+
+def _merge_config(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:
+    base = dict(base)
+    for scalar_key, map_key in (("fee_bps", "fee_bps_by_venue"),
+                                ("slippage_bps", "slip_bps_by_venue")):
+        scalar = _scalar_bps(patch.get(scalar_key), scalar_key)
+        if scalar is not None:
+            # Reset inherited venue costs before applying this layer's explicit map.
+            base[map_key] = dict.fromkeys(_float_map(base.get(map_key), {}), scalar)
+    return _deep_merge(base, patch)
 
 
 def _deep_merge(base: dict[str, Any], patch: dict[str, Any]) -> dict[str, Any]:

@@ -798,6 +798,7 @@ def llm_config_set(
     default_tier: str | None = None,
     intent_tier: str | None = None,
     providers: list[Any] | None = None,
+    remove_providers: list[Any] | None = None,
     tiers: list[Any] | None = None,
     vault_passphrase: str | None = None,
     explicit_overrides: bool = False,
@@ -845,6 +846,23 @@ def llm_config_set(
                 elif key in raw and raw[key] in (None, ""):
                     merged_profile.pop(key, None)
             yaml_profiles[provider] = merged_profile
+
+    removed_providers: list[str] = []
+    if remove_providers is not None:
+        for raw_provider in remove_providers:
+            provider = str(raw_provider or "").strip().lower()
+            if not provider or not _PROVIDER_RE.fullmatch(provider):
+                raise ValueError(f"invalid provider: {provider!r}")
+            if provider not in current_profiles and provider not in yaml_profiles:
+                raise ValueError(f"provider not configured: {provider}")
+            for tier_name, tier_cfg in current_tiers.items():
+                if any(
+                    str(route.get("provider") or "").strip().lower() == provider
+                    for route in configured_routes(tier_cfg)
+                ):
+                    raise ValueError(f"provider in use: {provider} ({tier_name})")
+            yaml_profiles.pop(provider, None)
+            removed_providers.append(provider)
 
     if tiers is not None:
         seen: set[str] = set()
@@ -920,7 +938,11 @@ def llm_config_set(
     yaml_io.dump(config.paths.config, existing)
     config.data.setdefault("llm", {})
     config.data["llm"].update(llm)
-    return llm_config(config)
+    for provider in removed_providers:
+        ModelCatalog(workspace=config.paths.root).remove_provider(provider)
+    result = llm_config(config)
+    result["removed_providers"] = removed_providers
+    return result
 
 
 def models_list(config: Config) -> dict[str, Any]:

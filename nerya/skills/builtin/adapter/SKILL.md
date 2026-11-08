@@ -3,6 +3,13 @@ name: adapter
 description: "Use to integrate or repair exchange, prediction-market, wallet, DEX and aggregator adapters; inspect capabilities, validate protocol contracts and connect execution to Nerya's risk and approval flows."
 license: MIT
 version: 0.1.0
+metadata:
+  nerya:
+    script_policy:
+      read_only:
+        - inspect_adapter.py
+        - inspect_prediction.py
+        - validate_contract.py
 ---
 
 # Adapter

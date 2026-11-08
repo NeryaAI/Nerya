@@ -42,7 +42,8 @@ export function useChatDraft(scope: string) {
         const restored = writeChatDraft(scope, own.draft, workspaceId);
         setSnapshot({ workspace: workspaceId, generation, scope, draft: restored });
       }
-      setRecovery(rows.filter(row => row.windowId !== draftWindowId() && hasChatDraft(row.draft)));
+      // Settings-only drafts stay persisted, but have no content to offer for recovery.
+      setRecovery(rows.filter(row => row.windowId !== draftWindowId() && (row.draft.text.trim() || row.draft.attachments.length)));
     }).catch(() => { if (!disposed) setStorageError(true); });
     return () => { disposed = true; };
   }, [scope, workspaceId, generation]);

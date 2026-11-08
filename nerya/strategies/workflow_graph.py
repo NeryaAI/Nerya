@@ -100,7 +100,7 @@ def _call_name(node: ast.AST) -> str:
     return ""
 
 
-def _script_evidence(files: dict[str, str], scripts: list[str]) -> dict[str, dict[str, Any]]:
+def _script_evidence(files: dict[str, str], scripts: list[str], params: dict[str, Any]) -> dict[str, dict[str, Any]]:
     """Conservative AST evidence. Dynamic imports/dispatches stay unclaimed."""
     modules = {p[:-3].replace("/", "."): p for p in scripts}
     evidence: dict[str, dict[str, Any]] = {}
@@ -116,6 +116,7 @@ def _script_evidence(files: dict[str, str], scripts: list[str]) -> dict[str, dic
         # Display authored documentation verbatim; never infer business rules
         # or execution success from a function name or an indicator keyword.
         row["description"] = (ast.get_docstring(tree) or "").split("\n\n", 1)[0][:600]
+        ast_parents = {child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)}
         aliases: dict[str, str] = {}
         for item in ast.walk(tree):
             if isinstance(item, (ast.Import, ast.ImportFrom)):
@@ -170,6 +171,24 @@ def _script_evidence(files: dict[str, str], scripts: list[str]) -> dict[str, dic
             if name == "ctx.subagents.run":
                 values = list(item.args[:1]) + [kw.value for kw in item.keywords if kw.arg == "name"]
                 row["agents"].update(str(value.value) for value in values if isinstance(value, ast.Constant) and isinstance(value.value, str))
+                for value in values:
+                    if not (isinstance(value, ast.Subscript) and isinstance(value.slice, ast.Constant) and isinstance(value.slice.value, str)):
+                        continue
+                    source = value.value
+                    if isinstance(source, ast.Name):
+                        scope = item
+                        while not isinstance(scope, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Module)):
+                            scope = ast_parents[scope]
+                        writes = [node for node in ast.walk(scope) if isinstance(node, ast.Name) and node.id == source.id and isinstance(node.ctx, (ast.Store, ast.Del))]
+                        binding = ast_parents[writes[0]] if len(writes) == 1 else None
+                        # Only one earlier, unconditional local binding is evidence.
+                        if not (isinstance(binding, ast.Assign) and binding in scope.body and len(binding.targets) == 1 and binding.lineno < item.lineno):
+                            continue
+                        source = binding.value
+                    if _call_name(source) == "ctx.config.params":
+                        role = params.get(value.slice.value)
+                        if isinstance(role, str) and role:
+                            row["agents"].add(role)
         evidence[path] = row
     return evidence
 
@@ -208,7 +227,7 @@ def build_workflows(files: dict[str, str]) -> dict[str, Any]:
     scripts = sorted(p for p in files if p.endswith(".py") and p.split("/")[0] not in {"tests", "fixtures"} and not p.endswith("__init__.py"))
     entry = str(manifest.get("entrypoint") or "main.py:run").split(":")[0]
     scripts.sort(key=lambda p: (p != entry, p))
-    evidence = _script_evidence(files, scripts)
+    evidence = _script_evidence(files, scripts, _object(manifest.get("params")))
     for index, path in enumerate(scripts):
         add(_node("script", path, path, file=path, content=files[path],
                   x=340, y=120 + index * 176, subtitle=("Continuous listener" if continuous else "entrypoint") if path == entry else "Python module"))

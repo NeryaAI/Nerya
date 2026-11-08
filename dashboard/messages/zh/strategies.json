@@ -1,4 +1,14 @@
 {
+  "workflowRecovery": {
+    "title": "修复策略源文件",
+    "description": "配置文件无法解析。下方保留原始源码和诊断。保存只会创建独立的待审提案，不会覆盖或启动当前策略。",
+    "source": "strategy.yml 源码",
+    "readOnly": "部分策略文件无法安全读取，请先处理这些文件再修复源码。",
+    "save": "提出源码修复",
+    "saving": "检查修复中…",
+    "discard": "放弃修改",
+    "discardMessage": "放弃本地修复草稿，恢复已保存的源码？"
+  },
   "strategyTransfer": {
     "edit": "编辑策略",
     "import": "导入策略",
@@ -50,7 +60,7 @@
     "chartLoading": "回测图表加载中...",
     "chartUnavailable": "当前这次运行暂时没有可用的回测图表。",
     "detailEyebrow": "{id} 回测",
-    "detailDescription": "完整资金曲线、基准曲线、交易明细，以及独立的策略品种 K 线和可下载产物。",
+    "detailDescription": "查看已记录的图表、指标、详细记录和可下载产物（可用内容因运行而异）。",
     "equityBenchmarkTitle": "资金曲线 / 基准曲线",
     "equityBenchmarkDescription": "优先展示完整净值走势；若产物未包含基准序列，会用价格数据推导买入并持有基准。",
     "tradeDetailsTitle": "交易明细",
@@ -447,6 +457,7 @@
     "tickResult": "手动 tick {runId} → {status}（{ms} 毫秒）"
   },
   "strategyProposal": {
+    "currentSourceNeedsValidation": "当前源码待校验",
     "approveAdd": "批准并添加",
     "appliedNotice": "已添加策略 {strategy}",
     "blocked": "验证阻塞",

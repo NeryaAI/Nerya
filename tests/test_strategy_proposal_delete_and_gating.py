@@ -154,7 +154,7 @@ def test_delete_proposal_route_static_path_wins_over_param_route(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_generate_require_valid_blocks_invalid_proposal(tmp_path):
+def test_generate_require_valid_preserves_invalid_candidate_with_diagnostics(tmp_path):
     paths = WorkspacePaths(root=tmp_path)
     generator = StrategyCodeGenerator(paths)
 
@@ -167,9 +167,8 @@ def test_generate_require_valid_blocks_invalid_proposal(tmp_path):
 
     assert out.validation is not None
     assert out.validation.ok is False
-    assert out.proposal is None
-    # Nothing should have been persisted to the pending-review queue.
-    assert list_proposals(paths) == []
+    assert out.proposal is not None
+    assert next(p for p in list_proposals(paths) if p.id == out.proposal.id).state == "pending_review"
 
 
 def test_generate_without_require_valid_keeps_legacy_behavior(tmp_path):
@@ -214,7 +213,7 @@ def test_generate_require_valid_allows_valid_proposal(tmp_path):
 # ---------------------------------------------------------------------------
 
 
-def test_generate_proposal_handler_returns_blockers_without_pending(tmp_path):
+def test_generate_proposal_handler_saves_candidate_and_returns_failed_diagnostics(tmp_path):
     paths = WorkspacePaths(root=tmp_path)
     cfg = Config(paths=paths, data={})
 
@@ -233,15 +232,12 @@ def test_generate_proposal_handler_returns_blockers_without_pending(tmp_path):
         config=cfg,
     )
 
-    assert result.is_error is True
-    assert result.error is not None
-    assert result.error.kind == ToolErrorKind.SCHEMA_VALIDATION
-    hint = result.error.recovery_hint
-    assert hint["action"] == "fix_validation_blockers_and_retry"
-    assert hint["tool_name"] == "strategy_generate_proposal"
-    assert hint["blockers"], "expected at least one blocker in the recovery hint"
-    # No pending proposal should have been written.
-    assert list_proposals(paths) == []
+    assert result.is_error is False and result.semantic_success is True
+    data = result.content[0].data
+    assert data["validation"]["ok"] is False
+    assert data["validation"]["blockers"]
+    assert data["backtest_required"] is False
+    assert next(p for p in list_proposals(paths) if p.id == data["proposal_id"]).state == "pending_review"
 
 
 def test_strategy_delete_proposal_handler_deletes_pending(tmp_path):

@@ -1,7 +1,8 @@
 import { useCallback, useEffect, useRef, useState, type RefObject } from "react";
 
-export type FindEntry = { id: string; text: string };
-export type TimelineMatch = { id: string; matchOffset: number; length: number; occurrence: number; query: string };
+type FindSection = "commentary" | "reply";
+export type FindEntry = { id: string; text: string; sections?: {section:FindSection; text:string}[] };
+export type TimelineMatch = { id: string; matchOffset: number; length: number; occurrence: number; query: string; section?:FindSection };
 export type RevealRequest = { session: string; id: string; focus?: boolean; match?: TimelineMatch };
 export const REVEAL_CONVERSATION = "nerya:reveal-conversation";
 export function requestConversationReveal(request: RevealRequest) {
@@ -14,14 +15,25 @@ export function conversationMatches(entries: FindEntry[], query: string): Timeli
   if (!value) return [];
   const escaped = Array.from(value, char => ".*+?^$".includes(char) || "{}()|[]\\".includes(char) ? "\\" + char : char).join("");
   const pattern = new RegExp(escaped, "giu");
-  return entries.flatMap(entry => [...entry.text.matchAll(pattern)].map((match, occurrence) => ({
-    id: entry.id, matchOffset: match.index!, length: match[0].length, occurrence, query: value,
-  })));
+  return entries.flatMap(entry => {
+    let offset = 0;
+    return (entry.sections || [{text:entry.text}]).flatMap(part => {
+      const section = "section" in part ? part.section : undefined;
+      const matches = [...part.text.matchAll(pattern)].map((match, occurrence) => ({
+        id:entry.id, matchOffset:offset + match.index!, length:match[0].length, occurrence, query:value,
+        ...(section ? {section} : {}),
+      }));
+      offset += part.text.length + 2;
+      return matches;
+    });
+  });
 }
 
 /** A DOM range can cross Markdown spans without mutating React-owned text nodes. */
 export function matchRange(element: HTMLElement, match: TimelineMatch): Range | null {
-  const roots = [...element.querySelectorAll<HTMLElement>("[data-find-text]")];
+  const roots = [...element.querySelectorAll<HTMLElement>("[data-find-text]")]
+    .filter(root => !match.section || root.closest('[data-turn-section="' + match.section + '"]'));
+  if (match.section && !roots.length) return null;
   const nodes: Text[] = [];
   for (const root of roots.length ? roots : [element]) {
     const body = root.querySelector<HTMLElement>(".nerya-markdown") || root;
@@ -81,9 +93,12 @@ export function useTimelineReveal({ session, scopeRef, scrollRef, resolveUnit, h
           if (!scrolled) { setForced(unitId); unit.scrollIntoView({ block: "center" }); scrolled = true; frame = requestAnimationFrame(locate); return; }
           if (unit.dataset.timelineMounted !== "true") { frame = requestAnimationFrame(locate); return; }
           const target = [...unit.querySelectorAll<HTMLElement>("[data-find-entry],[data-turn-id]")].find(el => el.dataset.findEntry === request.id || el.dataset.turnId === request.id) || unit;
-          // Tool input can be inside a closed disclosure; let React mount it before measuring.
-          if (request.match && !target.querySelector("[data-find-text]") && [...target.querySelectorAll("details")].some(el => !el.open)) {
-            target.querySelectorAll("details").forEach(el => { el.open = true; });
+          // A commentary hit belongs to the public execution narration. Open
+          // only that section; final text may already be mounted beside it.
+          const execution = request.match?.section === "commentary"
+            ? target.querySelector<HTMLDetailsElement>('details[data-testid="execution-process"]') : null;
+          if (execution && !execution.open) {
+            execution.open = true;
             frame = requestAnimationFrame(locate); return;
           }
           const range = request.match ? matchRange(target, request.match) : null;

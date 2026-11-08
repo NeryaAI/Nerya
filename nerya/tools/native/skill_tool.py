@@ -54,6 +54,7 @@ from .skill import (
     SkillIndex, script_inspect_handler, skill_index_handler, skill_view_handler,
     skill_access_error,
     skill_asset_access_error,
+    allowed_skill_names,
 )
 
 
@@ -70,10 +71,12 @@ SKILL_TOOL_NAME = "Skill"
 
 
 SKILL_TOOL_DESCRIPTION = (
-    "Read-only skill discovery: action=list lists primary workflows; "
-    "skill=<name> loads a playbook; file=<relative path> reads a reference "
-    "page (use returned next_offset to continue); action=inspect with script "
-    "reads a helper without executing it. Catalog skill names are not callable tools: "
+    "Read-only skill discovery: action=list lists primary workflows; action=search with query "
+    "finds relevant workflows and specialist methods without loading their bodies; "
+    "skill=<name> loads a playbook; skill=<name> with file=<relative path> reads a reference "
+    "page (use returned next_offset to continue). Load/read/inspect always require the explicit skill; "
+    "a previous load does not select an implicit skill. action=inspect with skill and script "
+    "reads a bounded helper page without executing it (follow next_offset). Catalog skill names are not callable tools: "
     "load them through this exact Skill tool. Scripts execute only through script_run."
 )
 
@@ -82,10 +85,11 @@ SKILL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "action": {
-            "type": "string", "enum": ["list", "load", "read", "inspect"],
+            "type": "string", "enum": ["list", "search", "load", "read", "inspect"],
             "description": "Defaults to load, or read when file is supplied.",
         },
-        "skill": {"type": "string", "description": "Exact catalog or compatibility skill name."},
+        "skill": {"type": "string", "description": "Exact catalog or compatibility skill name; required for load/read/inspect, including every file page."},
+        "query": {"type": "string", "minLength": 1, "maxLength": 512, "description": "For action=search; names or task concepts in English or Chinese."},
         "file": {"type": "string", "description": "Asset path confined to the skill directory."},
         "script": {"type": "string", "description": "Helper filename for action=inspect."},
         "offset": {"type": "integer", "minimum": 0},
@@ -96,6 +100,7 @@ SKILL_TOOL_INPUT_SCHEMA: dict[str, Any] = {
     "anyOf": [
         {"required": ["skill"]},
         {"required": ["action"], "properties": {"action": {"const": "list"}}},
+        {"required": ["action", "query"], "properties": {"action": {"const": "search"}}},
     ],
 }
 
@@ -144,10 +149,19 @@ def skill_tool_handler(
     # SKILL.md，导致无法读到所需接口并重复探索。仍走同一只读权限检查。
     if action == "load" and args.get("file"):
         action = "read"
-    if action not in ("list", "load", "read", "inspect"):
-        return schema_validation_result(call, "Skill supports list, load, read or inspect; never execution.")
+    if action not in ("list", "search", "load", "read", "inspect"):
+        return schema_validation_result(call, "Skill supports list, search, load, read or inspect; never execution.")
     if action == "list":
         return skill_index_handler(call, skill_index=skill_index)
+    if action == "search":
+        query, limit = args.get("query"), args.get("limit", 8)
+        if not isinstance(query, str) or not query.strip() or len(query) > 512 or type(limit) is not int or not 1 <= limit <= 20:
+            return schema_validation_result(call, "Skill search requires query (1..512 characters) and limit (1..20).")
+        rows = skill_index.search(query, limit=limit, refresh=bool(args.get("refresh")), allowed_skills=allowed_skill_names(call))
+        return ToolResult.from_json(tool_use_id=call.id, name=call.name, data={
+            "skills": rows, "catalog_generation": skill_index.catalog_generation,
+            "query": query, "next_action": "Load the exact returned skill only when useful; discovery grants no execution authority.",
+        })
     raw_skill_name = args.get("skill")
     skill_name = raw_skill_name.strip() if isinstance(raw_skill_name, str) else ""
     if not skill_name:

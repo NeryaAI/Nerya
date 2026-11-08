@@ -107,7 +107,7 @@ class SubAgentExecutionPolicy:
             required_native_tools=_names(data.get("required_native_tools")),
             preload_skills=_names(data.get("preload_skills")),
             tool_argument_defaults=defaults,
-            max_iterations=_limit("max_iterations", minimum=1),
+            max_iterations=_limit("max_iterations"),
             max_skill_calls=_limit("max_skill_calls"),
             max_wall_seconds=_limit("max_wall_seconds", float),
             llm_max_attempts=_limit("llm_max_attempts", minimum=1),
@@ -165,9 +165,9 @@ class SubAgentExecutionPolicy:
             defaults.setdefault(name, {}).update(values)
 
         def _bounded(base: Any, incoming: Any) -> Any:
-            if base is None:
+            if base is None or base == 0:
                 return incoming
-            if incoming is None:
+            if incoming is None or incoming == 0:
                 return base
             return min(base, incoming)
 
@@ -439,7 +439,7 @@ DEFAULT_TIERS = {
     "kobeissi_lens": "medium",
     # Data collection is deliberately cheap: the researcher only drives
     # search/fetch tools and summarises what it saved, so the light tier
-    # is enough. The bundle execution policy locks this role to light.
+    # is the default when neither the role nor its parent selects a model.
     "web_researcher": "light",
 }
 
