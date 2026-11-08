@@ -146,8 +146,8 @@ export function ComposerModelMenu({ settings, onSettingsChange, modelOptions, di
     <Popover.Root open={open} onOpenChange={(next) => { setOpen(next); if (!next) { setQuery(""); setEditKey(null); setAdvancedOpen(false); } }}>
       <Popover.Trigger asChild>
         <button type="button" disabled={disabled} className={`${controlClass} max-w-[260px]`} data-composer-model-trigger aria-label={tUi("modelOptions")}
-          title={`${modelLabel} · ${t("think")} ${thinkingLabel} · ${contextLabel(settings.model_context_window)}`}>
-          <SparkIcon size={14} className="shrink-0" /><span className="truncate">{modelLabel}</span>
+          title={`${t("nextSendModel")}: ${modelLabel} · ${t("think")} ${thinkingLabel} · ${contextLabel(settings.model_context_window)}`}>
+          <SparkIcon size={14} className="shrink-0" /><span className="truncate">{t("nextSendModel")}: {modelLabel}</span>
           <span className="shrink-0 text-[color:var(--text-muted)]">· {t("think")} {thinkingLabel}</span>
           <ChevronDownIcon size={12} className="shrink-0" />
         </button>

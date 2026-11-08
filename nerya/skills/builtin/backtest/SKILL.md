@@ -1,167 +1,159 @@
 ---
 name: backtest
-description: "Run a saved Nerya strategy over reusable local historical data; diagnose errors and present version-bound results without activation."
-version: 0.6.0
+description: "Run or continue Nerya historical backtests, research accurate data and compare multiple periods, including sparse on-chain/LP history; deliver attributable results and limitations without activating trading."
+version: 0.8.0
 license: MIT
 author: Nerya
 ---
 
 # Backtest
 
-## Normal path: one native call
+On continuation, use saved progress and the producer's diagnosed next action.
+Read the named current inputs and perform that action; reuse the existing
+inventory instead of reopening every prior report or rediscovering the replay
+implementation. Investigate further when a new result changes the diagnosis.
 
-Use `strategy_backtest` with the exact candidate `proposal_id` (or `strategy_id`
-for a saved promoted strategy). Choose `engine:"native"` for the strategy's SDK
-entrypoint; `engine:"freeform"` only for an intentionally authored custom replay.
-Omit `engine` (auto) when the package already owns the appropriate replay; auto
-recognizes its supported custom script. For non-candle inputs or unavailable
-history, load `references/replay-capabilities.md` before choosing another engine.
-Keep `allow_mock:false` for real historical results.
+Before continuing LP replay, select the model for the current user study. A saved
+`cadence` default or old `cadence_data_incomplete` failure does not require full
+interval acquisition. For user-permitted sampled/custom research, load
+`Skill(skill="strategy_author", file="references/lp-sampled-research.md")`,
+section 3, and adjust the same candidate before replay. A saved-data-only request
+forbids new history/interval acquisition jobs; compare supported saved periods
+and disclose the model and gaps. For explicitly requested cadence, retain its
+stronger input requirements and report missing inputs under that restriction.
 
-If the target `strategy.yml` already declares a `backtest:` block, **do not inspect
-the file just to learn those values**. Call `strategy_backtest` with the exact
-`proposal_id`/`strategy_id`; the tool reads candidate defaults internally. Do not use
-`evolve_proposals`, `read_file`, `run_shell`, `cat`, `grep`, or memory to reconstruct
-replay defaults. Normal verification keeps candidate-declared assumptions
-authoritative. Only set `override_candidate_backtest_defaults:true` when the operator
-explicitly asks to test a different assumption.
+## Research and compare
 
-When the candidate does not already own those assumptions, pass user-requested
-settings directly; a separate configuration file is not required:
+1. **Keep the strategy.** Reuse the actual `proposal_id` or `strategy_id` and
+   preserve explicit user requirements: strategy rules, assets, chain, venue/pool,
+   dates, timeframe, sizing and risk limits. Candidate defaults are starting
+   assumptions, not an immutable research scope. Record Agent-selected assumptions
+   and distinguish them from explicit requirements.
+2. **Find accurate history.** Prefer existing usable history and saved producer
+   datasets before acquiring more. Verify the exact instrument or pool, ordered
+   token contracts, quote direction, timestamps, source, observed fields and gaps.
+   Use `references/history-data.md` for inventory/reuse and
+   `Skill(skill="research", file="references/onchain-data-discovery.md")` when
+   source discovery is needed. A cache miss or one provider error does not prove
+   history is unavailable. Continue public read-only research within existing
+   permissions; ask only for genuinely missing access, paid resources or a material
+   change to the user's requirements.
+3. **Choose useful periods.** Compare multiple supported lookback windows,
+   resolutions or market regimes and explain their selection; no fixed period
+   list is required. Preserve any explicitly requested dates and strategy
+   timeframe. Where data is sparse, use available windows, supported sampling or
+   a strategy-local custom simulation with stated scope and assumptions. Keep an
+   unmet requested window visible alongside supplementary studies. Do not spend
+   hours collecting every LP cron state and event bridge by default; select full
+   lifecycle reconstruction only when the question actually needs it.
+4. **Run and deliver evidence.** Execute the saved strategy through the suitable
+   replay engine, compare results across periods with costs, coverage and model
+   limits, and save the actual reports. Coverage gaps constrain interpretation;
+   they do not by themselves prevent a useful partial calculation or delivery.
+   Report unavailable periods and negative/no-trade results as well as successes.
+   Never invent observations, complete coverage, fills or verified returns.
+
+## Invoke the existing tools
+
+Validate the saved candidate with `strategy_validate`; repair concrete source or
+SDK errors in the same candidate. Use `strategy_backtest` with its actual ID.
+Omit `engine` for auto selection when the package already owns the replay;
+`native` runs the candle SDK entrypoint, `rates` the supported rate-policy replay,
+and `freeform` a saved strategy-local research script. Engine choice follows the
+inputs and strategy, not a more favorable result.
+
+For native replay, pass supported `settings` or an existing `config_path`; a
+separate file is unnecessary for ordinary settings. For example:
 
 ```json
 {"proposal_id":"<actual returned id>","engine":"native","allow_mock":false,
- "settings":{"window_days":365,"tf":"1h","warmup_bars":100}}
+ "settings":{"window_days":365,"tf":"1h","warmup_bars":100,"coverage_policy":"allow_partial"}}
 ```
 
-Use `settings` only when the ACTUALLY advertised tool schema includes it. A running
-older server may not have loaded updated code: in that case use its supported
-`config_path` field with the intended settings file, never send an ignored field
-and silently fall back to the default period.
+Choose actual periods and lookback needs for the task rather than copying the
+example. Use `coverage_policy:"allow_partial"` for research with gaps and
+disclose them; evaluate a study's full-coverage requirement in the report rather
+than blocking every calculation. Use only fields
+in the advertised tool schema. Explicit dates use inclusive `start_utc` and
+exclusive `end_utc`, both UTC. Record requested and actual bounds for every run.
+`data_mode:"local"` forbids network retrieval. Keep `allow_mock:false` for real
+historical results; label synthetic stress/behavior scenarios separately.
 
-This call already resolves candidate replay defaults, performs config/source preflight, incremental history download
-and reuse, strict coverage checks, source/data snapshots, bounded isolated replay
-and report publication. Do NOT call separate preflight/download/inspect tools on
-the normal success path. Progress arrives as ordinary tool progress, not additional
-model turns. Preserve the user's capital, sizing, fees and position limits. Candidate
-defaults are version-bound evidence assumptions; ordinary model-generated settings do
-not override them. Explicit operator-requested alternate assumptions require the
-override flag and are saved with the run.
+Normal replay owns preflight, history preparation/reuse, isolated execution and
+reports; no separate inspect/download tour is needed on success. For custom
+replay, use `strategy_backtest(proposal_id="<actual id>", engine="freeform",
+allow_mock=false)`; native `settings`, `data_mode`, `config_path` and
+`preflight_only` are not freeform inputs. Save custom assumptions in the package.
+Generic freeform research need not match the host LP template or its full-state
+data protocol; host-verified LP accounting is an optional stronger evidence path.
+Load `references/replay-capabilities.md` for engine/input choices and model
+authorization, or `references/custom_replay_template.md` for supported script
+paths and the facade. Those interface details do not make full coverage or a
+particular LP template a prerequisite for all research.
 
-Preflight rejects high-confidence future-data patterns such as negative
-shift/diff/pct_change, backward filling/interpolation, centered rolling
-windows and forward merge_asof. Dynamic period/alignment values, direct
-external file reads, wall-clock access and replay randomness are warnings
-because static analysis cannot prove their causality. The replay runtime itself
-exposes only the closed historical prefix, exposes higher timeframes only after
-their candle close, and fills strategy orders on the next bar open. A signal
-on the final candle is rejected rather than filled at that same close.
+Reuse `strategy_validate.verification.revision` when supplying
+`expected_source_revision`; after source changes, validate again and use the new
+revision unchanged. Repair diagnosed input/config errors before retrying. A new
+period is a distinct disclosed study, not a nonce for repeating a failed or
+unconfirmed operation. Keep prior reports and receipts.
 
-For exact dates use inclusive `start_utc` and exclusive `end_utc`, both UTC. Do not
-silently substitute a shorter period, different timeframe or cached old report.
+## Read results and close the delivery
 
-## Outcomes and recovery
+Read the actual `strategy_backtest` result and returned `run_receipt` and
+`report_path`. A written script, file path or `ok:true` envelope alone does not
+establish replay execution or historical performance. Separate source execution,
+observed coverage, simulated accounting and independently verified performance.
+Use recorded timestamps and identify each compared run's own data source and
+producer reference; omit unknown fields instead of filling them with placeholders.
+Preserve `verification.checks`, including missing, failed, stale and `not_run`
+checks; model-authored PASS fields cannot replace producer evidence.
 
-- `completed`: inspect actual/requested dates, `requested_window_complete`, per-market
-  coverage and execution counts. Economic WARN/FAIL is a completed calculation, not
-  permission to change the strategy until profitable. The returned card opens the
-  corresponding immutable report. No duplicate chart-publishing call is necessary.
-  Trailing the buy-and-hold benchmark is a WARN/review condition, not a failed
-  replay or failed strategy.
-- `blocked`: inspect structured diagnostics. Fix syntax/config/SDK issues before
-  rerunning. Incomplete data is not proof the exchange only has 30 days; inspect the
-  download receipt. Repair/resume missing segments with `historical_data` when needed;
-  keep the same candidate, period and risk rules. For a missing provider or an
-  unsupported input surface, use `references/replay-capabilities.md` to repair
-  the data/replay capability. Never retry an unchanged failure.
-- `failed/cancelled`: retain `run_receipt`, `failure_path`, source snapshot and cached
-  downloads. Do not present a partial report as a completed run. Cancelled execution
-  does not authorize starting another worker without an active request.
+After a cancelled or failed model replay, read its saved `decision_tape.json`
+alongside the failure receipt: a run can contain confirmed decisions and an
+unconfirmed later request. Report each separately. Before proposing a retry or
+renewed authorization, follow the recovery section in `references/replay-capabilities.md`.
 
-For download-only, inventory or explicitly offline requests, load
-`references/history-data.md`. `data_mode:"local"` forbids automatic network retrieval.
-For advanced settings load `references/config_schema.md`; that file belongs to THIS
-skill, not strategy_author. Other details live in `references/extended-replay.md`.
-Read only the reference matching the current need; do not reread loaded main pages.
+For a new replay delivery, load `references/delivery-contract.json` and use
+`delivery_start(skill_id="backtest", workflow_id="strategy_replay", ...)`.
+Reuse the current authoring delivery when present. Standalone replay stages may use
+`preflight` with `required_checks:["source_binding"]`, `replay` with
+`required_checks:["historical_run","replay_source"]`, and `readback` with
+`required_checks:["report_output"]` and `required_artifacts:["report","run_receipt"]`.
+Coverage, historical-data quality, execution integrity and scope matching are
+optional diagnostics, not required stage checks. Register actual returned refs
+with `delivery_update`, using the latest `delivery_revision` as
+`expected_revision`. Stages use `state`; artifact records use `artifact_id`,
+`kind` and `ref`. Producers persist checks; omit model-authored `checks` from updates.
 
-## Execution and data truth
+Reconcile evidenced stages and call `delivery_finalize` with the latest revision.
+Its `completion.allowed` owns workflow completion under the minimal contract;
+it does not mean complete coverage or verified returns. Deliver real limited
+research and saved reports with all gaps visible, even when stronger evidence is
+unavailable. Do not rerun completed calculations or collect an entire LP lifecycle
+solely to make delivery green. Economic FAIL can accompany completed execution.
+For data-only inspection or saved-report explanation, return findings directly
+without starting a new replay.
 
-`ctx.result.ok()` means the script returned normally, not a fill. A real SDK
-`open_position` queues an order even if run later returns hold. Compare attempts,
-queued, filled, rejected, SDK errors and forced closes; action labels are not orders.
-Use settled portfolio positions. Multi-market callbacks use `ctx.trigger.market`,
-not the first configured symbol; a capacity rejection cannot erase an attempt.
+## Safety and evidence boundaries
 
-Only closed candles are visible and fills use the recorded next-open assumption.
-Warmup is not performance. Do not remove `protection` to make replay pass: preserve
-the risk rules in a documented historical execution model. Bar-close protection is
-not identical to exchange intrabar execution. Unsupported behavior stays explicit.
+Reconcile pending/unknown effects and a genuinely sent, unconfirmed model-request
+ledger before retrying; an old request, fresh grant or changed window does not
+authorize replaying that effect. Ordinary deterministic backtests need no model
+grant. For actual model decisions, use the existing bounded authorization path in
+`references/replay-capabilities.md`; missing model permission does not forbid
+data research, authoring or independent deterministic checks.
 
-The native engine simulates `open_position(protection=...)` for percentage or
-absolute-price stop loss/take profit, percentage trailing stops and time limits.
-Pass the same supported SDK rules unchanged: do not delete them or write a second
-exit algorithm just for replay. Protection fills are counted separately from SDK
-submissions. The report records OHLC timing, gap handling, stop-first collisions
-and prior-bar trailing watermarks. ATR-relative, partial-exit and bid/ask-triggered
-rules still need a supported explicit model; never silently drop those controls.
+Preserve sandbox isolation, closed historical prefixes, next-bar execution where
+applicable, stops, fees and risk limits. Static temporal scans do not prove causal
+correctness; fixtures and custom simulations do not establish verified returns.
+`ctx.result.ok()` is not a fill. Report attempts/fills/rejections and forced closes
+from real run evidence. Keep `performance_evidence:false` wherever returned.
+Never tune against a sealed test or erase negative outcomes. Research/replay
+does not promote a strategy, enable schedules, place account orders or bypass
+Risk Gate, Approval Gate or live-trading permission.
 
-Script replay can report simulated trade performance. Agent replay with
-`replay.agent_execution:"not_run"` proves gates, inputs and dispatches only, never
-historical model decisions or trading returns. Use `performance_evidence:false` as
-the boundary; do not turn a flat Agent replay into a zero-return trading result.
-
-Percent fields already contain percentage points: 0.15 means 0.15%, not 15%.
-Positive alpha means outperformed even when both returns are negative. Prefer
-`operator_summary.benchmark_comparison`. Historical data updates do not change an
-old report: run the strategy again and link the NEW timestamp; retain old evidence.
-GBS is only an explicitly recorded strategy signal, never inferred from buy/sell.
-No replay or report view approves a strategy, activates a schedule or trades an account.
-
-## Percentage sizing and flat-curve review
-
-Honor saved `params.sizing: {method: pct_nav, pct_nav: ...}`; fractions are
-0..1, unlike report `_pct` fields. Percentage sizing follows current NAV, not
-initial capital. `stake_amount.mode: unlimited` preserves SDK sizing;
-`mode: fixed` overrides it and is only for an explicitly requested fixed-stake
-study. Match `max_open_trades` to the candidate's intended concurrent slots.
-Do not silently replace percentage sizing with 100U or override existing limits.
-
-An almost-flat curve needs an explanation: compare real price movement,
-filled notional/NAV, attempts/fills/rejections, fees, exposure time and benchmark
-capture. `exposure_pct` is time/rows invested, NOT capital utilization. No fills
-does not establish trading performance; Agent execution not_run is not 0% return.
-Use recorded evidence, not fabricated utilization fields or extra automatic
-replays. For low participation, capital allocation or authorized optimization,
-load `Skill(skill="strategy_author", file="references/position-sizing.md")`.
-Preserve negative results and unchanged benchmark scaling; do not manufacture
-activity or tune a strategy merely to make its chart attractive.
-
-## Research review, only when requested
-
-An ordinary replay remains **one native call**, not an automatic audit campaign.
-Read `bias_checks`, `research_checks` and recorded execution-model limits in the
-returned receipt. Static scan passed means no blocking pattern was found, NOT
-proof of no leakage; warnings remain unresolved. A completed replay, positive
-return or economic PASS does not establish out-of-sample validity.
-
-For future-data/repainting concerns or recursive-indicator initialization, load
-`references/causality-audit.md`. For robustness, independent test windows,
-walk-forward, cost stress, component ablation or market-regime review, load
-`references/research-validation.md`. Read only the needed reference.
-
-Preserve the original baseline and bind every comparison to source/data hashes,
-run IDs, market profile and assumptions. One hypothesis per experiment; retain
-negative results. Do not tune until profitable, silently change risk rules, or
-present an inspected holdout as locked. These references describe methodology,
-not new tool actions. Check actual tool capabilities before running anything;
-unsupported checks stay not_run/blocked with a reason, never become a fabricated
-pass. UI review actions prepare a scoped draft, not an automatic batch or trade.
-
-## Reusable factors
-
-When asked to extract or reuse research components, load `factor_library`.
-Pass this run's exact strategy_id/backtest_ts (as ts) and proposal_id to its
-extract action. It reads frozen source and keeps extracted candidates separate
-from the factors declared in the run. New strategies may include exported,
-version-pinned factors.json; native replay freezes those references alongside
-source. Total strategy profit is not proof of an individual factor's value.
+Load only the needed reference: `references/config_schema.md` for native settings,
+`references/result-interpretation.md` for accounting/benchmarks,
+`references/causality-audit.md` for lookahead audits and
+`references/research-validation.md` for walk-forward, cost stress and ablations.
+Read assets with `Skill(skill="backtest", file="<relative reference path>")`.

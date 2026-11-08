@@ -95,6 +95,7 @@ _TRUSTED_AUTH_PAYLOAD_PATHS = frozenset({
     "/agent/run_turn_internal",
     "/agent/commands",
     "/agent/commands/control",
+    "/agent/goals/control",
     "/agent/interactions/respond",
     "/approvals/callback",
     "/strategy/close_positions",
@@ -702,7 +703,7 @@ def build_server(
                     path=path,
                     client_addr=client_addr,
                 )
-            if result.ok and (path == "/agent/interactions/respond" or path == "/agent/run_turn_internal" or path == "/agent/commands" or path.startswith("/agent/commands/")):
+            if result.ok and (path == "/agent/interactions/respond" or path == "/agent/run_turn_internal" or path == "/agent/commands" or path.startswith("/agent/commands/") or path == "/agent/goals/control"):
                 expected = str(
                     os.environ.get("NERYA_DASHBOARD_INTERNAL_TOKEN")
                     or config.get("runtime.auth.dashboard_internal_token")

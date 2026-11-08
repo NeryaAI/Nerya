@@ -1,0 +1,111 @@
+"""Save as tests/test_contract.py beside the reference main.py; all I/O is local.
+
+Fixture settings are examples, not defaults for the user's strategy.yml.
+"""
+from types import SimpleNamespace
+
+from nerya.strategies import ResultBuilder, StrategyResult
+from main import ema_cross, run
+
+
+def _context(prices, *, position=None, fast_period=12, slow_period=48):
+    market = "MOCK:PAIR"
+    start = 1_700_006_400
+    rows = [{"ts": start + i * 3600, "close": value}
+            for i, value in enumerate(prices)]
+    params = {
+        "indicator": {"fast_period": fast_period, "slow_period": slow_period},
+        "lookback": max(2, len(rows)),
+        "sizing": {"method": "pct_nav", "pct_nav": 0.17},
+        "protection": {"stop_loss": {"type": "pct", "value": 0.013}},
+        "confidence": 0.63,
+    }
+    calls, state = [], {}
+
+    def candles(requested_market, *, timeframe, limit):
+        assert (requested_market, timeframe, limit) == (market, "1h", params["lookback"])
+        return rows[-limit:]
+
+    def settled_position(requested_market):
+        assert requested_market == market
+        return position
+
+    def open_position(*, market, side, sizing, protection, confidence, reasoning_ref):
+        assert market == "MOCK:PAIR" and side == "long"
+        assert sizing == params["sizing"] and protection == params["protection"]
+        assert confidence == params["confidence"]
+        assert reasoning_ref == f"ema_cross:buy:{rows[-1]['ts']}"
+        calls.append("open")
+        return {"status": "rejected", "reason": "entry rejected fixture", "plan_id": "entry-plan"}
+
+    def close_position(*, market, side, confidence, reasoning_ref):
+        assert market == "MOCK:PAIR" and side == "long"
+        assert confidence == params["confidence"]
+        assert reasoning_ref == f"ema_cross:sell:{rows[-1]['ts']}"
+        calls.append("close")
+        return {"status": "pending_approval", "reason": "exit awaiting approval", "approval_id": "approval-1"}
+
+    return SimpleNamespace(
+        config=SimpleNamespace(markets=(market,), timeframe="1h", params=params),
+        trigger={"market": market}, market=SimpleNamespace(candles=candles),
+        portfolio=SimpleNamespace(positions=lambda market: [p] if (p := settled_position(market)) else []),
+        trading=SimpleNamespace(open_position=open_position, close_position=close_position,
+            execution_status=lambda receipt: {'status': 'unknown', 'terminal': False,
+                'reconciled': False, 'has_open_orders': None, 'recovery': 'verify_execution'}),
+        policy=SimpleNamespace(default_order_usd=1),
+        clock=SimpleNamespace(now_ms=lambda: (start + len(rows) * 3600) * 1000),
+        state=SimpleNamespace(get=state.get, set=state.__setitem__),
+        result=ResultBuilder(), calls=calls, rows=rows,
+    )
+
+
+def test_entry_and_duplicate():
+    ctx = _context([3000.0] * 190 + [3500.0])
+    signal = ema_cross(ctx.rows, **ctx.config.params["indicator"])
+    assert not any(signal["buy"][:-1]) and not any(signal["sell"])
+    assert signal["buy"][-1] is True
+    result = run(ctx)
+    assert isinstance(result, StrategyResult) and result.status.value == "rejected"
+    assert result.reason == "entry rejected fixture"
+    assert result.metadata['execution']['plan_id'] == 'entry-plan'
+    assert ctx.calls == ["open"]
+    duplicate = run(ctx)
+    assert duplicate.status.value == "error"
+    assert duplicate.metadata['execution']['status'] == 'rejected'
+    assert duplicate.metadata['recovery'] == 'verify_execution'
+    assert ctx.calls == ["open"]
+
+
+def test_exit_on_last_bar():
+    ctx = _context([3000.0] * 190 + [2500.0], position=SimpleNamespace(size=2))
+    signal = ema_cross(ctx.rows, **ctx.config.params["indicator"])
+    assert not any(signal["sell"][:-1]) and not any(signal["buy"])
+    assert signal["sell"][-1] is True
+    result = run(ctx)
+    assert isinstance(result, StrategyResult) and result.status.value == "pending_approval"
+    assert result.reason == "exit awaiting approval"
+    assert result.approval_id == 'approval-1'
+    assert ctx.calls == ["close"]
+
+
+def test_no_signal():
+    for prices in ([3000.0] * 200, [3000.0] * 190 + [3500.0, 3500.0],
+                   [3000.0] * 190 + [2500.0, 2500.0]):
+        for position in (None, SimpleNamespace(size=2)):
+            ctx = _context(prices, position=position)
+            result = run(ctx)
+            assert isinstance(result, StrategyResult) and result.status.value == "hold"
+            assert result.reason == "no_new_trade_signal"
+            assert ctx.calls == []
+    result = run(_context([3000.0] * 48))
+    assert result.status.value == "hold"
+    assert result.reason == "insufficient_closed_history"
+
+
+def test_saved_periods_and_position_rules():
+    ctx = _context([100.0] * 10 + [110.0], fast_period=2, slow_period=5)
+    assert run(ctx).status.value == "rejected" and ctx.calls == ["open"]
+    for last, position in ((3500.0, SimpleNamespace(size=2)), (2500.0, None)):
+        ctx = _context([3000.0] * 190 + [last], position=position)
+        assert run(ctx).status.value == "hold"
+        assert ctx.calls == []

@@ -46,10 +46,9 @@ def _temporal_bias_issues(path: str, tree: ast.AST) -> tuple[list[dict[str, Any]
 
     Nerya's replay context exposes only the historical prefix, so full-frame
     aggregations and iloc[-1] do not have Freqtrade's full-dataframe semantics
-    here. Block only operations that can explicitly move later observations
-    backward in time, and warn when static analysis cannot prove alignment.
+    here. Report operations that can move later observations backward in time
+    as research warnings; static analysis cannot prove alignment.
     """
-    blockers: list[dict[str, Any]] = []
     warnings: list[dict[str, Any]] = []
     seen: set[tuple[str, int, str]] = set()
 
@@ -73,28 +72,28 @@ def _temporal_bias_issues(path: str, tree: ast.AST) -> tuple[list[dict[str, Any]
             period = _literal(period_node)
             if isinstance(period, (int, float)) and not isinstance(period, bool):
                 if period < 0:
-                    add(blockers, "lookahead_negative_shift",
+                    add(warnings, "lookahead_negative_shift",
                         f"{name} uses periods={period}; negative shifts read future observations.", node)
             elif period is _UNKNOWN:
                 add(warnings, "lookahead_dynamic_shift",
                     f"{name} has a dynamic periods value; preflight cannot prove it is non-negative.", node)
 
         if method in {"bfill", "backfill"}:
-            add(blockers, "lookahead_backward_fill",
+            add(warnings, "lookahead_backward_fill",
                 f"{name} fills earlier rows from later observations; use a causal forward/rolling alternative.", node)
 
         if method == "fillna":
             method_node = _call_arg(node, 1, "method")
             fill_method = _literal(method_node)
             if isinstance(fill_method, str) and fill_method.lower() in {"bfill", "backfill"}:
-                add(blockers, "lookahead_backward_fill",
+                add(warnings, "lookahead_backward_fill",
                     f"{name}(method={fill_method!r}) moves future values backward in time.", node)
 
         if method == "rolling":
             center_node = next((item.value for item in node.keywords if item.arg == "center"), None)
             center = _literal(center_node)
             if center is True:
-                add(blockers, "lookahead_centered_window",
+                add(warnings, "lookahead_centered_window",
                     f"{name} uses center=True; a centered window includes future observations.", node)
             elif center_node is not None and center is _UNKNOWN:
                 add(warnings, "lookahead_dynamic_center",
@@ -104,7 +103,7 @@ def _temporal_bias_issues(path: str, tree: ast.AST) -> tuple[list[dict[str, Any]
             direction_node = next((item.value for item in node.keywords if item.arg == "direction"), None)
             direction = _literal(direction_node)
             if isinstance(direction, str) and direction.lower() == "forward":
-                add(blockers, "lookahead_forward_asof",
+                add(warnings, "lookahead_forward_asof",
                     f"{name} uses direction='forward'; rows can receive values that were not known yet.", node)
             elif direction_node is not None and direction is _UNKNOWN:
                 add(warnings, "lookahead_dynamic_asof",
@@ -114,7 +113,7 @@ def _temporal_bias_issues(path: str, tree: ast.AST) -> tuple[list[dict[str, Any]
             direction_node = next((item.value for item in node.keywords if item.arg == "limit_direction"), None)
             direction = _literal(direction_node)
             if isinstance(direction, str) and direction.lower() in {"backward", "both"}:
-                add(blockers, "lookahead_backward_interpolation",
+                add(warnings, "lookahead_backward_interpolation",
                     f"{name} uses limit_direction={direction!r}; later values may fill earlier timestamps.", node)
 
         if method == "resample":
@@ -138,7 +137,7 @@ def _temporal_bias_issues(path: str, tree: ast.AST) -> tuple[list[dict[str, Any]
                 or method in {"read_text", "read_bytes"}):
             add(warnings, "external_strategy_data_read",
                 f"{name} reads data outside ctx.market; preflight cannot prove point-in-time availability or future-data isolation.", node)
-    return blockers, warnings
+    return [], warnings
 
 
 def _value(node: ast.AST):
@@ -182,7 +181,30 @@ def inspect_package(package: Any, cfg: Any) -> tuple[dict[str, Any], dict[str, s
         issue("incomplete_source_snapshot", "source snapshot omitted files: " + ", ".join(map(str, omitted)), "strategy.yml")
     from .....strategies.configuration_contract import configuration_issues
     for code,message in configuration_issues(package.manifest):
-        issue(code,message,"strategy.yml")
+        if code == "insufficient_closed_history_lookback":
+            warnings.append({"code": code, "message": message, "file": "strategy.yml"})
+        else:
+            issue(code,message,"strategy.yml")
+    # Protocol identity comes from installed component metadata, not task prose.
+    # This producer models candles and exchange-like fills, not pool accounting
+    # or reserve accrual; another data feed cannot supply an execution model.
+    from .....strategies.request_scope import _protocol, ScopeError
+    for market in package.manifest.markets:
+        venue, separator, _ = str(market).partition(':')
+        if not separator:
+            continue
+        try:
+            component = _protocol(venue)
+        except ScopeError:
+            continue
+        required = set(component['market_types']) & {'lp', 'lending'}
+        if required:
+            warnings.append({'code': 'protocol_replay_model_required', 'file': 'strategy.yml',
+                  'message': f'{market}: native OHLCV replay cannot model this protocol; candles alone '
+                  'do not establish pool/reserve state, fees, liquidity, cashflows or execution. '
+                  'Preserve the candidate and original window; select an explicitly supported '
+                  'protocol replay producer with attested inputs. Do not substitute a candle '
+                  'feed, mock rows or another protocol to clear this gap.'})
     for name, content in files.items():
         if not name.endswith(".py") or name.startswith("tests/"):
             continue

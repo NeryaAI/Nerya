@@ -195,7 +195,7 @@ def prepare_series(
         "store_path": str(store.path), "cached_rows": initial,
         "derived_rows": derived_rows, "derived_from_timeframe": derived_from,
         "downloaded_rows": 0, "requests": 0, "errors": [],
-        "offline": offline, "resumable": True,
+        "offline": offline, "resumable": not offline,
     }
 
     def publish(status: str) -> None:
@@ -336,6 +336,22 @@ def history_operation(config: Any, arguments: dict[str, Any], *, progress=None, 
                 timeout_seconds=float(arguments.get("timeout_seconds", 300)),
                 progress=progress, check_cancel=check_cancel)
             results.append(receipt)
+    complete = all(r["complete"] for r in results)
+    if action == "inspect":
+        return {"ok": True, "result_type": "historical_data",
+                "status": "ready" if complete else "incomplete",
+                "coverage_complete": complete,
+                "reason": None if complete else "historical_coverage_missing",
+                "datasets": results, "store_path": str(store.path),
+                "window": {"start": lo, "end": hi, "end_exclusive": True,
+                           "days": (hi - lo) / 86400,
+                           "default_days_used": arguments.get("start") in (None, "") and "days" not in arguments},
+                "resumable": False, "safe_to_retry": False,
+                "provider_status": "not_checked", "download_authorization": "not_checked",
+                "protocol_replay_status": "not_checked",
+                "message": "Local candle inspection completed; see coverage_complete and each dataset's missing_ranges. "
+                    "Coverage applies only to the inspected window and closed candles; default bounds do not establish the user's requested window. "
+                    "This inspection does not establish a configured historical provider, permission to download, or exact protocol replay capability."}
     return {"ok": all(r["complete"] for r in results), "result_type": "historical_data",
             "status": "ready" if all(r["complete"] for r in results) else "incomplete",
             "datasets": results, "store_path": str(store.path),

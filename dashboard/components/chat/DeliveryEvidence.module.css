@@ -1,0 +1,36 @@
+.evidence { --evidence-tone:var(--text-muted); margin:0 0 28px; padding:0 0 18px; border-bottom:1px solid var(--line); color:var(--text-base); font-size:13px; }
+.evidence[data-state=failed],.evidence[data-state=stale] { --evidence-tone:var(--warn, #c48124); }
+.evidence[data-state=passed] { --evidence-tone:var(--ok, #188065); }
+.summary { display:flex; align-items:center; gap:10px; }
+.signal { color:var(--evidence-tone); display:flex; flex:none; }
+.heading { flex:1; min-width:0; }
+.heading h2 { margin:2px 0 0; font-size:15px; line-height:1.4; font-weight:600; }
+.eyebrow { color:var(--text-muted); font-size:11px; margin:0; }
+.binding { color:var(--text-muted); font-size:11px; border:1px solid var(--line); padding:3px 7px; border-radius:5px; }
+.explanation { margin:10px 0; color:var(--text-muted); line-height:1.65; }
+.counts { display:flex; flex-wrap:wrap; align-items:center; gap:6px 18px; color:var(--text-muted); font-size:12px; }
+.counts span { display:inline-flex; align-items:center; gap:5px; }
+.details { margin-top:12px; }
+.details > summary { list-style:none; display:flex; align-items:center; justify-content:space-between; min-height:36px; cursor:pointer; font-size:12px; font-weight:500; }
+.details > summary::-webkit-details-marker { display:none; }
+.details[open] > summary svg { transform:rotate(180deg); }
+.details > summary:focus-visible,.evidence button:focus-visible { outline:2px solid var(--violet); outline-offset:3px; border-radius:3px; }
+.content { display:grid; gap:18px; padding-top:10px; }
+.content h3 { font-size:12px; margin:0 0 6px; font-weight:600; }
+.checks,.files { list-style:none; margin:0; padding:0; }
+.checks li { display:flex; align-items:flex-start; gap:12px; padding:9px 0; border-bottom:1px solid var(--line); }
+.checkState { flex:none; width:66px; font-size:11px; padding-top:2px; color:var(--text-muted); }
+.checks li[data-state=failed] .checkState,.checks li[data-state=stale] .checkState { color:var(--warn, #c48124); }
+.checks li[data-state=passed] .checkState { color:var(--ok, #188065); }
+.checkBody { min-width:0; flex:1; overflow-wrap:anywhere; line-height:1.6; }
+.checkBody p { margin:3px 0 0; color:var(--text-muted); font-size:12px; }
+.checkBody .revision { font-size:11px; }
+.files li { display:flex; gap:7px; align-items:center; min-height:36px; overflow-wrap:anywhere; }
+.files svg { flex:none; color:var(--text-muted); }
+.files button,.files code { min-width:0; text-align:left; overflow-wrap:anywhere; font:inherit; }
+.files button,.revision button,.trace { text-decoration:underline; text-underline-offset:3px; }
+.limitations { border-left:2px solid var(--line-hi); padding-left:12px; }
+.limitations p { margin:5px 0 0; line-height:1.65; color:var(--text-muted); }
+.boundary { color:var(--text-muted); font-size:11px; line-height:1.6; margin:0; }
+.trace { justify-self:start; min-height:36px; font-size:12px; }
+@container result-reader (max-width:500px) { .binding { display:none; } .files li,.files button,.trace,.details > summary { min-height:44px; } .checks li { gap:8px; } }

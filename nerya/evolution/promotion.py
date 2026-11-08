@@ -529,14 +529,16 @@ def _read_staged_file(path: Path) -> tuple[bytes, int]:
         info = os.fstat(fd)
         if not stat.S_ISREG(info.st_mode):
             raise ProtectedScopeViolation(f"staged path is not a regular file: {path}")
-        with os.fdopen(fd, "rb") as handle:
-            return handle.read(), stat.S_IMODE(info.st_mode)
-    except Exception:
+        handle = os.fdopen(fd, "rb")
+    except BaseException:
         try:
             os.close(fd)
         except OSError:
             pass
         raise
+    # fdopen transferred ownership: only the file object may close this fd.
+    with handle as stream:
+        return stream.read(), stat.S_IMODE(info.st_mode)
 
 
 def _digest_staged_entries(

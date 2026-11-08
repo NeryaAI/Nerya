@@ -1,6 +1,7 @@
 import { liveEventsToBlocks, type ChatThread } from "./chat";
 import { record } from "./agentConversation";
 import { portfolioSnapshot, type SnapshotAccount } from "./portfolioSnapshot";
+import { projectMessageBlocks } from "./streamTranscript";
 
 export type PortfolioArtifact = { id: string; turnId: string; ts: number; accounts: SnapshotAccount[] };
 
@@ -10,7 +11,7 @@ export function collectPortfolioArtifacts(thread: ChatThread | null): PortfolioA
   const messages = Array.isArray(thread.messages) ? thread.messages : [];
   return messages.flatMap((message) => {
     if (message.role !== "assistant") return [];
-    const blocks = [...liveEventsToBlocks([...(message.turn?.activity_events || []), ...(message.live_events || [])]), ...(message.turn?.blocks || [])];
+    const blocks = projectMessageBlocks(message);
     const calls = new Map<string, Record<string, unknown>>();
     for (const [i, envelope] of blocks.entries()) {
       const block = record(envelope.block || envelope);

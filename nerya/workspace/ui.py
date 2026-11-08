@@ -22,7 +22,9 @@ import difflib
 import hashlib
 import json
 import math
+import os
 import re
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Mapping
@@ -100,13 +102,29 @@ WIDGET_KIND_CATALOG: tuple[dict[str, Any], ...] = (
         "description": "A read-only time-series or candle chart.",
         "read_only": True,
         "source": "market.candles",
+        "config_example": {"venue": "binance", "market": "BTC/USDT", "interval": "1h", "count": 120},
     },
     {
         "kind": "market_ticker",
         "title": "Market ticker",
-        "description": "A read-only ticker for an allow-listed public venue.",
+        "description": "A read-only public ticker with price and provider-reported 24h change/percentage.",
         "read_only": True,
         "source": "market.ticker",
+        "config_example": {"venue": "binance", "market": "BTC/USDT"},
+        "data_contract": {
+            "mode": "public_quote_read_only",
+            "requires_trading_enabled": False,
+            "display_fields": ["last_or_mid", "bid", "ask", "change", "percentage"],
+            "change_period": "24h",
+            "percentage_unit": "percent_points",
+            "missing_change": "unknown; never derived from chart ranges or replaced with zero",
+            "show_change": "config.show_change defaults to true; false hides both change fields",
+            "limitations": (
+                "Change/percentage require provider fields; layout validation does not verify data. "
+                "The widget does not display high/low/volume or all "
+                "freshness/degradation fields. Quote mode does not set account mode."
+            ),
+        },
     },
     {
         "kind": "portfolio",
@@ -114,6 +132,17 @@ WIDGET_KIND_CATALOG: tuple[dict[str, Any], ...] = (
         "description": "Paper/live account totals and open-position count.",
         "read_only": True,
         "source": "portfolio.summary",
+        "config_example": {"currency": "USD"},
+        "data_contract": {
+            "mode": "server_account_modes",
+            "supports_account_filter": False,
+            "supports_mode_filter": False,
+            "limitations": (
+                "Aggregates server accounts; paper/live belongs to each account. "
+                "No per-account/per-coin breakdown or complete missing/stale display. "
+                "Missing snapshots do not prove zero balances or live funds."
+            ),
+        },
     },
     {
         "kind": "strategy_table",
@@ -781,7 +810,9 @@ def _apply_operations(base: Mapping[str, Any], operations: Any) -> dict[str, Any
             page = operation.get("page") or operation.get("value")
             if not isinstance(page, Mapping):
                 raise WorkspaceUiError(f"patch.operations[{index}].page must be a mapping")
-            candidate["pages"].append(_clone(dict(page)))
+            incoming = _clone(dict(page))
+            incoming.setdefault("widgets", [])
+            candidate["pages"].append(incoming)
         elif op in {"upsert_page", "page.upsert"}:
             page = operation.get("page") or operation.get("value")
             if not isinstance(page, Mapping):
@@ -796,6 +827,9 @@ def _apply_operations(base: Mapping[str, Any], operations: Any) -> dict[str, Any
                     _merge_nested_mappings(existing, incoming, fields=("nav",))
                     break
             else:
+                # Later operations may append widgets before final validation.
+                # Default only new pages so upserts preserve existing widgets.
+                incoming.setdefault("widgets", [])
                 candidate["pages"].append(incoming)
         elif op in {"update_page", "page.update"}:
             page_id = str(operation.get("id") or operation.get("page_id") or "")
@@ -994,6 +1028,58 @@ def _find_ui_proposal(paths: WorkspacePaths, proposal_id: str):
         # Keep scanning: unrelated proposals commonly precede the UI proposal
         # in the evolution journal.
     return None
+
+
+def preview(paths_value: WorkspacePaths | Path | str, proposal_id: Any) -> dict[str, Any]:
+    """Read a bounded candidate without resolving providers or changing state."""
+    paths = paths_value if isinstance(paths_value, WorkspacePaths) else WorkspacePaths(Path(paths_value))
+    pid = str(proposal_id or "")
+    if not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", pid):
+        return {"ok": False, "_status": 400, "error": "invalid_proposal_id"}
+
+    def read_candidate(relative: str):
+        # Walk relative to an open directory: no symlink traversal or stat/open
+        # race can redirect a candidate read outside this workspace.
+        directory = os.open(paths.root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            for part in ("evolution", "proposals", pid, *relative.split("/")[:-1]):
+                child = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=directory)
+                os.close(directory)
+                directory = child
+            descriptor = os.open(relative.split("/")[-1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+            with os.fdopen(descriptor, "rb") as stream:
+                info = os.fstat(stream.fileno())
+                if not stat.S_ISREG(info.st_mode) or info.st_size > UI_MAX_BYTES:
+                    raise ValueError("candidate must be a bounded regular file")
+                raw = stream.read(UI_MAX_BYTES + 1)
+                if len(raw) > UI_MAX_BYTES:
+                    raise ValueError("candidate exceeds byte limit")
+                return yaml_io.loads(raw.decode("utf-8"))
+        finally:
+            os.close(directory)
+
+    try:
+        metadata = read_candidate("proposal.yml")
+        if not isinstance(metadata, dict) or metadata.get("id") != pid or metadata.get("kind") != "core_config_patch" or metadata.get("target") != UI_RELATIVE_PATH:
+            return {"ok": False, "_status": 404, "error": "ui_proposal_not_found"}
+        validated = validate_manifest(read_candidate("after/ui/workspace.yml"))
+        if not validated.ok:
+            return {"ok": False, "_status": 422, "error": "invalid_candidate_manifest", "errors": list(validated.errors)}
+    except FileNotFoundError:
+        return {"ok": False, "_status": 404, "error": "candidate_not_found"}
+    except Exception:
+        return {"ok": False, "_status": 422, "error": "unsafe_or_invalid_candidate"}
+    manifest = validated.manifest
+    revision = manifest.pop("_revision", 0)
+    return {
+        "ok": True, "source": "proposal", "proposal_id": pid,
+        "state": metadata.get("state", "draft"),
+        "applied": metadata.get("state") == "applied",
+        "path": UI_RELATIVE_PATH, "revision": revision,
+        "manifest": manifest, "digest": manifest_digest(manifest),
+        "structural_validation": "passed", "data_validation": "not_checked",
+        "warnings": list(validated.warnings),
+    }
 
 
 def apply(paths_value: WorkspacePaths | Path | str, proposal_id: Any) -> dict[str, Any]:

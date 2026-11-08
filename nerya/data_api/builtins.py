@@ -8,6 +8,12 @@ import re
 from typing import Any
 
 from ..data.equities import EquitiesClient
+from .aave import aave_specs
+from .defillama import defillama_specs
+from .geckoterminal import geckoterminal_specs
+from .sqd import sqd_specs
+from .uniswap_history import uniswap_specs
+from .uniswap_events import uniswap_event_specs
 from .registry import DataApiRegistry
 from .types import DataActionSpec, DataApiContext, DataApiError
 
@@ -545,6 +551,18 @@ def build_data_api_registry() -> DataApiRegistry:
     registry = DataApiRegistry()
     registry.register_provider(AkShareDataProvider())
     registry.register_provider(FinancialDatasetsProvider())
+    for spec in aave_specs():
+        registry.register_action(spec)
+    for spec in defillama_specs():
+        registry.register_action(spec)
+    for spec in geckoterminal_specs():
+        registry.register_action(spec)
+    for spec in sqd_specs():
+        registry.register_action(spec)
+    for spec in uniswap_specs():
+        registry.register_action(spec)
+    for spec in uniswap_event_specs():
+        registry.register_action(spec)
     for spec in _wallet_specs():
         registry.register_action(spec)
     for spec in _onchainos_specs():
@@ -3190,7 +3208,7 @@ _ONCHAINOS_COMMANDS: dict[str, dict[str, Any]] = {
         "params": {"investment_id": "--investment-id", "chain": "--chain"},
         "required": ("investment_id",),
         "schema": _schema({
-            "investment_id": {"type": "string"},
+            "investment_id": {"type": "string", "description": "Use the investmentId returned by defi_search or defi_list for the same chain and product; not a token or pool address."},
             "chain": {"type": "string"},
         }, required=("investment_id",)),
     },
@@ -3205,7 +3223,7 @@ _ONCHAINOS_COMMANDS: dict[str, dict[str, Any]] = {
         },
         "required": ("investment_id",),
         "schema": _schema({
-            "investment_id": {"type": "string"},
+            "investment_id": {"type": "string", "description": "Use the investmentId returned by defi_search or defi_list for the same chain and product; not a token or pool address."},
             "chain": {"type": "string"},
             "time_range": {"type": "string", "description": "DAY, WEEK, MONTH, SEASON, or YEAR."},
         }, required=("investment_id",)),
@@ -3221,7 +3239,7 @@ _ONCHAINOS_COMMANDS: dict[str, dict[str, Any]] = {
         },
         "required": ("investment_id",),
         "schema": _schema({
-            "investment_id": {"type": "string"},
+            "investment_id": {"type": "string", "description": "Use the investmentId returned by defi_search or defi_list for the same chain and product; not a token or pool address."},
             "chain": {"type": "string"},
             "time_range": {"type": "string", "description": "DAY, WEEK, MONTH, SEASON, or YEAR."},
         }, required=("investment_id",)),
@@ -3238,7 +3256,7 @@ _ONCHAINOS_COMMANDS: dict[str, dict[str, Any]] = {
         },
         "required": ("investment_id",),
         "schema": _schema({
-            "investment_id": {"type": "string"},
+            "investment_id": {"type": "string", "description": "Use the investmentId returned by defi_search or defi_list for the same chain and product; not a token or pool address."},
             "chain": {"type": "string"},
             "chart_type": {"type": "string", "description": "DEPTH or PRICE."},
             "time_range": {"type": "string", "description": "DAY or WEEK for PRICE mode."},

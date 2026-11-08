@@ -121,6 +121,9 @@ class ModelMetadata:
     supports_structured_output: bool = False
     supports_streaming: bool = False
     supports_reasoning: bool = False
+    supports_reasoning_disable: bool = False
+    #: Verified request protocol, independent of the provider/model name.
+    reasoning_wire_protocol: str = ""
     supports_prompt_cache: bool = False
     #: Kept as tuples so :class:`ModelMetadata` stays hashable / frozen.
     input_modalities: tuple[str, ...] = ("text",)
@@ -575,6 +578,21 @@ BUILTIN_ALIASES: dict[str, list[tuple[re.Pattern[str], str]]] = {
         (re.compile(r"^step-1o-turbo-vision$", re.I), "step-1o-vision-32k"),
     ],
 }
+
+
+# Exact GLM versions only: do not infer switchability for future models.
+# https://docs.bigmodel.cn/cn/guide/capabilities/thinking-mode.md
+# GLM-5.3 and 5.3 Flash require thinking; 5.2/5.1/5/4.7 support explicit disabled.
+for _glm_model in ("glm-5.3", "glm-5.3-flash", "glm-5.2", "glm-5.1", "glm-5", "glm-4.7"):
+    BUILTIN_MODELS[("zai", _glm_model)] = _m(
+        id=_glm_model, provider="zai", family="glm",
+        supports_reasoning=True,
+        supports_reasoning_disable=_glm_model not in {"glm-5.3", "glm-5.3-flash"},
+        reasoning_wire_protocol="thinking_type",
+    )
+    BUILTIN_ALIASES.setdefault("zai", []).append(
+        (re.compile("^" + re.escape(_glm_model) + "$", re.I), _glm_model)
+    )
 
 
 # --------------------------------------------------------------------- #

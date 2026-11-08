@@ -78,6 +78,7 @@ import type {
 import type {
   WorkspaceUiApplyResponse,
   WorkspaceUiEnvelope,
+  WorkspaceUiPreview,
   WorkspaceUiProposalRequest,
   WorkspaceUiProposalResponse,
 } from "./workspaceUiTypes";
@@ -2716,11 +2717,14 @@ export const clientApi = {
     post<{
       venue: string; market: string; interval: string;
       count: number; candles: Candle[]; error?: string;
+      _envelope?: { source?: string; mode?: string; degraded?: boolean; fallback_used?: boolean };
     }>("/market/candles", body),
   marketTicker: (body: { venue: string; market: string }) =>
     post<{
       venue: string; market: string;
       bid?: number; ask?: number; mid?: number; last?: number; error?: string;
+      /** Provider-reported 24h absolute change and percent points (1 = 1%). */
+      change?: number | null; percentage?: number | null;
     }>("/market/ticker", body),
 
   secretsList: () => post<{ refs: SecretRef[] }>("/security/secrets/list"),
@@ -3243,6 +3247,7 @@ export const clientApi = {
     default_tier?: string;
     intent_tier?: string;
     providers?: LlmProviderProfile[];
+    remove_providers?: string[];
     tiers?: LlmTierConfig[];
   }) =>
     post<{
@@ -3250,6 +3255,7 @@ export const clientApi = {
       default_tier: string;
       intent_tier?: string;
       provider_profiles?: LlmProviderProfile[];
+      removed_providers?: string[];
       tiers: LlmTierConfig[];
       reasoning_levels?: string[];
       error?: string;
@@ -3634,6 +3640,16 @@ export const clientApi = {
   scheduleTick: () =>
     post<{ ok: boolean; fired: Array<Record<string, unknown>> }>("/triggers/schedules/tick"),
 
+  marketWatches: () => get<{ ok: boolean; watches: Array<Record<string, unknown>> }>("/triggers/market/watches"),
+  marketWatchSave: (watch: Record<string, unknown>) => post<{ ok: boolean; watches: Array<Record<string, unknown>> }>("/triggers/market/watches/save", watch),
+  marketWatchRemove: (id: string) => post<{ ok: boolean; watches: Array<Record<string, unknown>> }>("/triggers/market/watches/remove", { id }),
+  marketPoll: () => post<{ ok: boolean; emitted: Array<Record<string, unknown>>; errors: Array<Record<string, unknown>> }>("/triggers/market/poll"),
+  marketState: () => get<{ ok: boolean; states: Array<Record<string, unknown>> }>("/triggers/market/state"),
+  taskTriggerHealth: () => get<{ ok: boolean; sources: Array<Record<string, unknown>> }>("/triggers/task/health"),
+  taskTriggerDeliveries: () => get<{ ok: boolean; deliveries: Array<Record<string, unknown>>; dead_letters: Array<Record<string, unknown>> }>("/triggers/task/deliveries"),
+  taskDeadLetters: (state = "open") => get<{ ok: boolean; dead_letters: Array<Record<string, unknown>> }>("/triggers/task/dead_letters?state=" + encodeURIComponent(state)),
+  taskDeadLetterReplay: (dead_letter_id: string) => post<{ ok: boolean; replay: Record<string, unknown> }>("/triggers/task/dead_letters/replay", { dead_letter_id }),
+
   // Agent / session operator plane
   // ---------------------------------------------------------------
   // Strategy runtime control plane
@@ -3791,6 +3807,8 @@ export const clientApi = {
    * returns only the safe manifest/catalog vocabulary the renderer knows.
    */
   workspaceUi: () => get<WorkspaceUiEnvelope>("/workspace/ui"),
+  workspaceUiPreview: (proposalId: string) =>
+    get<WorkspaceUiPreview>(`/workspace/ui/preview?proposal_id=${encodeURIComponent(proposalId)}`),
   workspaceUiPropose: (body: WorkspaceUiProposalRequest) =>
     post<WorkspaceUiProposalResponse>("/workspace/ui/propose", body),
   workspaceUiApply: (body: { proposal_id: string; actor_id?: string }) =>

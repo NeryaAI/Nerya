@@ -1,0 +1,6 @@
+{
+  "strategy_replay": {
+    "required_checks": ["source_binding", "historical_run", "replay_source", "report_output"],
+    "required_artifacts": ["report", "run_receipt"]
+  }
+}

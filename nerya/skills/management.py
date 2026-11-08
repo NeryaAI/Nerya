@@ -18,7 +18,7 @@ from ..subagents.registry import describe_role
 from .lockfile import remove_lock_entry
 from .manifest import _slugify
 from .registry import SkillRegistry, _enabled_ok, enabled_skill_names, catalog_generation
-from .discovery import catalog_group, catalog_parent, catalog_roots
+from .discovery import catalog_group, catalog_parent, catalog_roots, rank_skill_metadata
 
 Scope = Literal["all", "builtin", "workspace", "agent"]
 Action = Literal["create", "update", "delete", "enable", "disable"]
@@ -112,6 +112,9 @@ def catalog(config, scope: Scope = "all", agent_id: str = "", query: str = "",
         raise ValueError("Invalid Skill scope or pagination")
     if view not in {"core", "professional", "all"}:
         raise ValueError("Invalid Skill view")
+    if not isinstance(query, str) or len(query) > 512:
+        raise ValueError("Skill search query must be at most 512 characters")
+    query = query.strip()
     definitions = _definitions(config)
     effective = _effective(definitions)
     available = _enabled(config, effective)
@@ -144,9 +147,14 @@ def catalog(config, scope: Scope = "all", agent_id: str = "", query: str = "",
         row["catalog_parent"] = root if root != row["id"] else ""
         row["catalog_group"] = scoped[root].get("catalog_group", "core")
         row["method_count"] = sum(sid != root and owner == root for sid, owner in roots.items()) if row["id"] == root else 0
+    scores = {item["skill_id"]: item for item in rank_skill_metadata(query, ((row["id"], row["description"]) for row in rows))} if query else {}
+    order = {}
     if hierarchical and not parent:
-        matching = {row["catalog_parent"] or row["id"] for row in rows
-                    if not query or query.lower() in (row["id"] + " " + row["description"]).lower()}
+        matching = {row["catalog_parent"] or row["id"] for row in rows if not query or row["id"] in scores}
+        for row in rows:
+            if row["id"] in scores:
+                owner = row["catalog_parent"] or row["id"]
+                order[owner] = max(order.get(owner, 0), scores[row["id"]]["score"])
         rows = [row for row in rows if not row["catalog_parent"] and row["id"] in matching
                 and (view == "all" or row["catalog_group"] == view)]
         query = ""
@@ -155,8 +163,9 @@ def catalog(config, scope: Scope = "all", agent_id: str = "", query: str = "",
     elif not query and view != "all":
         rows = [row for row in rows if not row["catalog_parent"] and row["catalog_group"] == view]
     if query:
-        rows = [row for row in rows if query.lower() in (row["id"] + " " + row["description"]).lower()]
-    rows.sort(key=lambda row: row["id"])
+        rows = [row for row in rows if row["id"] in scores]
+        order = {key: value["score"] for key, value in scores.items()}
+    rows.sort(key=lambda row: (-order.get(row["id"], 0), row["id"]))
     return {"ok": True, "skills": rows[offset:offset + limit], "total": len(rows),
             "next_offset": offset + limit if offset + limit < len(rows) else None,
             "scope": scope, "agent_id": agent_id,

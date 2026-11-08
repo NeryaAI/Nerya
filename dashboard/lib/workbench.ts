@@ -2,12 +2,15 @@ import { copy as i18nCopy } from "./i18n";
 import type { ChatThread, TurnPayload } from "./chat";
 import type { ConversationCommand } from "./conversationCommands";
 import { recordOf } from "./externalCalls";
+import { conversationError } from "./conversationError";
+import { interactionTitle } from "./toolOutputPresentation";
 
 /** Legacy session lists keep titles in meta; normalize at the API boundary. */
 export function taskEntryTitle(entry: {title?: unknown; meta?: unknown}): string {
   const title = typeof entry.title === "string" ? entry.title.trim() : "";
   const legacy = recordOf(entry.meta).title;
-  return title || (typeof legacy === "string" ? legacy.trim() : "");
+  const raw = title || (typeof legacy === "string" ? legacy.trim() : "");
+  return interactionTitle(raw) || raw;
 }
 
 export type TaskStatus = {
@@ -44,7 +47,30 @@ export type ExecutionState = { surfaces?: Record<string, unknown>; checkpoint_co
 
 /** Compatibility projection for old saved history. Prose is never completion evidence. */
 export function taskStatus(thread: ChatThread | null, commands: ConversationCommand[] = [], view?: SessionView | null): TaskStatus {
-  if (view && view.session_id === thread?.id) return view.status;
+  if (thread && view && view.session_id === thread.id) {
+    const status = view.status;
+    // Older session views classify every blocked run as missing configuration.
+    // Correct only known model output limits with evidence from this command/turn.
+    if (status.execution !== "blocked" || status.waiting_for !== "configuration" || !status.turn_id) return status;
+    let command = commands.filter(c => c.session_id === thread.id && c.kind !== "guide" && !["removed", "queued"].includes(c.state))
+      .sort((a, b) => a.created_at - b.created_at).at(-1);
+    const last = thread.messages.findLast(m => m.role === "assistant");
+    const lastCommandId = last?.command_id || last?.turn?.command_id;
+    if (command && lastCommandId && (lastCommandId === command.command_id
+      ? (last?.command_revision || 0) > command.revision
+      : (last?.command_created_at || 0) > command.created_at)) command = undefined;
+    if (command && (command.turn_id !== status.turn_id || command.state !== "blocked")) return status;
+    const matchingMessage = last?.turn?.turn_id === status.turn_id
+      && (!command || lastCommandId === command.command_id) ? last : undefined;
+    const turn = command?.result || matchingMessage?.turn;
+    const rawError = turn?.error || matchingMessage?.error;
+    const code = command?.error?.code || (rawError ? conversationError(rawError, false).code : turn?.stopped_reason);
+    // The runtime can report truncation without any error object or wrapper code.
+    const outputTruncated = !command?.error?.code && !rawError
+      && turn?.stopped_reason === "max_tokens" && turn.transition_reason === "model_output_truncated";
+    return code === "model_length_limit" || code === "model_max_tokens" || outputTruncated
+      ? { ...status, waiting_for: null } : status;
+  }
   const external = thread?.source === "mcp" || thread?.source === "tunnel";
   const messages = thread?.messages || [];
   const last = messages.findLast(m => m.role === "assistant");

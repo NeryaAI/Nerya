@@ -82,6 +82,18 @@ export type WorkspaceUiOperation = {
   [key: string]: unknown;
 };
 
+export type WorkspaceUiPreview = {
+  ok: boolean;
+  proposal_id: string;
+  state: string;
+  applied: boolean;
+  manifest: WorkspaceUiManifest;
+  digest: string;
+  structural_validation: "passed";
+  data_validation: "not_checked";
+  warnings?: string[];
+};
+
 export type WorkspaceUiProposalRequest = {
   /** Full post-change manifest for advanced callers. */
   manifest?: WorkspaceUiManifest;

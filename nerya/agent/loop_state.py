@@ -30,8 +30,20 @@ from .transcript_blocks import BlockEnvelope
 from .loop_contracts import LoopConfig, LoopOutcome
 from .runtime import ContinuationUnavailable
 from ..tools.approval_contracts import APPROVAL_PENDING_REASON
+from ..tools.approval_runtime import first_approval_pause
+from ..tools.result_contracts import result_has_unconfirmed_effect
 
 _LOG = logging.getLogger(__name__)
+
+
+def batch_recovery_blocked(results: list[ToolResult]) -> bool:
+    """Closed failures are recoverable; unresolved effects and decisions are not."""
+    return any(
+        result_has_unconfirmed_effect(result)
+        or result.result_protocol == "user_interaction_pending"
+        or bool(result.metadata.get("approval_request"))
+        for result in results
+    ) or first_approval_pause(results) is not None
 
 
 def provider_tool_name(tool: Any) -> str:

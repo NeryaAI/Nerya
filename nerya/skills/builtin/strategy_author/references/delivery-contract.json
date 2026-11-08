@@ -1,0 +1,6 @@
+{
+  "strategy_authoring": {
+    "required_checks": ["source_binding"],
+    "required_artifacts": ["candidate"]
+  }
+}

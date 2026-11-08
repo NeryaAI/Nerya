@@ -10,40 +10,35 @@ import { useLocale, useTranslations } from "next-intl";
 import * as Menu from "@radix-ui/react-dropdown-menu";
 import type { ChatThread } from "../../lib/chat";
 import type { ChatResult } from "../../lib/chatResults";
+import type { Connection, TaskStatus } from "../../lib/workbench";
 import { toast } from "../../lib/dialogs";
 import { AgentsIcon, ChevronDownIcon, ComposeIcon, CopyIcon, FileIcon, PanelLeftIcon, GlobeIcon } from "../icons";
 import { ShellNavigationTrigger } from "../shell/ShellNavigationTrigger";
 import { ShellNotifications } from "../shell/ShellNotifications";
-import { isWorking, type AgentWork } from "./useAgentWork";
-import { taskStatus, statusLabel, type TaskStatus, type Connection } from "../../lib/workbench";
+import type { AgentWork } from "./useAgentWork";
 import styles from "./ChatTaskHeader.module.css";
-import { shortTaskStatus } from "./taskStatusCopy";
 
-export function ChatTaskHeader({ thread, agents, results, sending, approvalCount, loading = false,
-  showTabs, tab, canvasVisible, onSelect, onToggleCanvas, onOpenResult, browserVisible = false, onToggleBrowser, workspaceAvailable = false, workStatus, connection,diagnostics, onToggleReports }: {
+export function ChatTaskHeader({ thread, agents, results, loading = false,
+  showTabs, tab, canvasVisible, onSelect, onToggleCanvas, onOpenResult, onToggleBrowser, workspaceAvailable = false, diagnostics, onToggleReports, workStatus, connection, sending = false, approvalCount = 0 }: {
   diagnostics?:ReactNode;
-  workStatus?: TaskStatus; connection?: Connection;
   thread: ChatThread | null; agents: AgentWork[]; results: ChatResult[];
-  sending: boolean; approvalCount: number; loading?: boolean; showTabs: boolean;
+  loading?: boolean; showTabs: boolean;
   tab: string; canvasVisible: boolean; onSelect: (tab: string) => void;
   onToggleCanvas: () => void; onOpenResult: (id: string) => void;
-  browserVisible?: boolean; onToggleBrowser?: () => void; workspaceAvailable?: boolean;
+  onToggleBrowser?: () => void; workspaceAvailable?: boolean;
   onToggleReports?: () => void;
+  workStatus?: TaskStatus; connection?: Connection;
+  sending?: boolean; approvalCount?: number;
 }) {
   const zh = useLocale().startsWith("zh");
   const tAssistants = useTranslations("assistants");
   const navigating = useRef(false);
   const [showDiagnostics,setShowDiagnostics]=useState(false);
-  const state = workStatus || taskStatus(thread);
-  const effective = approvalCount ? {...state,waiting_for:"approval" as const} : state;
-  const status = loading ? (i18nCopy(zh, "copy.components_chat_ChatTaskHeader.023")) : effective.waiting_for === "configuration" ? shortTaskStatus(effective,zh) : statusLabel(effective,zh);
-  const tone = effective.needs_attention || approvalCount ? "bg-warn" : effective.execution === "running" ? "bg-brand-400 motion-safe:animate-pulse" : "bg-ink-400";
   const title = thread?.title || (loading ? (i18nCopy(zh, "copy.components_chat_ChatTaskHeader.007")) : (i18nCopy(zh, "copy.components_chat_ChatTaskHeader.008")));
   const latest = results.findLast((result) => !result.agentId) || [...results].sort((a, b) => b.ts - a.ts)[0];
   const canNavigate = showTabs && Boolean(thread?.id) && !loading;
   const toggleLabel = canvasVisible ? (i18nCopy(zh, "copy.components_chat_ChatTaskHeader.009")) : (i18nCopy(zh, "copy.components_chat_ChatTaskHeader.010"));
 
-  const compactStatus=loading?status:shortTaskStatus(effective,zh);
 
   async function copyLink() {
     if (!thread?.id) return;
@@ -72,9 +67,7 @@ export function ChatTaskHeader({ thread, agents, results, sending, approvalCount
                 onCloseAutoFocus={(event) => { if (navigating.current) { event.preventDefault(); navigating.current = false; } }}>
                 <Menu.Label className="px-3 py-2">
                   <span className={`block text-sm font-medium ${styles.menuTitle}`}>{title}</span>
-                  <span className="mt-2 flex items-center gap-2 text-xs text-[color:var(--text-muted)]"><span aria-hidden className={`h-1.5 w-1.5 rounded-full ${tone}`} />{status}</span>
                 </Menu.Label>
-                {state.external&&<Menu.Label className="px-3 py-2 text-xs leading-5 text-[color:var(--text-muted)]">{thread?.source?.toUpperCase()} · {i18nCopy(zh, "copy.components_chat_ChatTaskHeader.024")}</Menu.Label>}
                 <Menu.Separator className="my-1 h-px bg-[color:var(--line)]" />
                 <Menu.Item className="ui-select-option" disabled={!thread?.messages.length} onSelect={() => { navigating.current=true;window.dispatchEvent(new Event(OPEN_CONVERSATION_FIND)); }}><SearchIcon size={15}/><span className="flex-1">{i18nCopy(zh, "copy.components_chat_ChatTaskHeader.025")}</span><span className="text-xs text-[color:var(--text-muted)]">⌘F</span></Menu.Item>
                 <Menu.Item className="ui-select-option" disabled={!canNavigate || !agents.length} onSelect={() => { navigating.current = true; onSelect("agents"); }}>
@@ -94,7 +87,6 @@ export function ChatTaskHeader({ thread, agents, results, sending, approvalCount
             </Menu.Portal>
           </Menu.Root>
         </h1>
-        {showTabs ? <span className={styles.status} role="status" aria-live="polite" data-testid="task-header-status" data-idle={!loading&&effective.execution==="idle"&&!effective.waiting_for&&connection!=="offline"} title={status}><span aria-hidden className={`h-1.5 w-1.5 shrink-0 rounded-full ${tone}`} /><span className={styles.statusLabel}>{compactStatus}{connection === "offline" ? (i18nCopy(zh, "copy.components_chat_ChatTaskHeader.027")) : ""}</span></span> : null}
       </div>
       <div className={styles.actions}>
         {thread?.messages.length ? <button type="button" className={styles.action} aria-label={i18nCopy(zh, "copy.components_chat_ChatTaskHeader.028")} title={i18nCopy(zh, "copy.components_chat_ChatTaskHeader.029")} onClick={()=>window.dispatchEvent(new Event(OPEN_CONVERSATION_FIND))}><SearchIcon size={15}/></button> : null}

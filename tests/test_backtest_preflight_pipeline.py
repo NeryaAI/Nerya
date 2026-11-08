@@ -82,12 +82,12 @@ def test_known_errors_before_network_or_execution(tmp_path, monkeypatch, code, e
     ("pd.merge_asof(left, right, on='ts', direction='forward')", "lookahead_forward_asof"),
     ("series.interpolate(limit_direction='both')", "lookahead_backward_interpolation"),
 ])
-def test_static_preflight_blocks_explicit_future_data_patterns(tmp_path, expression, expected):
+def test_static_preflight_warns_on_explicit_future_data_patterns(tmp_path, expression, expected):
     package(tmp_path, f"def run(ctx):\n    {expression}\n    return ctx.result.hold(reason='unreachable')\n")
-    with pytest.raises(BacktestPreflightError) as failure:
-        replay(tmp_path, preflight_only=True)
-    assert expected in {row["code"] for row in failure.value.receipt["blockers"]}
-    assert "temporal_bias_static_scan" in failure.value.receipt["checks"]
+    receipt = replay(tmp_path, preflight_only=True)["preflight"]
+    assert receipt["ok"] and not receipt["blockers"]
+    assert expected in {row["code"] for row in receipt["warnings"]}
+    assert "temporal_bias_static_scan" in receipt["checks"]
 
 
 def test_static_preflight_warns_when_shift_direction_is_dynamic(tmp_path):
@@ -142,15 +142,72 @@ def test_local_replay_receipts_source_and_data_snapshot(tmp_path, monkeypatch):
     assert not (folder / "failure.json").exists()
 
 
-def test_incomplete_local_history_blocks_before_worker(tmp_path):
-    root = package(tmp_path)
+def test_incomplete_local_history_runs_with_strict_policy_and_truthful_coverage(tmp_path):
+    package(tmp_path, "def run(ctx):\n    if False:\n        series.shift(-1)\n    return ctx.result.hold(reason='test')\n",
+            coverage_policy="strict", timeframes=["1h", "15m"])
     seed(tmp_path, 4)
-    with pytest.raises(BacktestPreflightError) as error:
-        replay(tmp_path)
-    assert error.value.reason == "backtest_data_incomplete"
-    assert error.value.receipt["datasets"][0]["missing_bars"] == 2
-    assert not list(root.glob("backtests/**/worker.log"))
+    result = replay(tmp_path)
+    assert result["ok"] and result["coverage_ok"] is False
+    assert result["data_manifest"]["requested_window_complete"] is False
+    assert result["data_manifest"]["datasets"][0]["missing_bars"] == 2
+    assert "incomplete_history" in {row["code"] for row in result["data_manifest"]["warnings"]}
+    assert "missing_timeframe" in {row["code"] for row in result["data_manifest"]["warnings"]}
+    assert result["bias_checks"]["static_temporal_scan"] == "warnings"
+    assert result["bias_checks"]["static_warnings"][0]["code"] == "lookahead_negative_shift"
+    assert json.loads((Path(result["run_path"]) / "run.json").read_text())["status"] == "completed"
     assert len(HistoryStore(tmp_path / "artifacts/backtest_cache").read("BYBIT:BTCUSDT", "1h", T, T + 6 * 3600)) == 4
+
+
+def test_partial_multiframe_and_protocol_guidance_do_not_force_cadence(tmp_path, monkeypatch):
+    from dataclasses import replace
+    from nerya.strategies.package import load_package_from_dir
+    from nerya.skills.builtin.backtest.scripts import backtest_run, freeform_run
+    from nerya.skills.builtin.backtest.scripts.preflight import inspect_package
+
+    cfg = BacktestConfig.from_raw({"markets": ["BYBIT:BTCUSDT"], "warmup_bars": 0,
+                                   "timeframes": ["1h", "4h"]})
+    assert cfg.coverage_policy == BacktestConfig().coverage_policy == "allow_partial"
+    cfg._window_start, cfg._window_end = T, T + 6 * 3600
+    series = {"BYBIT:BTCUSDT": {"1h": rows(4)}}
+    manifest = backtest_run._validate_replay_data(cfg, series, allow_mock=False)
+    assert manifest["ok"] and manifest["requested_window_complete"] is False
+    assert {"missing_timeframe", "incomplete_history"} <= {r["code"] for r in manifest["warnings"]}
+    assert series["BYBIT:BTCUSDT"]["1h"] == rows(4) and "4h" not in series["BYBIT:BTCUSDT"]
+    missing = backtest_run._validate_replay_data(cfg, {}, allow_mock=False)
+    assert not missing["ok"] and missing["blockers"][0]["code"] == "missing_timeframe"
+    malformed = {"BYBIT:BTCUSDT": {"1h": [{**row, "high": 0} for row in rows(4)]}}
+    assert "invalid_ohlcv" in {r["code"] for r in backtest_run._validate_replay_data(
+        cfg, malformed, allow_mock=False)["blockers"]}
+
+    root = package(tmp_path, "def run(ctx):\n    series.shift(-1)\n")
+    target = load_package_from_dir(root)
+    target = replace(target, manifest=replace(target.manifest,
+        extras={"params": {"indicator": {"fast_period": 2, "slow_period": 5}, "lookback": 2}},
+        schedule=replace(target.manifest.schedule, type="cron", cron="0 * * * *")))
+    monkeypatch.setattr("nerya.strategies.request_scope._protocol", lambda venue: {"market_types": ["lp", "lending"]})
+    receipt, _ = inspect_package(target, cfg)
+    assert receipt["ok"] and not receipt["blockers"]
+    assert {"lookahead_negative_shift", "protocol_replay_model_required", "insufficient_closed_history_lookback"} <= {
+        r["code"] for r in receipt["warnings"]}
+
+    monkeypatch.setattr(freeform_run, "_load_target_package", lambda *args: target)
+    monkeypatch.setattr(freeform_run, "_find_script", lambda path: root / "main.py")
+    monkeypatch.setattr(freeform_run, "uses_host_lp_replay", lambda *args: True)
+    def stop_generic(*args, **kwargs):
+        raise RuntimeError("generic preparation selected")
+    def stop_cadence(*args, **kwargs):
+        raise RuntimeError("explicit cadence selected")
+    monkeypatch.setattr("nerya.skills.builtin.backtest.scripts.replay_inputs.prepare_inputs", stop_generic)
+    monkeypatch.setattr("nerya.skills.builtin.backtest.scripts.lp_state_requirements.prepare_lp_cadence", stop_cadence)
+    with pytest.raises(RuntimeError, match="generic preparation selected"):
+        freeform_run.run_freeform_backtest(strategy_id="pipeline_test", workspace=tmp_path)
+    target.manifest.extras["params"]["lp_replay"] = {"mode": "cadence"}
+    with pytest.raises(RuntimeError, match="explicit cadence selected"):
+        freeform_run.run_freeform_backtest(strategy_id="pipeline_test", workspace=tmp_path)
+    metrics = freeform_run._build_metrics(payload={"performance_evidence": True, "coverage_ok": True},
+        equity_rows=[{"ts": T, "equity": 100}, {"ts": T + 3600, "equity": 101}],
+        trade_rows=[], strategy_id="pipeline_test", proposal_id=None, script_path=root / "main.py")
+    assert metrics["performance_evidence"] is False and metrics["coverage_ok"] is None
 
 
 def test_dynamic_failure_isolated_and_recorded(tmp_path):

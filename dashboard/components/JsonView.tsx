@@ -20,6 +20,17 @@ import { ChevronDownIcon, ChevronRightIcon } from "./icons";
 
 type JsonRecord = Record<string, unknown>;
 
+/** Keep producer evidence out of the DOM until the reader opens it. */
+export function JsonDetails({ summary, value, className }: {
+  summary: ReactNode; value: unknown; className?: string;
+}) {
+  const [open, setOpen] = useState(false);
+  return <details className={className} onToggle={event => setOpen(event.currentTarget.open)}>
+    <summary className="cursor-pointer py-2 text-xs">{summary}</summary>
+    {open && <pre className="max-h-96 overflow-auto text-xs">{JSON.stringify(value, null, 2)}</pre>}
+  </details>;
+}
+
 interface Props {
   value: unknown;
   /** Additional class on the wrapper. */

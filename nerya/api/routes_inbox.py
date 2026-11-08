@@ -34,9 +34,10 @@ The legacy ``/approvals/*``, ``/evolution/*``, ``/agent/open_turns``,
 from __future__ import annotations
 
 from typing import Any, Iterable, Optional
+from urllib.parse import quote
 
 from ..core import jsonl
-from ._envelope import action, debug_ref, error, ok, source_ref, warn
+from ._envelope import action, blocked, debug_ref, error, ok, source_ref, warn
 
 
 # ---------------------------------------------------------------------------
@@ -176,11 +177,21 @@ def _proposal_item(prop: dict[str, Any]) -> dict[str, Any]:
         "status": state,
         "title": str(prop.get("title") or prop.get("summary") or pid),
         "summary": str(prop.get("summary") or ""),
-        "requires_action": state in ("draft", "pending_review", "proposed"),
+        "requires_action": state in ("draft", "pending_review", "proposed", "approved"),
         "created_at": prop.get("ts") or prop.get("created_at") or "",
         "source_refs": [source_ref("proposal", str(pid))],
         "actions": [
-            action(
+            *([action(
+                id=decision,
+                label=decision.title(),
+                method="POST",
+                href=f"/evolution/proposals/{quote(str(pid), safe='')}/{decision}",
+                body={"proposal_id": str(pid)},
+                severity="warn" if decision == "approve" else "danger",
+                requires_scope="approve",
+            ) for decision in ("approve", "reject")]
+              if state in {"draft", "pending_review", "proposed"} else []),
+            *([action(
                 id="apply",
                 label="Apply",
                 method="POST",
@@ -188,8 +199,8 @@ def _proposal_item(prop: dict[str, Any]) -> dict[str, Any]:
                 body={"proposal_id": str(pid)},
                 severity="warn",
                 requires_scope="approve",
-            ),
-            action(
+            )] if state == "approved" else []),
+            *([action(
                 id="rollback",
                 label="Rollback",
                 method="POST",
@@ -197,12 +208,17 @@ def _proposal_item(prop: dict[str, Any]) -> dict[str, Any]:
                 body={"proposal_id": str(pid)},
                 severity="danger",
                 requires_scope="approve",
-            ),
+            )] if state == "applied" else []),
             action(
                 id="open",
                 label="Open detail",
                 href=f"/inbox?type=proposal&id={pid}",
             ),
+            *([action(
+                id="preview",
+                label="Preview",
+                href=f"/workspace/pages/preview?proposal_id={quote(str(pid), safe='')}",
+            )] if prop.get("kind") == "core_config_patch" and prop.get("target") == "ui/workspace.yml" else []),
         ],
         "data": prop,
     }
@@ -360,6 +376,7 @@ def _collect_items(
                 'data':{'run_id':fund['run_id'],'action_id':fund['action_id'],'financial_state':fund['state']}})
     if "notification" in type_set and getattr(client,"config",None) is not None:
         from ..db.sqlite import connect
+        from ..agent.command_store import CommandError
         from ..agent.workbench import record, session_view
         con=connect(client.config.paths.db)
         try:
@@ -367,12 +384,19 @@ def _collect_items(
         finally:
             con.close()
         for row in questions:
+            try:
+                workbench_status = session_view(client.config, row["session_id"])["status"]
+            except CommandError as exc:
+                # Historical interactions survive session deletion for audit.
+                if exc.code == "session_deleted":
+                    continue
+                raise
             payload=record(row["payload_json"])
             items.append({"id":"interaction:"+row["interaction_id"],"raw_id":row["interaction_id"],"type":"notification","severity":"warn","status":"pending",
                 "title":payload.get("title", "User input"),"summary":payload.get("message", ""),"requires_action":True,"created_at":row["created_at"],
                 "source_refs":[source_ref("session",row["session_id"],href="/chat/"+row["session_id"])],
                 "actions":[action(id="open",label="Answer in task",href="/chat/"+row["session_id"])],
-                "data":{"session_id":row["session_id"],"interaction_id":row["interaction_id"],"workbench_status":session_view(client.config,row["session_id"])["status"]}})
+                "data":{"session_id":row["session_id"],"interaction_id":row["interaction_id"],"workbench_status":workbench_status}})
     if "notification" in type_set:
         for m in _read_messages(client):
             sev = (m.get("severity") or m.get("priority") or "info").lower()
@@ -523,13 +547,25 @@ def _resolve_one(client, pid: str, decision: str, actor_id: str) -> dict[str, An
             from ..evolution.promotion import apply_proposal
             from ..evolution.rollback import rollback_proposal
 
-            if decision == "rollback":
+            if decision in {"approve", "reject"}:
+                from .routes_evolution import routes as evolution_routes
+
+                handler = next(handler for method, path, handler in evolution_routes()
+                               if method == "POST" and path == f"/evolution/proposals/{{proposal_id}}/{decision}")
+                result = handler(client, {"proposal_id": raw})
+            elif decision == "rollback":
                 result = rollback_proposal(client.config.paths, raw)
-            else:
+            elif decision == "apply":
                 result = apply_proposal(client.config.paths, raw)
+            else:
+                return error(f"unsupported proposal decision {decision!r}", data={"id": pid})
+            data = {"id": pid, "outcome": result}
+            if result.get("ok") is False or result.get("error") or int(result.get("_status") or 200) >= 400:
+                reason = result.get("reason") or result.get("error") or "proposal_action_failed"
+                return blocked(f"proposal {decision} blocked: {reason}", data=data)
             return ok(
-                f"proposal {decision or 'applied'}",
-                data={"id": pid, "outcome": result},
+                f"proposal {decision}",
+                data=data,
             )
 
         if kind == "failed_task":

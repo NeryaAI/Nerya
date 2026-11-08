@@ -78,6 +78,35 @@ def test_non_retryable_failure_is_not_dispatched_again_without_changed_state():
     assert result.error.kind == ToolErrorKind.DEDUPED
 
 
+def test_question_deferred_reads_execute_after_checkpoint_resume_without_argument_changes():
+    executed = []
+    def dispatch(calls):
+        executed.extend(calls)
+        return BatchResult(results=[_result(call) for call in calls])
+    registry = ToolRegistry()
+    for name in ('request_user_input', 'Skill'):
+        registry.register(ToolDescriptor(name=name, description=name, handler=_result,
+            input_schema={'type': 'object'}, risk=RiskLevel.READ,
+            permission_scope=PermissionScope.NONE, read_only=True))
+    phase = ToolBatchPhase(orchestrator=SimpleNamespace(run_batch=dispatch), registry=registry)
+    policy = ToolBatchPolicy(frozenset({'request_user_input', 'Skill'}), frozenset())
+    reads = [ToolCall(name='Skill', id=f'read-{index}', arguments={
+        'action': 'read', 'skill': skill, 'file': file}) for index, (skill, file) in enumerate([
+            ('strategy_author', 'references/delivery-contract.json'),
+            ('backtest', 'references/replay-capabilities.md')])]
+    state = _state()
+    first = phase.run([ToolCall(name='request_user_input', id='question'), *reads], state=state, policy=policy)
+    assert [call.id for call in executed] == ['question']
+    assert all(result.error.kind == ToolErrorKind.ABORTED for result in first.batch.results[1:])
+    resumed = LoopRunState.from_checkpoint(state.to_checkpoint(resumable=True, resume_block_reason=''))
+    assert [r.tool_use_id for r in resumed.completed_tool_results] == ['question', 'read-0', 'read-1']
+    repeated = [ToolCall(name=call.name, id='resumed-' + call.id, arguments=call.arguments) for call in reads]
+    second = phase.run(repeated, state=resumed, policy=policy)
+    assert all(not result.is_error for result in second.batch.results)
+    assert [call.id for call in executed] == ['question', 'resumed-read-0', 'resumed-read-1']
+    assert all(call.arguments == original.arguments for call, original in zip(executed[1:], reads))
+
+
 def test_successful_setup_write_allows_a_fresh_read_after_non_retryable_error():
     executed = []
     def dispatch(calls):

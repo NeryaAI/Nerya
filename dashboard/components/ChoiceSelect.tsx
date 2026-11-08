@@ -60,7 +60,7 @@ export function ChoiceSelect({ value, onValueChange, children, searchable, creat
   const filtered = useMemo(() => {
     const candidate = query.trim();
     const needle = candidate.toLocaleLowerCase();
-    const matches = choices.filter((choice) => !needle || `${choice.text} ${choice.group ?? ""}`.toLocaleLowerCase().includes(needle));
+    const matches = choices.filter((choice) => !needle || `${choice.value} ${choice.text} ${choice.group ?? ""}`.toLocaleLowerCase().includes(needle));
     if (!candidate || !createOption || choices.some((choice) => choice.value.toLocaleLowerCase() === needle || choice.text.toLocaleLowerCase() === needle)) return matches;
     return [{ value: candidate, label: createOption(candidate), text: candidate, disabled: false }, ...matches];
   }, [choices, createOption, query]);

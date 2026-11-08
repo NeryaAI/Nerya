@@ -73,6 +73,14 @@ def _schema_error(call: ToolCall, message: str) -> ToolResult:
     )
 
 
+def _child_dispatcher(call: ToolCall, **dependencies: Any) -> SubAgentDispatcher:
+    selection = _call_meta(call, "parent_model_selection")
+    return SubAgentDispatcher(
+        **dependencies,
+        parent_model_selection=dict(selection) if isinstance(selection, dict) else {},
+    )
+
+
 def _nested_permission_pending(envelope: dict[str, Any]) -> dict[str, Any] | None:
     """Render the shared child-native pause in the established recovery shape."""
 
@@ -991,7 +999,8 @@ def subagent_run_handler(
         model=args.get("model"),
         execution_policy=args.get("execution_policy"),
     )
-    dispatcher = SubAgentDispatcher(
+    dispatcher = _child_dispatcher(
+        call,
         config=config, skills=skills, tool_registry=tool_registry, executor=executor,
     )
     try:
@@ -1310,7 +1319,8 @@ def research_run_handler(
     )
     parent_remaining_wall_seconds = _parent_remaining_wall_seconds(call)
 
-    dispatcher = SubAgentDispatcher(
+    dispatcher = _child_dispatcher(
+        call,
         config=config, skills=skills, tool_registry=tool_registry, executor=executor,
     )
 
@@ -1731,7 +1741,8 @@ def team_run_handler(
             analysis_language=analysis_language,
         )
 
-    dispatcher = SubAgentDispatcher(
+    dispatcher = _child_dispatcher(
+        call,
         config=config, skills=skills, tool_registry=tool_registry, executor=executor,
     )
 

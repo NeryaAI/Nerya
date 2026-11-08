@@ -7,6 +7,8 @@
     "needsPermission": "此工具调用需要操作员授权。",
     "approved": "授权通过",
     "rejected": "授权拒绝",
+    "expired": "授权请求已过期",
+    "cancelled": "授权请求已取消",
     "request": "授权请求",
     "batchApproval": "{count} 个工具调用需要授权，请在下方逐一批准或拒绝。",
     "tradeApprovalTitle": "确认交易订单",

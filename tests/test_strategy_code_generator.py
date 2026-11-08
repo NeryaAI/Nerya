@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -16,6 +17,7 @@ from nerya.strategies import performance as performance_mod
 from nerya.strategies.package import load_package
 from nerya.strategies.performance import build_snapshot
 from nerya.strategies.agent_task import StrategyAgentTask
+from nerya.strategies import ResultBuilder, StrategyResult
 from nerya.tools.native.strategy_runtime import (
     STRATEGY_GENERATE_PROPOSAL_SCHEMA,
     _request_from_args,
@@ -179,10 +181,10 @@ def run(ctx: StrategyContext) -> StrategyResult:
 
     manifest = yaml_io.loads(out.files["strategy.yml"])
     assert out.validation is not None
-    assert out.validation.ok
+    assert out.validation.ok, out.validation.asdict()
     assert manifest["schedule"] == {
         "cron": "*/30 * * * *",
-        "enabled": True,
+        "enabled": False,
         "type": "cron",
     }
     assert manifest["tuning"]["schedule"] == {
@@ -659,12 +661,84 @@ execution:
 
     manifest = yaml_io.loads(out.files["strategy.yml"])
     assert out.validation is not None
-    assert out.validation.ok
+    assert out.validation.ok, out.validation.asdict()
     assert manifest["schedule"] == {
         "cron": "*/30 * * * *",
-        "enabled": True,
+        "enabled": False,
         "type": "cron",
     }
+
+
+@pytest.mark.parametrize("mode,enabled", [("agent", True), ("agent_team", True), ("script", False)])
+@pytest.mark.parametrize("method", ["hold", "skip"])
+def test_codegen_normalizes_agent_no_dispatch_without_changing_script_results(tmp_path, mode, enabled, method):
+    source = f'''from nerya.strategies import StrategyAgentTask
+def run(ctx):
+    if not ctx.config.params['ready']:
+        return ctx.result.{method}(reason="等待条件", metadata={{"observations": 3}})
+    return StrategyAgentTask.dispatch(prompt="Inspect confirmed signal", metadata={{"observations": 3}})
+'''
+    out = StrategyCodeGenerator(WorkspacePaths(tmp_path)).generate(
+        StrategyGenerationRequest(
+            strategy_id="agent_gate_fixture", execution_mode=mode, strategy_class="trend",
+            markets=("mock:BTC/USDT",), accounts=("paper_main",), create_tuning=False,
+            files={"main.py": source, "strategy.yml": yaml_io.dumps({
+                "execution_mode": mode, "agent_task": {"enabled": enabled},
+            })},
+        ), validate=False, create_proposal_record=False,
+    )
+    namespace = {}
+    exec(compile(out.files["main.py"], "main.py", "exec"), namespace)
+    ctx = SimpleNamespace(result=ResultBuilder(), config=SimpleNamespace(params={"ready": False}))
+    result = namespace['run'](ctx)
+    assert isinstance(result, StrategyAgentTask if enabled else StrategyResult)
+    assert (result.status if enabled else result.status.value) == ('skip' if enabled else 'hold')
+    assert result.reason == "等待条件" and result.metadata == {"observations": 3}
+    ctx.config.params['ready'] = True
+    dispatched = namespace['run'](ctx)
+    assert dispatched.status == 'dispatch' and dispatched.prompt == "Inspect confirmed signal"
+
+
+def test_codegen_uses_final_manifest_and_leaves_non_entrypoint_results_unchanged(tmp_path):
+    source = '''def helper(ctx):
+    return ctx.result.hold(reason='helper')
+def run(ctx):
+    return ctx.result.hold(reason='fallback')
+def build_agent_task(ctx):
+    return ctx.result.hold(reason='gate', metadata={'closed': True})
+'''
+    out = StrategyCodeGenerator(WorkspacePaths(tmp_path)).generate(
+        StrategyGenerationRequest(
+            strategy_id="agent_gate_fixture", execution_mode="script", markets=("mock:BTC/USDT",),
+            accounts=("paper_main",), create_tuning=False,
+            files={"main.py": source, "strategy.yml": yaml_io.dumps({
+                "execution_mode": "agent", "agent_task": {"enabled": True},
+            })},
+        ), validate=False, create_proposal_record=False,
+    )
+    namespace = {}
+    exec(compile(out.files["main.py"], "main.py", "exec"), namespace)
+    ctx = SimpleNamespace(result=ResultBuilder())
+    assert isinstance(namespace['build_agent_task'](ctx), StrategyAgentTask)
+    assert isinstance(namespace['run'](ctx), StrategyResult)
+    assert isinstance(namespace['helper'](ctx), StrategyResult)
+
+
+@pytest.mark.parametrize('expression', [
+    "ctx.result.ok(reason='submitted')",
+    "ctx.result.error(message='bad data')",
+    "ctx.result.hold(reason='ambiguous', extra=42)",
+])
+def test_codegen_keeps_ambiguous_agent_returns_for_validator(tmp_path, expression):
+    source = f"def run(ctx):\n    return {expression}\n"
+    out = StrategyCodeGenerator(WorkspacePaths(tmp_path)).generate(
+        StrategyGenerationRequest(
+            strategy_id="agent_gate_fixture", execution_mode="agent", markets=("mock:BTC/USDT",),
+            accounts=("paper_main",), create_tuning=False, files={"main.py": source},
+        ), validate=True, create_proposal_record=False,
+    )
+    assert out.files['main.py'] == source
+    assert any(i.code == 'agent_task_incompatible_return' for i in out.validation.blockers)
 
 
 def test_strategy_generate_request_uses_canonical_agent_class_and_mode() -> None:
@@ -982,6 +1056,30 @@ def test_strategy_generator_trend_template_uses_ma_crosses(tmp_path):
     assert "ctx.trading.close_position" in main_py
     assert '"stop_loss"' in main_py
     assert '"take_profit"' in main_py
+
+
+def test_strategy_generator_reuses_canonical_trend_annotations(tmp_path):
+    req = StrategyGenerationRequest(
+        strategy_id="btc_ema_confirmation",
+        title="BTC EMA confirmation",
+        strategy_class="trend",
+        execution_mode="script",
+        markets=("mock:BTC/USDT",),
+        accounts=("paper_main",),
+        subagents=("market_analyst",),
+    )
+
+    out = StrategyCodeGenerator(WorkspacePaths(root=tmp_path)).generate(
+        req,
+        validate=False,
+        create_proposal_record=False,
+    )
+
+    main_py = out.files["main.py"]
+    assert main_py.count("# @nerya.version 1") == 1
+    assert main_py.count("# @nerya.step execute |") == 1
+    assert "# @nerya.title BTC EMA confirmation" in main_py
+    assert "Generated baseline template" not in main_py
 
 
 def test_strategy_generator_scalping_template_has_exit_path(tmp_path):

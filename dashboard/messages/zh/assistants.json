@@ -1,5 +1,6 @@
 {
   "assistants": {
+    "taskMessageOrigin": "来自其他任务的指令",
     "title": "助理",
     "description": "为每位助理设置身份、指令与工具权限，网页对话和所有消息网关共用同一助理。",
     "create": "创建助理",
@@ -79,7 +80,7 @@
     "taskStates": {
       "queued": "已创建，等待执行",
       "running": "正在执行",
-      "succeeded": "已完成",
+      "succeeded": "本轮已结束",
       "failed": "需要处理",
       "cancelled": "已停止",
       "interrupted": "已停止",
@@ -91,10 +92,22 @@
       "blocked": "需要处理",
       "unconfirmed": "等待恢复确认",
       "stopping": "正在停止…"
+      ,"progress": "正在推进"
+      ,"ready": "等待审阅"
+      ,"waiting": "等待处理"
     },
     "taskConversations": "任务对话",
     "backToAssistant": "返回助理",
     "openTaskConversation": "查看任务对话",
+    "taskCreated": "已创建任务。",
+    "taskFollowupAdmitted": "补充请求已受理。",
+    "creationDeliveryUnconfirmed": "交付尚未确认。",
+    "deliveryStates": {
+      "unconfirmed": "交付尚未确认",
+      "incomplete": "交付未完成",
+      "partial": "已部分交付",
+      "complete": "交付已完成"
+    },
     "reportsAndResults": "报告与结果",
     "resultLoadFailed": "暂时无法加载结果。",
     "noResults": "完成的任务结论会保存在这里。",
@@ -103,6 +116,8 @@
     "replying": "助理正在回复",
     "replyFailed": "这次回复没有完成，请重试。",
     "replyStopped": "这次回复已停止。",
+    "deliveryUnconfirmed": "交付尚未确认。下文是 Agent 的报告，不是已验证的完成收据。",
+    "earlierDeliveryUnresolved": "仍有 {count} 条既有交付记录待处理",
     "retryReply": "重新发送",
     "continueReply": "继续回复",
     "messageAssistant": "给 {name} 发消息…",
@@ -150,4 +165,5 @@
     "personalInstructions": "助理说明（可选）",
     "personalInstructionsHint": "你希望助理怎样帮助你？"
   }
+  ,"taskDesk": {"title":"触发器控制台","description":"管理只读市场监控、任务触发投递和失败恢复。","watches":"市场监控","addWatch":"新增或更新监控","watchId":"监控 ID","market":"市场","priceThreshold":"价格变动 %","fundingThreshold":"资金费率绝对值","volatilityThreshold":"波动率 %","cooldown":"冷却秒数","saveWatch":"保存监控","pollNow":"立即轮询","enabled":"已启用","paused":"已暂停","noWatches":"尚未配置市场监控。","health":"Source 健康","noHealth":"暂无 Source 健康记录。","deliveries":"最近投递","deadLetters":"死信","noDeadLetters":"暂无未处理死信。","replay":"重放","watchRequired":"监控 ID 和市场不能为空。"}
 }

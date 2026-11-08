@@ -36,11 +36,15 @@ export function toolSemantics(rawName: string, payload: Record<string, unknown>,
     : /todo|plan/.test(name) ? "plan" : /message/.test(name) ? "message"
     : /search|grep|glob/.test(name) ? "search" : /read|fetch|view|list_dir/.test(name) ? "read"
     : /edit|write|patch|create/.test(name) ? "edit" : /shell|bash|exec|command|script_run/.test(name) ? "shell" : "tool";
-  const specific = actions[name];
+  const inspecting = family === "skill" && payload.action === "inspect";
+  const reference = family === "skill" ? text(inspecting ? payload.script : payload.file) : "";
+  const offset = reference && typeof payload.offset === "number" && Number.isInteger(payload.offset) && payload.offset >= 0
+    ? ` · ${zh ? "偏移" : "offset"} ${payload.offset}` : "";
+  const specific = reference ? (inspecting ? actions.read_file : actions.skill_view) : actions[name];
   const title = i18nCopy(zh, (specific && !(name === "script_run" && family !== "shell") ? specific : labels[family]) ?? "");
   const target = text(payload.strategy_id || payload.market || payload.symbol || payload.path || payload.file_path || payload.query || payload.search_query || payload.url || payload.command || payload.cmd || payload.pattern || payload.task || payload.goal || payload.description);
   const subject = family === "mcp" ? [text(payload.namespace || payload.server), text(payload.tool || payload.name)].filter(Boolean).join(" / ") || target || name
-    : family === "skill" ? skill || text(payload.name) || name
+    : family === "skill" ? [skill || text(payload.name) || name, reference].filter(Boolean).join(" / ") + offset
     : name === "script_run" ? [skill, script].filter(Boolean).join(" / ") || target || name
     : target || skill || name.replace(/_/g," ");
   return { family, title, subject };

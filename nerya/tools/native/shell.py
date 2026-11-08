@@ -878,7 +878,7 @@ def run_shell_handler(
     if stderr:
         text += f"\n## stderr\n{stderr}\n"
 
-    return ToolResult(
+    result = ToolResult(
         tool_use_id=call.id,
         name=call.name,
         elapsed_ms=elapsed_ms,
@@ -920,6 +920,21 @@ def run_shell_handler(
             )
         ],
     )
+    if exit_code != 0:
+        result.error = ToolError(
+            kind=ToolErrorKind.EXECUTION_ERROR,
+            message=f"command exited with status {exit_code}",
+            detail={
+                "exit_code": exit_code,
+                "stderr_preview": stderr[:1024],
+                "stdout_preview": stdout[:1024],
+            },
+            retryable=False,
+        )
+        result.semantic_success = False
+    else:
+        result.semantic_success = True
+    return result
 
 
 __all__ = ["classify_shell_risk", "run_shell_handler"]

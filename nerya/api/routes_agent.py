@@ -608,9 +608,16 @@ def routes():
         from copy import deepcopy
         from ..core.config import Config
         run_config = Config(paths=run_config.paths,data=deepcopy(run_config.data))
+        # A runtime manager can be reused by a child; this turn must derive its
+        # own publication contract, never inherit the parent's request binding.
+        run_config.data.setdefault("runtime", {}).pop("assistant_request", None)
         if payload.get("_auth_actor_id"):
             run_config.data.setdefault("runtime",{})["financial_actor_id"] = payload["_auth_actor_id"]
             run_config.data["runtime"]["financial_actor_scopes"] = list(payload.get("_auth_scopes") or ())
+        # The cancellation token owns a thread lock; retain that request-local
+        # handle while copying only serializable input before mode augmentation.
+        assistant_input = {key: value if key == "_task_cancel_token" else deepcopy(value)
+                           for key, value in payload.items()}
         mode = payload.get("work_mode", "execute")
         if payload.get("resume_turn_id") and payload.get("session_id"):
             from ..db.sqlite import connect as _plan_connect
@@ -626,19 +633,9 @@ def routes():
             return {"ok":False,"_status":400,"error":"invalid_work_mode"}
         run_config.data.setdefault("agent",{}).setdefault("native",{})["plan_only"] = mode == "plan"
         if mode == "plan" and not payload.get("resume_turn_id"):
-            payload = deepcopy(payload)
+            payload = {**assistant_input, "payload": deepcopy(assistant_input.get("payload", {}))}
             user_payload = payload.setdefault("payload",{})
             user_payload["text"] = str(user_payload.get("text") or "") + "\nWork mode: plan. Investigate with read-only tools, then use propose_plan. Do not modify external state or execute the plan."
-        elif mode == "goal" and not payload.get("resume_turn_id"):
-            payload = deepcopy(payload)
-            user_payload = payload.setdefault("payload", {})
-            user_payload["text"] = str(user_payload.get("text") or "") + (
-                "\nWork mode: goal. Define concrete acceptance criteria, carry out the task, "
-                "and verify the result with evidence. Keep iterating within this turn's limits "
-                "while useful work remains. Preserve permission, approval, and proposal rules. "
-                "If blocked, ask for the missing input. If the limits are reached or verification "
-                "is incomplete, report the remaining work without claiming completion."
-            )
 
         trigger = _inject_trusted_actor(
             normalise_trigger_payload(payload),
@@ -753,6 +750,26 @@ def routes():
                         "Wait for it to finish or interrupt it before sending a new turn."
                     ),
                 }
+            # Assistant coordination owns its request-local publication path.
+            # Task admission/read/follow-up returns host-verified receipts before
+            # a generative answer can reach streaming or transcript storage.
+            from ..agent.assistant_intent import AssistantIntentError, prepare_assistant_intent
+            try:
+                assistant_request = prepare_assistant_intent(run_config, assistant_input)
+            except AssistantIntentError as exc:
+                return {"ok": False, "error": exc.code, "_status": 409,
+                        "stopped_reason": "assistant_request_unconfirmed", "final_text": ""}
+            if assistant_request is not None:
+                run_config.data.setdefault("runtime", {})["assistant_request"] = assistant_request
+                if assistant_request["disposition"] == "conversation":
+                    # Ordinary questions cannot accidentally create work. Their
+                    # answers still use the normal streaming/model machinery.
+                    from ..agent.assistants import merge_policy
+                    native = run_config.data.setdefault("agent", {}).setdefault("native", {})
+                    native["tool_policy"] = merge_policy(native.get("tool_policy", {}), {
+                        "allow_groups": [["Skill", "skill_view", "assistant_task_list",
+                            "assistant_task_read", "request_user_input", "ask_user", "send_message"]]})
+                    native["assistant_base_tool_policy"] = native["tool_policy"]
             # Persist the candidate reference server-side, after validating its
             # strategy ownership. Future turns cannot silently lose the reference.
             proposal_id = payload.get("strategy_proposal_id")
@@ -781,6 +798,9 @@ def routes():
                 model_provider=model_provider,
                 model_id=model_id,
             )
+            if assistant_request is not None and assistant_request["disposition"] != "conversation":
+                from ..agent.assistant_runner import run_assistant_request
+                return run_assistant_request(run_config, assistant_input, assistant_request, kernel=kernel)
             try:
                 from ..harness.cancellation import CancelToken
 
@@ -1453,6 +1473,43 @@ def routes():
         internal origin. Nerya's prompt firewall and normal permission/Risk
         gates still run; only the public research-only gate is skipped.
         """
+        # The command worker calls this route with the durable command context
+        # stamped into its request-local config. Direct/legacy dashboard
+        # callers must enter through the same command admission path first;
+        # otherwise the loop can emit journals and checkpoints without a
+        # command projection or durable user message.
+        runtime_context = client.config.get("runtime") or {}
+        if not runtime_context.get("command_id"):
+            from ..agent.command_runtime import runtime
+            from ..agent.command_store import CommandError
+            import uuid
+
+            request = dict(payload or {})
+            actor = str(
+                request.pop("_auth_actor_id", None)
+                or getattr(client, "auth_actor_id", None)
+                or "local"
+            )
+            scope = str(request.pop("_auth_scope", None) or getattr(client, "auth_scope", None) or "")
+            scopes = request.pop("_auth_scopes", None)
+            if not isinstance(scopes, list):
+                scopes = list(getattr(client, "auth_scopes", ()) or ())
+            sid = request.get("session_id")
+            if not sid:
+                return {"ok": False, "_status": 400, "error": "session_id required"}
+            try:
+                receipt = runtime(client.config).submit({
+                    "command_id": request.pop("command_id", None) or "cmd_" + uuid.uuid4().hex,
+                    "session_id": sid,
+                    "command_type": request.pop("command_type", "send"),
+                    "request": request,
+                    "_auth_actor_id": actor,
+                    "_auth_scope": scope,
+                    "_auth_scopes": scopes,
+                })
+            except CommandError as exc:
+                return {"ok": False, "_status": exc.status, "error": exc.code}
+            return {"ok": True, "admitted": True, **receipt}
         return run_turn(client, payload, enforce_public_gate=False)
 
     from .routes_conversation_commands import command_routes

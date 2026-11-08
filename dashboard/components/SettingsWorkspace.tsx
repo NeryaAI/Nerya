@@ -1151,6 +1151,9 @@ function SettingsWorkspaceContent({
     // manually imported providers remain selectable in the UI.
     providerCatalog.forEach((entry) => {
       if (entry.id) names.add(entry.id);
+      for (const alias of entry.aliases || []) {
+        if (alias) names.add(alias);
+      }
     });
     providers.forEach((p) => names.add(p.provider));
     providerProfiles.forEach((p) => names.add(p.provider));
@@ -1164,6 +1167,19 @@ function SettingsWorkspaceContent({
     });
     return Array.from(names).filter(Boolean).sort();
   }, [modelCatalog, providerCatalog, providerDraft, providerProfiles, providers, tierRows]);
+
+  const configuredProviderOptions = useMemo(() => {
+    const names = new Set<string>();
+    for (const profile of providerProfiles) {
+      if (profile.provider && (profile.has_key_ref || profile.provider_key_ref)) {
+        names.add(profile.provider);
+      }
+    }
+    for (const provider of providers) {
+      if (provider.provider && provider.ready) names.add(provider.provider);
+    }
+    return Array.from(names).sort();
+  }, [providerProfiles, providers]);
 
   const catalogById = useMemo(() => {
     const map = new Map<string, ProviderCatalogEntry>();
@@ -1288,6 +1304,22 @@ function SettingsWorkspaceContent({
       setCustomProviderKind("");
       setConnectionBaseline({ base_url: profile.base_url || "", provider_key_ref: profile.provider_key_ref || "", kind: profile.kind || "" });
     }
+  }
+
+  function providerProfileDeleted(provider: string, revision: string) {
+    setProviderProfiles(previous => previous.filter(row => row.provider !== provider));
+    setModelCatalog(previous => {
+      const next = { ...previous };
+      delete next[provider];
+      return next;
+    });
+    setLoadedFingerprint(previous => {
+      if (!previous) return previous;
+      const baseline = JSON.parse(previous);
+      baseline.provider_profiles = baseline.provider_profiles.filter((row: LlmProviderProfile) => row.provider !== provider);
+      return JSON.stringify(baseline);
+    });
+    setSavedRevision(revision);
   }
 
   useEffect(() => {
@@ -2296,6 +2328,7 @@ function SettingsWorkspaceContent({
               defaultEndpoints={{ ...DEFAULT_PROVIDER_BASE_URLS, ...Object.fromEntries(providerCatalog.filter(provider => provider.base_url).map(provider => [provider.id, provider.base_url])) }}
               disabled={saving || loading || discovering || refreshing || importing || connectionDirty}
               onSaved={providerProfileSaved} onBusyChange={setProviderManagementBusy} onDirtyChange={setProviderManagementDirty}
+              onDeleted={providerProfileDeleted}
               onRefreshed={(provider, models) => setModelCatalog(previous => ({ ...previous, [provider]: models.map(modelId).filter(Boolean) }))} />}
 
             <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
@@ -2622,6 +2655,9 @@ function SettingsWorkspaceContent({
                     <div className="space-y-2.5">
                       {routes.map((route, routeIndex) => {
                         const models = modelCatalog[route.provider] || [];
+                        const routeProviderOptions = route.provider && !configuredProviderOptions.includes(route.provider)
+                          ? [route.provider, ...configuredProviderOptions]
+                          : configuredProviderOptions;
                         const routeModelValues = splitRouteValues(
                           route.models?.length ? route.models : route.model,
                         );
@@ -2674,7 +2710,11 @@ function SettingsWorkspaceContent({
                                   aria-label={`${tierLabel(row.tier, tModel)} · ${tModel("routeLabel", { index: routeIndex + 1 })} · ${tProvider("providerLabel")}`}
                                   className="w-full font-mono"
                                 >
-                                  {providerOptions.map((provider) => <option key={provider} value={provider}>{catalogById.get(provider)?.name || provider}</option>)}
+                                  {routeProviderOptions.map((provider) => {
+                                    const configured = configuredProviderOptions.includes(provider);
+                                    const displayName = catalogById.get(provider)?.name || provider;
+                                    return <option key={provider} value={provider} disabled={!configured}>{configured ? `${displayName} · ${provider} · ${tModel("configuredProvider")}` : `${provider} · ${tModel("unconfiguredProvider")}`}</option>;
+                                  })}
                                 </ChoiceSelect>
                               </Field>
                               <Field label={tProvider("modelLabel")}>

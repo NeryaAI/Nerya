@@ -1,0 +1,53 @@
+# @nerya.version 1
+# @nerya.title Configured EMA crossover
+# @nerya.description Long/flat EMA crossover using the saved periods and risk settings.
+# @nerya.logic Enter on a new upward cross; exit on a new downward cross.
+# @nerya.rationale Use an SMA seed and a constant-preserving EMA recurrence.
+# @nerya.scope Configured markets and timeframe; no account configuration changes.
+# @nerya.input Closed candles, declared periods, sizing, protection and settled positions.
+# @nerya.output SDK submission receipts or explicit hold/error outcomes; not fills.
+# @nerya.risk Lag and whipsaws can lose money; no performance guarantee.
+# @nerya.validation Test final-bar entry, exit, no-signal and duplicate handling.
+# @nerya.step execute | Evaluate EMA crossover | Route closed candles through the SDK.
+
+from math import isfinite
+from statistics import mean
+
+from strategy_execution import run_closed_signal
+
+
+def ema(values, period):
+    """Aligned SMA-seeded EMA; None until period bars, finite inputs only."""
+    if type(period) is not int or period < 1:
+        raise ValueError("EMA period must be a positive integer")
+    values = [float(value) for value in values]
+    if not all(isfinite(value) for value in values):
+        raise ValueError("EMA values must be finite")
+    out = [None] * len(values)
+    if len(values) < period:
+        return out
+    previous = mean(values[:period])
+    out[period - 1] = previous
+    k = 2.0 / (period + 1.0)
+    for i in range(period, len(values)):
+        # Unlike value*k + previous*(1-k), a constant stays exactly constant.
+        previous += k * (values[i] - previous)
+        out[i] = previous
+    return out
+
+
+def ema_cross(candles, *, fast_period, slow_period):
+    """Prefix-causal, aligned signals; equality alone never triggers a trade."""
+    closes = [row["close"] for row in candles]
+    fast, slow = ema(closes, fast_period), ema(closes, slow_period)
+    buy, sell = [False] * len(closes), [False] * len(closes)
+    for i in range(1, len(closes)):
+        if None in (fast[i - 1], slow[i - 1], fast[i], slow[i]):
+            continue
+        buy[i] = fast[i - 1] <= slow[i - 1] and fast[i] > slow[i]
+        sell[i] = fast[i - 1] >= slow[i - 1] and fast[i] < slow[i]
+    return {"fast": fast, "slow": slow, "buy": buy, "sell": sell}
+
+
+def run(ctx):
+    return run_closed_signal(ctx, ema_cross)

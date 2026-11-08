@@ -1,6 +1,7 @@
 node_modules
 .next
 .next-*/
+.next-*.json
 out
 .env
 .env.local

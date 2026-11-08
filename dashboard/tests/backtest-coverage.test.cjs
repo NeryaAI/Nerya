@@ -28,3 +28,22 @@ test("full endpoints cannot override a manifest with missing candles", () => {
 test("missing completeness is unknown, not an invented successful check", () => {
   assert.equal(backtestCoverage({ requested_window_days: 365 }).state, "unknown");
 });
+
+test("producer completeness outranks last-minus-first display span when timeframe is absent", () => {
+  const meta = { requested_window_days:30, requested_window_complete:true,
+    start_utc:"2026-09-22T11:00:00Z", end_utc:"2026-10-22T10:00:00Z" };
+  assert.equal(backtestCoverage(meta).state, "complete");
+  const data = backtestCoverage({ ...meta, data_manifest: { requested_window_complete:true, end_exclusive:true,
+    requested_start_utc:"2026-09-22T11:00:00+00:00", requested_end_utc:"2026-10-22T11:00:00+00:00" } });
+  assert.equal(data.recordedDays, 30);
+  assert.equal(data.end, Date.parse("2026-10-22T11:00:00Z"));
+});
+
+test("requested endpoints alone cannot certify coverage or replace recorded timestamps", () => {
+  const meta = { requested_window_days:30, start_utc:"2026-10-20T11:00:00Z", end_utc:"2026-10-22T10:00:00Z", tf:"1h",
+    data_manifest: { end_exclusive:true, requested_start_utc:"2026-09-22T11:00:00Z", requested_end_utc:"2026-10-22T11:00:00Z" } };
+  assert.equal(backtestCoverage(meta).state, "partial");
+  assert.equal(backtestCoverage(meta).recordedDays, 2);
+  assert.equal(backtestCoverage({ requested_window_days:30, data_manifest:meta.data_manifest }).recordedDays, null);
+  assert.equal(backtestCoverage({ requested_window_days:30, data_manifest:meta.data_manifest }).state, "unknown");
+});

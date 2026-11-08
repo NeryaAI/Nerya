@@ -235,7 +235,10 @@ def test_workspace_code_write_is_fluid_but_sensitive_config_escalates() -> None:
     [
         ("browser", "browser_session.py", "allow"),
         ("news_social", "recent_news.py", "ask"),
-        ("research", "fetch_url.py", "ask"),
+        ("research", "fetch_url.py", "allow"),
+        ("markets", "get_candles.py", "allow"),
+        ("research", "publish_visuals.py", "ask"),
+        ("research", "scripts/unknown.py", "ask"),
     ],
 )
 def test_registered_script_run_approval_policy(
@@ -254,7 +257,7 @@ def test_registered_script_run_approval_policy(
 
 
 def test_wallet_install_requires_exec_approval_by_default(tmp_path) -> None:
-    _paths, registry, _deps = _registry(tmp_path)
+    _paths, registry, _deps = _registry(tmp_path, builtin_skills=True)
     descriptor = registry.get("wallet_install")
     decision = _decision(
         descriptor,
@@ -262,6 +265,35 @@ def test_wallet_install_requires_exec_approval_by_default(tmp_path) -> None:
     )
     assert descriptor.permission_scope is PermissionScope.NETWORK
     assert decision.is_ask() and decision.risk is RiskLevel.EXEC
+
+
+def test_task_delegation_and_local_proposals_keep_existing_safety_gates(tmp_path) -> None:
+    from nerya.skills.kernel import SkillKernel
+
+    _paths, registry, deps = _registry(tmp_path)
+    deps.skills = SkillKernel.boot(deps.config)
+    register_native_tools(registry, deps, replace=True)
+    engine = PermissionEngine()
+    for name in (
+        "task_create", "assistant_task_create", "assistant_task_message",
+        "strategy_draft_proposal", "strategy_submit_proposal",
+        "workspace_ui_propose", "evolve_core_config_patch", "evolve_provider_proposal",
+    ):
+        descriptor = registry.get(name)
+        request = PermissionRequest(descriptor=descriptor, payload={})
+        for mode in (PermissionMode.DEFAULT, PermissionMode.AUTO):
+            assert _decision(descriptor, {}, mode).is_allow(), (name, mode)
+        assert engine.evaluate(request, PermissionContext(plan_only=True)).is_deny(), name
+        assert engine.evaluate(request, PermissionContext(
+            tool_policy={"deny": [name]},
+        )).is_deny(), name
+    for name, payload in (
+        ("strategy_promote", {}), ("strategy_delete_proposal", {}),
+        ("wallet_install", {"provider": "self_custody"}),
+        ("run_shell", {"command": "curl -X POST https://example.com -d x"}),
+        ("write_file", {"path": "strategies/s1/limits.yml"}),
+    ):
+        assert _decision(registry.get(name), payload).is_ask(), name
 
 
 def test_chat_trade_bypasses_generic_gate_but_domain_gate_requires_approval(tmp_path) -> None:

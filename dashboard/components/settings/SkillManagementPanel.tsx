@@ -5,7 +5,9 @@ import { useTranslations } from "next-intl";
 import * as Dialog from "@radix-ui/react-dialog";
 import { clientApi } from "../../lib/clientApi";
 import { Markdown } from "../chat/Markdown";
-import { ErrorBanner, Pill } from "../Page";
+import { ErrorBanner } from "../Page";
+import { SearchIcon, SkillsIcon, ChevronRightIcon, XIcon, PlusIcon, RefreshIcon } from "../icons";
+import styles from "./SkillLibrary.module.css";
 import { SkillFileTree } from "./SkillFileTree";
 import { Field } from "./SettingsFields";
 import { confirm } from "../../lib/dialogs";
@@ -22,7 +24,7 @@ export default function SkillManagementPanel() {
   const [importSource, setImportSource] = useState("");
   const [importSubdir, setImportSubdir] = useState("");
   const [scope, setScope] = useState<Scope>("all");
-  const [view, setView] = useState<"core" | "professional" | "all">("all");
+  const [view, setView] = useState<"core" | "professional" | "all">("core");
   const [methods, setMethods] = useState<Record<string, SkillRow[]>>({});
   const [expanded, setExpanded] = useState<string[]>([]);
   const [loadingMethods, setLoadingMethods] = useState("");
@@ -60,7 +62,7 @@ export default function SkillManagementPanel() {
     if (scope === "agent" && !agent) return;
     const abort = new AbortController();
     setLoading(true); setError(""); setCatalog(null); setSelected(null); setFile(null); setMethods({}); setExpanded([]);
-    const params = new URLSearchParams({ scope, view, hierarchical: "true", agent_id: agent, query: search, offset: String(offset), limit: "30", include_unassigned: "true" });
+    const params = new URLSearchParams({ scope, view: search ? "all" : view, hierarchical: search ? "false" : "true", agent_id: agent, query: search, offset: String(offset), limit: "30", include_unassigned: "true" });
     void mcpRequest<SkillCatalog>("/skills/catalog?" + params, undefined, abort.signal).then(setCatalog)
       .catch(e => { if (!abort.signal.aborted) setError(e.message); }).finally(() => { if (!abort.signal.aborted) setLoading(false); });
     return () => abort.abort();
@@ -158,39 +160,58 @@ export default function SkillManagementPanel() {
     finally { setBusy(false); }
   }
   function skillRow(row: SkillRow): JSX.Element {
-    return <div key={row.id + row.source} data-skill-id={row.id} className="min-w-0 border-b border-[color:var(--line)] py-3">
-      <div className="flex flex-wrap items-center justify-between gap-2"><button type="button" className="min-w-0 break-all text-left text-sm font-medium underline-offset-4 hover:underline" aria-pressed={selected?.id === row.id} disabled={busy || dirty} onClick={() => void openSkill(row)}>{row.id}</button><Pill tone={row.enabled ? "ok" : "neutral"}>{row.enabled ? t("enabled") : t("disabled")}</Pill></div>
-      <p className="mt-1 line-clamp-3 break-words text-xs text-[color:var(--text-muted)]">{row.description}</p>
-      <div className="mt-2 flex flex-wrap items-center gap-2"><span className="text-xs text-[color:var(--text-muted)]">{row.source === "builtin" ? t("builtin") : ["workspace", "workspace_installed"].includes(row.source) ? t("workspace") : row.source}{scope === "agent" ? ` · ${row.assigned ? t("assigned") : t("unassigned")}` : ""}</span>
-        <button type="button" className="relative inline-flex h-6 w-10 shrink-0 items-center rounded-full bg-[color:var(--line-hi)] transition-colors aria-checked:bg-brand-500 disabled:opacity-40" aria-label={scope === "agent" ? row.assigned ? t("unassign") : t("assign") : row.enabled ? t("disable") : t("enable")} role="switch" aria-checked={scope === "agent" ? Boolean(row.assigned) : row.enabled} disabled={busy || dirty} onClick={() => void applyChange((scope === "agent" ? row.assigned : row.enabled) ? "disable" : "enable", row)}><span aria-hidden className={"h-4 w-4 rounded-full bg-white transition-transform " + ((scope === "agent" ? row.assigned : row.enabled) ? "translate-x-5" : "translate-x-1")} /></button>
-        {scope !== "agent" && ["workspace", "workspace_installed"].includes(row.source) && <button type="button" className="btn btn-ghost text-danger text-xs" disabled={busy || dirty} onClick={() => void removeSkill(row)}>{common("delete")}</button>}
-        {Boolean(row.method_count) && <button type="button" className="btn btn-ghost text-xs" aria-expanded={expanded.includes(row.id)} aria-controls={`methods-${row.id}`} disabled={busy || dirty} onClick={() => void toggleMethods(row)}>{loadingMethods === row.id ? t("loading") : t("methods", { count: row.method_count || 0 })}</button>}
+    const enabled = scope === "agent" ? Boolean(row.assigned) : row.enabled;
+    const title = (row.title || row.id).replaceAll("_", " ").replace(/(^|\s)\S/g, value => value.toUpperCase());
+    return <div key={row.id + row.source} data-skill-id={row.id} className={styles.row}>
+      <div className={styles.rowMain}>
+        <button type="button" className={styles.open} aria-label={`${t("read")}: ${row.id}`} disabled={busy || dirty || loading} onClick={() => void openSkill(row)}>
+          <span className={styles.glyph} aria-hidden><SkillsIcon size={18}/></span>
+          <span className={styles.rowText}><span className={styles.rowTitle}>{title}</span>
+            <span className={styles.rowDescription}>{row.description}</span><span className={styles.rowId}>{row.id}</span>
+          </span><ChevronRightIcon size={16} className={styles.chevron}/>
+        </button>
+        <div className={styles.controls}>
+          <span className={styles.enabledLabel}>{enabled ? t(scope === "agent" ? "assigned" : "enabled") : t(scope === "agent" ? "unassigned" : "disabled")}</span>
+          <button type="button" className={styles.switch} aria-label={`${scope === "agent" ? enabled ? t("unassign") : t("assign") : enabled ? t("disable") : t("enable")}: ${row.id}`}
+            role="switch" aria-checked={enabled} disabled={busy || dirty || loading} onClick={() => void applyChange(enabled ? "disable" : "enable", row)}><span aria-hidden/></button>
+        </div>
       </div>
-      {row.catalog_parent && (view === "all" || search) && <p className="mt-1 break-all text-xs text-[color:var(--text-muted)]">{t("partOf", { name: row.catalog_parent })}</p>}
-      {expanded.includes(row.id) && <div id={`methods-${row.id}`} className="mt-2 pl-3" aria-label={t("methods", { count: methods[row.id]?.length || 0 })}>{methods[row.id]?.map(skillRow)}</div>}
+      {(Boolean(row.method_count) || row.catalog_parent || ["workspace", "workspace_installed"].includes(row.source)) && <div className={styles.rowMeta}>
+        {Boolean(row.method_count) && <button type="button" aria-expanded={expanded.includes(row.id)} aria-controls={`methods-${row.id}`} disabled={busy || dirty} onClick={() => void toggleMethods(row)}>{loadingMethods === row.id ? t("loading") : t("methods", { count: row.method_count || 0 })}<ChevronRightIcon size={12}/></button>}
+        {row.catalog_parent && <span>{t("partOf", { name: row.catalog_parent })}</span>}
+        {scope !== "agent" && ["workspace", "workspace_installed"].includes(row.source) && <button type="button" className="text-danger" disabled={busy || dirty} onClick={() => void removeSkill(row)}>{common("delete")}</button>}
+      </div>}
+      {expanded.includes(row.id) && <div id={`methods-${row.id}`} className={styles.methods} aria-label={t("methods", { count: methods[row.id]?.length || 0 })}>{methods[row.id]?.map(skillRow)}</div>}
     </div>;
   }
-  return <section className="mx-auto w-full max-w-4xl" aria-label={t("title")}>
+  return <section className={styles.library} aria-label={t("title")}>
     <div className="space-y-5"><ErrorBanner error={error} onRetry={() => void navigate(() => setEpoch(v => v + 1))} />
       {notice && <p role="status" className="text-sm">{notice}</p>}
-      <fieldset disabled={busy || dirty} className="grid gap-3 border-0 p-0 sm:grid-cols-2">
-
+      <div className={styles.intro}><h2>{t("libraryTitle")}</h2><p>{t("libraryHint")}</p></div>
+      <fieldset disabled={busy || dirty} className={styles.searchBar}>
+        <label className={styles.search}><SearchIcon size={17}/><span className="sr-only">{t("search")}</span>
+          <input placeholder={t("searchHint")} maxLength={512} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); setSearch(query); setOffset(0); } }} />
+          {query && <button type="button" aria-label={t("clearSearch")} onClick={() => { setQuery(""); setSearch(""); setOffset(0); }}><XIcon size={15}/></button>}
+        </label>
+        <button type="button" className="btn btn-ghost" onClick={() => { setError(""); setImporting(true); }}>{t("import")}</button>
+      </fieldset>
+      <div className={styles.discoveryBar}>
+        <div className={styles.views} role="group" aria-label={t("view")}>{(["core", "professional", "all"] as const).map(value => <button type="button" key={value} disabled={busy || dirty} aria-pressed={!search && view === value} onClick={() => { setView(value); setQuery(""); setSearch(""); setOffset(0); }}>{t(`${value}View`)}</button>)}</div>
+        <details className={styles.filters} open={filtersOpen} onToggle={event => setFiltersOpen(event.currentTarget.open)}><summary>{t("scope")}</summary><fieldset disabled={busy || dirty}>
         <Field label={t("scope")}><select className="input-dark w-full" value={scope} onChange={e => { setOffset(0); setScope(e.target.value as Scope); }}><option value="all">{t("all")}</option><option value="builtin">{t("builtin")}</option><option value="workspace">{t("workspace")}</option><option value="agent">{t("agent")}</option></select></Field>
         {scope === "agent" && <Field label={t("role")}><select className="input-dark w-full" value={agent} onChange={e => { setOffset(0); setAgent(e.target.value); }}><optgroup label={t("primaryRoles")}>{roles.filter(r => !r.catalog_parent).map(r => <option key={r.name}>{r.name}</option>)}</optgroup><optgroup label={t("profileRoles")}>{roles.filter(r => r.catalog_parent).map(r => <option key={r.name}>{r.name}</option>)}</optgroup></select></Field>}
-        <Field label={t("search")}><input className="input-dark w-full" placeholder={t("searchHint")} value={query} onChange={e => setQuery(e.target.value)} onKeyDown={e => { if (e.key === "Enter") { e.preventDefault(); setSearch(query); setOffset(0); setEpoch(v => v + 1); } }} /></Field>
-
-      </fieldset>
-      <details open={filtersOpen} onToggle={event => setFiltersOpen(event.currentTarget.open)}><summary className="cursor-pointer text-xs text-[color:var(--text-muted)]">{t("view")}</summary><div className="mt-3 max-w-xs"><Field label={t("view")}><select className="input-dark w-full" value={view} onChange={e => { setOffset(0); setView(e.target.value as typeof view); }}><option value="core">{t("coreView")}</option><option value="professional">{t("professionalView")}</option><option value="all">{t("allView")}</option></select></Field></div></details>
-      <div className="flex flex-wrap items-center gap-3"><button type="button" className="btn btn-ghost" disabled={busy || dirty} onClick={() => setEpoch(v => v + 1)}>{t("refresh")}</button><button type="button" className="btn btn-ghost" disabled={busy || !catalog || scope === "agent"} onClick={() => void navigate(() => { setNotice(""); setError(""); setCreating(true); setSelected(null); setFile(null); setNewId("new_skill"); setContent("---\nname: new_skill\ndescription: Describe when this Skill should be used.\n---\n\n# Workflow\n\n"); })}>{t("create")}</button>
-        <button type="button" className="btn btn-ghost" disabled={busy || dirty} onClick={() => { setError(""); setImporting(true); }}>{t("import")}</button>
+        </fieldset></details>
+      </div>
+      <div className={styles.actions}><button type="button" className="btn btn-ghost" disabled={busy || !catalog || scope === "agent"} onClick={() => void navigate(() => { setNotice(""); setError(""); setCreating(true); setSelected(null); setFile(null); setNewId("new_skill"); setContent("---\nname: new_skill\ndescription: Describe when this Skill should be used.\n---\n\n# Workflow\n\n"); })}><PlusIcon size={14}/>{t("create")}</button>
         {dirty && <button type="button" className="btn btn-ghost" onClick={() => void navigate(() => { setContent(file?.text || ""); })}>{t("discard")}</button>}
-        {catalog && <span role="status" className="text-xs text-[color:var(--text-muted)]">{t(search || view === "all" ? "entryCount" : "workflowCount", { count: catalog.total })}</span>}
+        <span className={styles.count} role="status" aria-live="polite">{loading ? t("loading") : catalog ? t(search ? "entryCount" : "workflowCount", { count: catalog.total }) : ""}</span>
+        <button type="button" className="ui-icon-button" aria-label={t("refresh")} title={t("refresh")} disabled={busy || dirty || loading} onClick={() => setEpoch(v => v + 1)}><RefreshIcon size={15}/></button>
       </div>
       {scope === "agent" && <p className="text-sm text-[color:var(--text-muted)]">{t("roleHint")}</p>}
-      {loading && <p role="status">{t("loading")}</p>}
-      {catalog?.skills.length === 0 && <p className="text-sm">{t("empty")}</p>}
+      {loading && <div className={styles.skeleton} aria-hidden>{[0, 1, 2].map(i => <div key={i}/>)}</div>}
+      {catalog?.skills.length === 0 && <div className={styles.empty}><SearchIcon size={22}/><h3>{t("empty")}</h3><p>{t("emptyHint")}</p><button type="button" className="btn btn-ghost" onClick={() => { setQuery(""); setSearch(""); setView("all"); setScope("all"); setOffset(0); }}>{t("resetFilters")}</button></div>}
       <div className="min-w-0">
-        <div data-testid="skill-catalog" className="min-w-0">{Array.from(new Set(catalog?.skills.map(row => row.source))).map(source => <section key={source} className="mb-6"><h3 className="border-b border-[color:var(--line)] py-2 text-sm font-semibold">{source === "builtin" ? t("builtin") : source === "workspace" || source === "workspace_installed" ? t("workspace") : source}</h3>{catalog?.skills.filter(row => row.source === source).map(skillRow)}</section>)}</div>
+        <div data-testid="skill-catalog" className="min-w-0" aria-busy={loading}>{Array.from(new Set(catalog?.skills.map(row => row.source))).map(source => <section key={source} className="mb-6"><h3 className={styles.source}>{source === "builtin" ? t("builtin") : source === "workspace" || source === "workspace_installed" ? t("workspace") : source}</h3>{catalog?.skills.filter(row => row.source === source).map(skillRow)}</section>)}</div>
         <Dialog.Root open={Boolean(file) || creating} onOpenChange={open => { if (!open && !busy) void navigate(() => { setSelected(null); setFile(null); setContent(""); }); }}>
         <Dialog.Portal>
         <Dialog.Overlay className="ui-modal-overlay" />
@@ -203,6 +224,7 @@ export default function SkillManagementPanel() {
           <section><h3 className="mb-2 break-all text-sm font-semibold">{selected?.id} /</h3><SkillFileTree files={file.files} selected={file.file} disabled={busy} onSelect={name => { if (selected) void read(selected, name); }} /></section>
         </aside>}
         <div className="min-w-0 space-y-3">
+          {file && <div className={styles.fileMeta}><span>{t("fileSize", { count: content.length })}</span><span>{t("fileCount", { count: file.files.length })}</span><code title={file.revision}>{file.revision.slice(0, 12)}</code></div>}
           <ErrorBanner error={error} />
           {notice && <p role="status" className="text-sm">{notice}</p>}
           {!file && !creating && <p className="text-sm text-[color:var(--text-muted)]">{t("select")}</p>}

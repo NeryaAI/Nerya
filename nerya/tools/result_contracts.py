@@ -120,23 +120,31 @@ def result_counts_as_success(result: ToolResult) -> bool:
     return True
 
 
+def result_has_unconfirmed_effect(result: ToolResult) -> bool:
+    """Producer effect state wins even over declared semantic success."""
+    data = tool_json_data(result) or compacted_kept_data(result) or {}
+    detail = result.error.detail if result.error is not None else {}
+    unresolved = {"pending", "awaiting_approval", "submitted", "confirming",
+                  "unconfirmed", "needs_recovery"}
+    for payload in (data, detail, result.metadata):
+        if (any(str(payload.get(key) or "").strip().lower() in unresolved
+                for key in ("status", "state", "execution_status"))
+                or payload.get("terminal") is False
+                or payload.get("complete") is False
+                or payload.get("execution_state") in ("unknown", "unconfirmed")):
+            return True
+    return False
+
+
 def result_allows_repair(result: ToolResult) -> bool:
     """Interpret completed failure at the tool boundary, never replay permission.
 
     Pending approvals and uncertain effects keep their original recovery path.
     Legacy JSON inference stays here instead of leaking state names into loops.
     """
+    if result_has_unconfirmed_effect(result):
+        return False
     data = tool_json_data(result) or compacted_kept_data(result) or {}
-    detail = result.error.detail if result.error is not None else {}
-    unresolved = {"pending", "awaiting_approval", "submitted", "confirming",
-                  "unconfirmed", "needs_recovery"}
-    for payload in (data, detail):
-        if (any(str(payload.get(key) or "").strip().lower() in unresolved
-                for key in ("status", "state"))
-                or payload.get("terminal") is False
-                or payload.get("complete") is False
-                or payload.get("execution_state") == "unknown"):
-            return False
     if result.is_error:
         return result.error is not None and result.error.kind == ToolErrorKind.EXECUTION_ERROR
     status = str(data.get("status") or data.get("state") or "").strip().lower()
@@ -198,6 +206,7 @@ __all__ = [
     "parse_json_text",
     "result_counts_as_success",
     "result_allows_repair",
+    "result_has_unconfirmed_effect",
     "team_report_data",
     "team_report_has_usable_output",
     "team_report_should_finalize",

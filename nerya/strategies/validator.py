@@ -1,4 +1,4 @@
-"""Static + smoke-test validator for strategy packages.
+"""Structural and isolated behavioral validation for strategy packages.
 
 Scope
 -----
@@ -10,7 +10,7 @@ its own smoke checks at tick-time, but those are belt-and-braces;
 this is the gate that decides whether the package is allowed to
 exist on disk at all.
 
-The validator runs in two layers:
+The validator runs in separate layers:
 
 1. **Schema layer** — load the manifest through
    :func:`nerya.strategies.package._parse_manifest` so every required
@@ -35,14 +35,13 @@ The validator runs in two layers:
      ``os.getenv`` (secrets must come from the workspace vault);
    * shells out via ``os.system`` / ``subprocess.*``.
 
-3. **Import smoke test** — load the entrypoint through a fake
-   :class:`StrategyContext` (a no-op stub that records calls but
-   refuses to do real work). The fake ``ctx`` raises a controlled
-   exception when the strategy tries something dangerous (for
-   example: it returns empty candles, no news, deny LLM/subagent,
-   refuse trade submission with a clear message). The strategy
-   should still be importable + callable; if it crashes during
-   import we surface that as a hard error.
+3. **Isolated execution** — import the entrypoint and run authored
+   ``tests/`` through an OS sandbox in a separate, bounded process. The
+   entrypoint itself is never called by the smoke check. Candidate tests
+   have no network, account credentials or write access to the workspace.
+   An unavailable sandbox fails closed; static checks are not isolation.
+   Structural-only callers explicitly skip execution and receive
+   ``behavioral.status=not_run``, never a behavioral pass.
 
 Result
 ------
@@ -70,6 +69,7 @@ from ..core.errors import NeryaError, TradingError
 from ..core.paths import WorkspacePaths
 from .agent_task_mode import agent_task_requested
 from .documentation import documentation_errors
+from .execution_contract import is_aave_market
 from .package import StrategyPackage, _parse_manifest, load_package
 
 
@@ -275,6 +275,10 @@ class StrategyValidation:
     package_hash: str
     ok: bool
     issues: list[StrategyValidationIssue] = field(default_factory=list)
+    structural: dict[str, Any] = field(default_factory=dict)
+    behavioral: dict[str, Any] = field(default_factory=lambda: {
+        "status": "not_run", "exit_code": None, "summary": {}, "failures": [],
+    })
 
     @property
     def blockers(self) -> list[StrategyValidationIssue]:
@@ -285,12 +289,27 @@ class StrategyValidation:
         return [i for i in self.issues if i.severity == "warning"]
 
     def asdict(self) -> dict[str, Any]:
+        structural = self.structural or {
+            "status": "failed" if self.blockers else "passed",
+        }
+        behavior_status = self.behavioral.get("status", "not_run")
         return {
             "strategy_id": self.strategy_id,
             "package_hash": self.package_hash,
             "ok": self.ok,
             "blockers": [i.asdict() for i in self.blockers],
             "warnings": [i.asdict() for i in self.warnings],
+            "structural": structural,
+            "behavioral": self.behavioral,
+            "checks": [
+                {"check_id": "strategy_structure", "label": "Strategy structure and SDK contract",
+                 "status": structural["status"]},
+                {"check_id": "strategy_behavior", "label": "Isolated candidate tests",
+                 "status": "passed" if behavior_status == "passed" else
+                     "missing" if behavior_status in {"not_run", "not_present", "unavailable"} else "failed",
+                 "message": str(self.behavioral.get("reason") or self.behavioral.get("summary") or behavior_status)[:2048],
+                 "evidence_ref": f"source:{self.package_hash}#behavioral" if self.package_hash else ""},
+            ],
         }
 
 
@@ -319,6 +338,7 @@ def validate_proposal_files(
     strategy_id: str,
     files: dict[str, str],
     smoke_test: bool = True,
+    run_tests: bool | None = None,
 ) -> StrategyValidation:
     """Validate the file blobs the generator produced for a proposal.
 
@@ -326,6 +346,8 @@ def validate_proposal_files(
     ``subagents/<name>.agent.md``, ``tests/test_contract.py``) to their
     text content. We mirror the package layout into a temporary
     directory so the loader + AST walk can run without changing.
+    ``smoke_test=False`` preserves structural-only callers; ``run_tests``
+    defaults to that same choice and can explicitly request bounded tests.
 
     Why mirror to disk
     ------------------
@@ -336,13 +358,33 @@ def validate_proposal_files(
 
     import tempfile
 
+    from .workflow_graph import WorkflowError, safe_relative_path, package_revision
+
+    # Materialization precedes static analysis, so validate paths first.
+    try:
+        safe_relative_path(strategy_id)
+        if "/" in strategy_id:
+            raise WorkflowError("strategy_id must be one directory name")
+        for rel in files:
+            safe_relative_path(rel)
+    except (WorkflowError, TypeError, ValueError) as exc:
+        return StrategyValidation(strategy_id=strategy_id, package_hash="", ok=False, issues=[
+            StrategyValidationIssue("blocker", "invalid_package_path", str(exc)),
+        ])
+    # Runtime evidence and bytecode are not authored source. Hash the exact
+    # normalized validation input; presentation layout does not affect behavior.
+    files = {rel: str(content).replace("\r\n", "\n").replace("\r", "\n")
+             for rel, content in files.items()
+             if not _skip_generated_runtime_source(rel) and "__pycache__" not in Path(rel).parts
+             and rel != "validation_report.json" and not rel.endswith((".pyc", ".pyo"))}
+    revision = package_revision({name: content for name, content in files.items() if name != "workflow.json"})
+
     with tempfile.TemporaryDirectory(prefix="nerya-strategy-validate-") as td:
         root = Path(td) / strategy_id
         for rel, content in files.items():
             p = root / rel
             p.parent.mkdir(parents=True, exist_ok=True)
-            normalized = str(content).replace("\r\n", "\n").replace("\r", "\n")
-            p.write_text(normalized, encoding="utf-8", newline="\n")
+            p.write_text(content, encoding="utf-8", newline="\n")
         # Build a synthetic StrategyPackage so the rest of the
         # pipeline doesn't need to special-case proposal validation.
         manifest_path = root / "strategy.yml"
@@ -383,9 +425,9 @@ def validate_proposal_files(
             manifest=manifest,
             root=root,
             files=tuple(sorted(files.keys())),
-            content_hash="",  # not yet promoted
+            content_hash=revision,
         )
-        result = _validate_loaded(package, smoke_test=smoke_test)
+        result = _validate_loaded(package, smoke_test=smoke_test, run_tests=run_tests)
         result.strategy_id = strategy_id
         return result
 
@@ -415,8 +457,19 @@ def static_scan_blockers(
 # ---------------------------------------------------------------------------
 
 
-def _validate_loaded(package: StrategyPackage, *, smoke_test: bool = True) -> StrategyValidation:
+def _validate_loaded(
+    package: StrategyPackage, *, smoke_test: bool = True, run_tests: bool | None = None,
+) -> StrategyValidation:
     issues: list[StrategyValidationIssue] = []
+    from .workflow_graph import WorkflowError, safe_relative_path
+
+    try:
+        safe_relative_path(package.manifest.entrypoint_module)
+    except WorkflowError as exc:
+        return StrategyValidation(
+            strategy_id=package.strategy_id, package_hash=package.content_hash, ok=False,
+            issues=[StrategyValidationIssue("blocker", "invalid_entrypoint_path", str(exc), "strategy.yml")],
+        )
     for rel in package.files:
         if rel.endswith(".py") and not rel.startswith(("tests/", "fixtures/")):
             try:
@@ -485,10 +538,47 @@ def _validate_loaded(package: StrategyPackage, *, smoke_test: bool = True) -> St
             ))
     issues.extend(_static_scan_package(package))
     from .continuous_config import is_continuous
-    # A continuous entrypoint must not be run by import/tick smoke tests.
-    # It is exercised by bounded lifecycle/event tests after static validation.
-    if smoke_test and not is_continuous(package.manifest) and not _has_blocker(issues):
-        issues.extend(_smoke_test_import(package))
+    structural = {"status": "failed" if _has_blocker(issues) else "passed"}
+    behavioral: dict[str, Any] = {
+        "status": "not_run", "exit_code": None, "summary": {}, "failures": [],
+        "reason": "structural_blockers" if _has_blocker(issues) else "execution_not_requested",
+    }
+    tests_requested = smoke_test if run_tests is None else run_tests
+    # Continuous entrypoints are not smoke-imported; finite authored tests can
+    # still run in the bounded sandbox. No candidate is imported in the server.
+    import_requested = smoke_test and not is_continuous(package.manifest)
+    if not _has_blocker(issues) and (import_requested or tests_requested):
+        from .candidate_validation import run_candidate_validation
+
+        execution = run_candidate_validation(package, smoke_test=import_requested, run_tests=tests_requested)
+        smoke_issues = [StrategyValidationIssue(**issue) for issue in execution["smoke_issues"]]
+        issues.extend(smoke_issues)
+        if _has_blocker(smoke_issues):
+            structural["status"] = "failed"
+        behavioral = execution["behavioral"]
+        if (behavioral["status"] not in {"passed", "not_present", "not_run"}
+                or (tests_requested and behavioral["status"] == "not_run")):
+            failures = behavioral.get("failures") or []
+            for failure in failures:
+                issues.append(StrategyValidationIssue(
+                    "blocker", "candidate_test_failed",
+                    str(failure.get("message") or "Candidate test failed"),
+                    str(failure.get("nodeid") or "tests/"),
+                ))
+            if not failures:
+                issues.append(StrategyValidationIssue(
+                    "blocker", "candidate_tests_" + str(behavioral["status"]),
+                    str(behavioral.get("diagnostic") or behavioral.get("reason") or behavioral.get("stderr") or behavioral.get("stdout")
+                        or "Candidate tests did not complete successfully in isolation"),
+                    "tests/",
+                ))
+        elif behavioral["status"] == "not_present":
+            issues.append(StrategyValidationIssue(
+                "warning", "candidate_tests_missing",
+                "No candidate tests were found; structural validation does not verify strategy behavior.",
+                "tests/",
+            ))
+    behavioral["source_revision"] = package.content_hash
 
     ok = not _has_blocker(issues)
     return StrategyValidation(
@@ -496,6 +586,8 @@ def _validate_loaded(package: StrategyPackage, *, smoke_test: bool = True) -> St
         package_hash=package.content_hash,
         ok=ok,
         issues=issues,
+        structural=structural,
+        behavioral=behavioral,
     )
 
 
@@ -602,9 +694,47 @@ def _static_scan_package(package: StrategyPackage) -> list[StrategyValidationIss
             )
             continue
         out.extend(_walk_ast(tree, where=rel))
+        if rel == package.manifest.entrypoint_module:
+            from .execution_contract import IncompleteStrategyError, require_implemented_candidate
+            try:
+                require_implemented_candidate(package)
+            except IncompleteStrategyError as exc:
+                out.append(StrategyValidationIssue('blocker', 'strategy_implementation_incomplete',
+                    str(exc), rel))
+        if not rel.startswith(("tests/", "fixtures/")):
+            out.extend(_protocol_execution_issues(tree, markets=package.manifest.markets, where=rel))
         if is_agent_task and not rel.startswith("tests/"):
             out.extend(_agent_task_contract_issues(tree, where=rel))
+            if rel == package.manifest.entrypoint_module:
+                out.extend(_agent_task_return_issues(
+                    tree, where=rel, entrypoint=package.manifest.entrypoint_func))
     return out
+
+
+def _protocol_execution_issues(tree: ast.AST, *, markets: Iterable[str], where: str) -> list[StrategyValidationIssue]:
+    """Reject spot orders on declared protocol resources without executing code."""
+    has_aave = any(is_aave_market(market) for market in markets)
+    issues = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Call):
+            continue
+        name = _flatten_attr(node.func) or ""
+        if not name.endswith((".trading.open_position", ".trading.close_position")):
+            continue
+        market = next((kw.value for kw in node.keywords if kw.arg == "market"), None)
+        if isinstance(market, ast.Constant) and isinstance(market.value, str):
+            mismatch = is_aave_market(market.value)
+        else:
+            mismatch = has_aave
+        if mismatch:
+            issues.append(StrategyValidationIssue(
+                severity="blocker", code="execution_family_mismatch", where=where,
+                message=(f"{name} at line {node.lineno} cannot supply/withdraw an Aave resource. "
+                         "Use ctx.financial lend_supply/lend_withdraw via "
+                         "strategy_author/templates/aave_supply.py.j2 copied into this candidate. "
+                         "For a mixed strategy, bind spot calls to an explicit non-protocol market."),
+            ))
+    return issues
 
 
 def _skip_generated_runtime_source(rel: str) -> bool:
@@ -849,6 +979,106 @@ def _agent_task_contract_issues(
                     where=where,
                 )
             )
+    return issues
+
+
+def _agent_task_return_issues(
+    tree: ast.Module, *, where: str, entrypoint: str,
+) -> list[StrategyValidationIssue]:
+    """Check known returns at the executor boundary, not arbitrary helper values.
+
+    Deliberately limited to local functions and single, unconditional bindings.
+    Unknown/dynamic returns still require isolated behavioral tests; a global
+    name-assignment map would confuse scopes and branch-dependent reassignments.
+    """
+    functions = {node.name: node for node in tree.body if isinstance(node, ast.FunctionDef)}
+    pending = ['build_agent_task' if 'build_agent_task' in functions else entrypoint]
+    visited: set[str] = set()
+    issues: list[StrategyValidationIssue] = []
+
+    def local_nodes(node):
+        yield node
+        for child in ast.iter_child_nodes(node):
+            if not isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef, ast.Lambda)):
+                yield from local_nodes(child)
+
+    while pending:
+        name = pending.pop()
+        if name in visited or name not in functions:
+            continue
+        visited.add(name)
+        fn = functions[name]
+        nodes = [node for statement in fn.body for node in local_nodes(statement)
+                 if not isinstance(statement, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef))]
+        stores: dict[str, int] = {}
+        for node in nodes:
+            if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Store):
+                stores[node.id] = stores.get(node.id, 0) + 1
+        bindings = {}
+        for statement in fn.body:
+            if isinstance(statement, ast.Assign) and len(statement.targets) == 1:
+                target, value = statement.targets[0], statement.value
+            elif isinstance(statement, ast.AnnAssign):
+                target, value = statement.target, statement.value
+            else:
+                continue
+            if isinstance(target, ast.Name) and stores.get(target.id) == 1 and value is not None:
+                bindings[target.id] = value
+
+        def resolve(node):
+            seen = set()
+            while isinstance(node, ast.Name) and node.id in bindings and node.id not in seen:
+                value = bindings[node.id]
+                if value.lineno >= node.lineno:
+                    break
+                seen.add(node.id)
+                node = value
+            return node
+
+        def contains_task(node):
+            node = resolve(node)
+            if isinstance(node, ast.Call):
+                return _flatten_attr(node.func) in {
+                    'StrategyAgentTask', 'StrategyAgentTask.dispatch',
+                    'StrategyAgentTask.skip', 'StrategyAgentTask.error', 'StrategyAgentTask.stop'}
+            return any(contains_task(child) for child in ast.iter_child_nodes(node))
+
+        context_names = {'ctx', 'context'}
+        if fn.args.args:
+            context_names.add(fn.args.args[0].arg)
+        for node in nodes:
+            if not isinstance(node, ast.Return):
+                continue
+            value = resolve(node.value)
+            result_call = False
+            incompatible = False
+            if isinstance(value, ast.Call):
+                owner = resolve(value.func.value) if isinstance(value.func, ast.Attribute) else None
+                result_call = (
+                    _flatten_attr(value.func) == 'StrategyResult'
+                    or _flatten_attr(owner) in {'StrategyResult', *(f'{ctx}.result' for ctx in context_names)}
+                )
+                incompatible = result_call
+                if isinstance(value.func, ast.Name) and value.func.id not in stores:
+                    pending.append(value.func.id)
+            elif isinstance(value, ast.Dict) and all(key is not None for key in value.keys):
+                status = next((v for k, v in reversed(list(zip(value.keys, value.values)))
+                               if isinstance(k, ast.Constant) and k.value == 'status'), None)
+                incompatible = (isinstance(status, ast.Constant)
+                    and str(status.value or 'dispatch').strip().lower() not in {'dispatch', 'skip', 'error'})
+            if not incompatible:
+                continue
+            nested = result_call and any(contains_task(arg) for arg in [
+                *value.args, *(kw.value for kw in value.keywords)])
+            issues.append(StrategyValidationIssue(
+                'blocker', 'agent_task_nested_result' if nested else 'agent_task_incompatible_return',
+                f'Agent entrypoint return in {name} (line {node.lineno}) is incompatible: '
+                + ('StrategyResult metadata does not dispatch a nested StrategyAgentTask. ' if nested else
+                   'the Agent executor does not accept StrategyResult or trading status envelopes. ')
+                + 'Return StrategyAgentTask.dispatch/skip/error directly. For synchronous confirmation '
+                  'followed by script-owned trading, use execution_mode: script with agent_task.enabled: false.',
+                where,
+            ))
     return issues
 
 

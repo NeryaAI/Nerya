@@ -1,7 +1,7 @@
 "use client";
 
 import { ApiError, callApi } from "./clientApi";
-import type { AssistantMessage, ChatAttachment, ChatRunSettings, ChatThread, LiveEvent, TurnPayload } from "./chat";
+import type { AssistantMessage, ChatAttachment, ChatRunSettings, ChatThread, LiveEvent, TaskDelivery, TurnPayload } from "./chat";
 import { DEFAULT_CHAT_RUN_SETTINGS, uuid } from "./chat";
 import { mergeStreamEvents } from "./streamEvents";
 import { getWorkspaceIdentity, subscribeWorkspaceIdentity, workspaceGeneration, workspaceStorageKey } from "./workspaceIdentity";
@@ -17,6 +17,9 @@ export type ConversationCommand = {
   queue_editable?: boolean;
   show_user?: boolean; has_result?: boolean; result?: TurnPayload | null;
   error?: { code?: string; status_code?: number; request_id?: string; retrying?: boolean } | null;
+  delivery?: TaskDelivery | null;
+  /** Observer-owned durable replay, retained when transcript hydration finishes later. */
+  hydrated_events?: LiveEvent[];
 };
 export type QueueEditDraft = { text: string; attachments: ChatAttachment[]; settings: ChatRunSettings; revision: number };
 export function queueEditDraft(command: ConversationCommand): QueueEditDraft {
@@ -55,6 +58,10 @@ const LEGACY_PREFIX = "nerya.chat.pending-command.v2:";
 const PREFIX = "nerya.chat.pending-command.v3:";
 const memory = new Map<string, PendingCommand>();
 const volatile = new Set<string>();
+// In-memory only: after reload, a durable pending row must remain recoverable.
+const submitting = new Set<string>();
+const submissionKey = (item: PendingCommand, generation = workspaceGeneration()) => JSON.stringify([item.workspace_id, generation, item.command_id]);
+export const commandSubmitting = (item: PendingCommand) => submitting.has(submissionKey(item));
 export const runningCommand = (command: ConversationCommand) => command.kind !== "guide" && ["running", "stopping"].includes(command.state);
 export const commandSettled = (command: ConversationCommand) => !["queued", "running", "stopping", "delivering", "delivered"].includes(command.state);
 
@@ -165,6 +172,8 @@ export async function submitCommand(sid: string, kind: CommandKind, body: Record
   pendingCommands();
   if (!existing && memory.size >= 32) throw new CommandClientError("pending_limit");
   const pending = existing || { workspace_id: workspace, command_id: uuid(), session_id: sid, command_type: kind, request: body, created_at: Date.now() };
+  const key = submissionKey(pending, generation);
+  submitting.add(key);
   memory.set(pending.command_id, pending);
   persistPending(pending.command_id,pending,workspace);
   const started = typeof performance !== "undefined" ? performance.now() : Date.now();
@@ -184,6 +193,9 @@ export async function submitCommand(sid: string, kind: CommandKind, body: Record
       settlePending(pending.command_id,workspace); throw error;
     }
     throw new CommandClientError("delivery_unconfirmed", true);
+  } finally {
+    submitting.delete(key);
+    if (typeof window !== "undefined") window.dispatchEvent(new Event(COMMAND_PENDING_EVENT));
   }
 }
 
@@ -203,28 +215,70 @@ export function projectCommand(thread: ChatThread, command: ConversationCommand,
   if (command.kind === "send" && command.show_user !== false && !messages.some(m => m.role === "user" && (m.command_id === command.command_id || m.backend_message_id === `${tid}:user`))) {
     messages.push({ id: command.command_id+":user", role: "user", ts: command.created_at*1000,
       text: command.input, attachments: command.attachments, command_id: command.command_id,
+      task_message: command.context.task_message as import("./chat").UserMessage["task_message"],
       backend_message_id: `${tid}:user`, delivery_state: "received" });
   }
   const index = messages.findIndex(m => m.role === "assistant" && (m.command_id === command.command_id || m.backend_message_id === `${tid}:assistant`));
   const old = index >= 0 ? messages[index] as AssistantMessage : undefined;
+  // An older GET/ACK must not undo a terminal projection already displayed.
+  if (old?.command_id === command.command_id && (old.command_revision || 0) > command.revision) return thread;
   const oldCreated = old?.command_created_at ?? Number(old?.turn?.context_snapshot?.captured_at || 0);
   // A resumed turn keeps turn_id. Its older command snapshot must never put
   // the turn back into the previous failure/stop state after reconnecting.
   if (old?.command_id && old.command_id !== command.command_id && oldCreated > command.created_at) return thread;
   const live = runningCommand(command);
-  const events = mergeStreamEvents(old?.live_events || [],fresh);
-  const turn = {...(command.result || old?.turn || { turn_id: tid })};
+  const events = mergeStreamEvents(old?.live_events || [], command.hydrated_events || [], fresh);
+  // Terminal replay can arrive before the result GET/transcript snapshot. Only
+  // explicit producer terminal fields may fill that gap, never narrative text.
+  const terminalEvents = commandSettled(command) ? mergeStreamEvents(
+    !old?.command_id || old.command_id === command.command_id ? old?.live_events || [] : [],
+    command.hydrated_events || [], fresh,
+  ).filter(event => event.session_id === command.session_id && event.turn_id === tid &&
+    (!event.command_id || event.command_id === command.command_id)) : [];
+  const outcome = terminalEvents.findLast(event => event.kind === "command.outcome" && event.command_id === command.command_id);
+  const result = command.result || (outcome?.result && typeof outcome.result === "object" ? outcome.result as TurnPayload : undefined);
+  const turn = {...(result || old?.turn || { turn_id: tid })};
+  if (!result && !turn.reply_text && !turn.final_text && !turn.decision?.text) {
+    const complete = terminalEvents.findLast(event => event.kind === "turn.complete" && typeof event.final_text === "string");
+    if (complete) { turn.final_text = complete.final_text as string; turn.stopped_reason = complete.stop_reason as string | undefined; }
+  }
+  // Command snapshots own delivery. Older APIs may omit it, so retain matching
+  // evidence across result replacement, but never carry it into a resumed command.
+  const delivery = command.delivery !== undefined ? command.delivery
+    : result?.delivery !== undefined ? result.delivery
+    : old?.turn?.delivery;
   if(command.state === "succeeded" || live) delete turn.error;
   const error = (["failed","unconfirmed"].includes(command.state) || command.state === "blocked" && Boolean(command.error))
     ? JSON.stringify(command.error || { code: command.state === "unconfirmed" ? "execution_unconfirmed" : "turn_failed", retrying: false }) : undefined;
   const next: AssistantMessage = { ...old, id: old?.id || command.command_id+":assistant", role: "assistant",
     ts: old?.ts || command.created_at*1000, backend_message_id: `${tid}:assistant`,
     command_id: command.command_id, command_created_at:command.created_at, command_revision: command.revision, execution_status: command.state,
-    loading: live, error, turn: { ...turn, command_id: command.command_id, context_snapshot: command.context },
+    loading: live, error,
     started_ms: old?.started_ms || (live ? Date.now() : undefined),
-    elapsed_ms: command.result?.execution_elapsed_ms ?? old?.elapsed_ms,
-    live_events: events, live_cursor: fresh.at(-1)?.seq ?? old?.live_cursor };
+    elapsed_ms: result?.execution_elapsed_ms ?? old?.elapsed_ms,
+    live_events: events, live_cursor: fresh.at(-1)?.seq ?? old?.live_cursor,
+    turn: { ...turn, command_id: command.command_id, execution_status: command.state, context_snapshot: command.context,
+      delivery: delivery?.command_id === command.command_id ? delivery : null } };
   if (index >= 0) messages[index] = next; else messages.push(next);
-  return { ...thread, messages, imported: false, message_count: messages.length,
+  // A snapshot may include an older command outside the loaded transcript page.
+  // Insert its messages chronologically so it cannot become the header's latest turn.
+  messages.sort((a, b) => a.ts - b.ts);
+  // Hydration can timestamp a prompt after its command's assistant. Emit the
+  // matching prompt first without changing timestamps used by unread anchors.
+  // Reapply this to every linked turn so later snapshots cannot invert it again.
+  const users = messages.filter(message => message.role === "user");
+  const usersByCommand = new Map(users.filter(message => message.command_id).map(message => [message.command_id, message]));
+  const usersByBackend = new Map(users.filter(message => message.backend_message_id).map(message => [message.backend_message_id, message]));
+  const ordered: ChatThread["messages"] = [];
+  const emitted = new Set<ChatThread["messages"][number]>();
+  for (const message of messages) {
+    if (message.role === "assistant") {
+      const user = usersByCommand.get(message.command_id) || (message.backend_message_id?.endsWith(":assistant")
+        ? usersByBackend.get(message.backend_message_id.slice(0, -10) + ":user") : undefined);
+      if (user && !emitted.has(user)) { ordered.push(user); emitted.add(user); }
+    }
+    if (!emitted.has(message)) { ordered.push(message); emitted.add(message); }
+  }
+  return { ...thread, messages: ordered, imported: false, message_count: ordered.length,
     updated_ts: Math.max(thread.updated_ts || 0, command.updated_at*1000) };
 }

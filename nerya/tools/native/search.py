@@ -273,7 +273,9 @@ def _grep_python(
     glob: Optional[str],
     case_insensitive: bool,
     limit: int,
+    timeout_s: float = 15.0,
 ) -> tuple[list[dict[str, Any]], bool]:
+    deadline = time.monotonic() + timeout_s
     flags = re.IGNORECASE if case_insensitive else 0
     rx = re.compile(pattern, flags)
     out: list[dict[str, Any]] = []
@@ -284,6 +286,8 @@ def _grep_python(
     else:
         iterator = base.rglob("*")
     for path in iterator:
+        if time.monotonic() >= deadline:
+            raise TimeoutError('python search timed out')
         if len(out) >= limit:
             truncated = True
             break
@@ -297,15 +301,35 @@ def _grep_python(
         if glob and not fnmatch.fnmatch(path.name, glob):
             continue
         try:
-            text = path.read_text(encoding="utf-8", errors="replace")
+            with path.open('rb') as stream:
+                if b'\0' in stream.read(8192):
+                    continue
+                stream.seek(0)
+                line_number = 0
+                while True:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError('python search timed out')
+                    raw = stream.readline(65537)
+                    if not raw:
+                        break
+                    if b'\0' in raw:
+                        out = [match for match in out if match['path'] != rel]
+                        break
+                    if len(raw) > 65536:
+                        # Bound memory and regex input for minified/generated files.
+                        truncated = True
+                        break
+                    line_number += 1
+                    line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
+                    if rx.search(line):
+                        out.append({"path": rel, "line": line_number, "match": line[:400]})
+                        if len(out) >= limit:
+                            truncated = True
+                            break
+        except TimeoutError:
+            raise
         except OSError:
             continue
-        for i, line in enumerate(text.splitlines(), start=1):
-            if rx.search(line):
-                out.append({"path": rel, "line": i, "match": line[:400]})
-                if len(out) >= limit:
-                    truncated = True
-                    break
     return out, truncated
 
 
@@ -363,7 +387,13 @@ def grep_handler(call: ToolCall, *, root: Path) -> ToolResult:
                 glob=str(glob) if glob else None,
                 case_insensitive=case_insensitive,
                 limit=limit,
+                timeout_s=timeout_s,
             )
+    except TimeoutError:
+        return ToolResult.from_error(
+            tool_use_id=call.id, name=call.name,
+            error=ToolError(kind=ToolErrorKind.TIMEOUT, message=f"search exceeded {timeout_s}s"),
+        )
     except re.error as exc:
         return schema_validation_result(call, f"invalid regex: {exc}")
     elapsed_ms = int((time.monotonic() - started) * 1000)

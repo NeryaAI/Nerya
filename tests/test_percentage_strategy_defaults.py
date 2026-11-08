@@ -4,6 +4,8 @@ from __future__ import annotations
 from pathlib import Path
 import re
 from types import SimpleNamespace
+from types import ModuleType
+import sys
 
 import pytest
 
@@ -106,10 +108,15 @@ def test_ranked_winner_only_team_does_not_leave_two_slots_unused(tmp_path):
 
 
 @pytest.mark.parametrize("kind,subagent", [("scalping", False), ("trend", False), ("trend", True), ("news", True)])
-def test_generated_entry_branches_forward_configured_percentage(tmp_path, kind, subagent):
+def test_generated_entry_branches_forward_configured_percentage(tmp_path, monkeypatch, kind, subagent):
     files, manifest = generate(tmp_path, strategy_class=kind,
         subagents=("analyst",) if subagent else ())
     scope = {}
+    if kind == "trend" and subagent:
+        for name in ("strategy_execution", "ema_cross"):
+            module = ModuleType(name)
+            exec(compile(files[name + ".py"], name + ".py", "exec"), module.__dict__)
+            monkeypatch.setitem(sys.modules, name, module)
     exec(compile(files["main.py"], "generated_fixture.py", "exec"), scope)
     # Stub indicator/model verdicts, not money/SDK semantics. No model/network.
     scope["_rsi"] = lambda *_: 55
@@ -138,6 +145,19 @@ def test_generated_entry_branches_forward_configured_percentage(tmp_path, kind, 
     rows = ctx.market.candles()
     rows[-1]["volume"] = 2000
     ctx.market.candles = lambda *a, **k: rows
+    if kind == "trend" and subagent:
+        from nerya.strategies import ResultBuilder
+        ctx.config.timeframe = manifest['timeframe']
+        ctx.clock.now_ms = lambda: (rows[-1]['ts'] + 3600) * 1000
+        ctx.result = ResultBuilder()
+        ctx.subagents.run = lambda *a, **k: {
+            'ok': True, 'output': {'decision': 'ENTRY', 'confidence': .8}}
+        result = scope['run'](ctx)
+        assert result.status.value == 'submitted'
+        assert len(records) == 1
+        assert records[0]['sizing'] is manifest['params']['sizing']
+        assert records[0]['sizing']['pct_nav'] == .9
+        return
     assert scope["run"](ctx)["status"] == "submitted"
     assert len(records) == 1
     assert records[0]["sizing"] is manifest["params"]["sizing"]

@@ -74,8 +74,9 @@ tuning:
 
 Use actual helper-file paths in allowed_targets when needed. Preserve account,
 funding, risk, mode and activation constraints; allowed_targets does not authorize
-relaxing them. For observers choose execution_quality and behavior validation, not
-profitability tests. Do not add unsupported manifest fields for the plan.
+relaxing them. For observers and LP research use `objectives: [execution_quality]`;
+put behavior validation in candidate tests and the review plan, not an objective
+named `behavior_validation`. Do not add unsupported manifest fields for the plan.
 
 ## Package-local plan template
 

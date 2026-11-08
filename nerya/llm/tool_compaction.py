@@ -25,6 +25,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Callable, Optional
+from urllib.parse import urlsplit, urlunsplit
 
 
 # Fields we will never drop from a compacted summary. Order is significant
@@ -60,6 +61,16 @@ _SENSITIVE_JSON_KEY_RE = re.compile(
     r"(api[_-]?key|authorization|bearer|cookie|credential|password|secret|token)",
     re.I,
 )
+_PUBLIC_TOKEN_FIELDS = frozenset({
+    'token0', 'token1', 'token_identities', 'token_address', 'token_symbol',
+    'token_decimals', 'token_identity_status', 'underlying_tokens',
+})
+
+
+def _sensitive_json_key(key: str) -> bool:
+    return key.lower() not in _PUBLIC_TOKEN_FIELDS and bool(_SENSITIVE_JSON_KEY_RE.search(key))
+
+
 _COMPACTION_INTERNAL_KEYS = frozenset({
     "raw",
     "traceback",
@@ -211,7 +222,7 @@ def compact_json_evidence_preview(value: Any) -> Any:
             kept: dict[str, Any] = {}
             for key, item in list(node.items())[:_JSON_EVIDENCE_KEY_LIMIT]:
                 key_text = str(key)
-                if _SENSITIVE_JSON_KEY_RE.search(key_text):
+                if _sensitive_json_key(key_text):
                     kept[key_text] = "[redacted]"
                     continue
                 kept[key_text] = compact(item, depth + 1)
@@ -373,7 +384,7 @@ def _compact_top_level_fields(output: Any) -> dict[str, Any]:
         normalized = key.lower().replace("-", "_")
         if (
             normalized in _COMPACTION_INTERNAL_KEYS
-            or _SENSITIVE_JSON_KEY_RE.search(key)
+            or _sensitive_json_key(key)
             or value in (None, "", [], {})
         ):
             continue
@@ -824,12 +835,47 @@ def _compact_execution_evidence(value: Any) -> Any:
     # Scalar counters must not compete with an arbitrary reason_counts map for
     # a shared leaf budget. Losing these fields made zero orders look unknown.
     kept = {str(k): _compact_top_level_value(v) for k, v in list(value.items())[:64]
-            if not _SENSITIVE_JSON_KEY_RE.search(str(k))
+            if not _sensitive_json_key(str(k))
             and (isinstance(v, (str, int, float, bool)) or v is None)}
     for key in ("status_counts", "rejection_reasons", "action_counts", "reason_counts"):
         if key in value:
             kept[key] = _compact_top_level_value(value[key])
     return kept
+
+
+def _compact_decision_replay(value: Any) -> dict[str, Any] | None:
+    """Keep the bounded retrospective proof, without tape or producer bodies."""
+    if not isinstance(value, dict):
+        return None
+    kept: dict[str, Any] = {}
+    for key in ("label", "tape_sha256"):
+        item = value.get(key)
+        if isinstance(item, str):
+            kept[key] = _compact_scalar(item, limit=256)
+    for key in ("decision_receipts_verified", "model_decisions_verified", "performance_evidence"):
+        item = value.get(key)
+        if type(item) is bool:
+            kept[key] = item
+    for key in ("decision_count", "replay_passes"):
+        item = value.get(key)
+        if type(item) is int and 0 <= item <= 1_000_000:
+            kept[key] = item
+    binding = value.get("binding")
+    if isinstance(binding, dict):
+        binding_kept = {
+            key: binding[key]
+            for key in (
+                "source_revision", "config_hash", "data_hash",
+                "role_prompt_hash", "model_settings_hash",
+            )
+            if isinstance(binding.get(key), str)
+        }
+        if binding_kept:
+            kept["binding"] = {
+                key: _compact_scalar(item, limit=256)
+                for key, item in binding_kept.items()
+            }
+    return kept or None
 
 
 def _reduce_backtest(name: str, output: Any) -> Optional[CompactedResult]:
@@ -846,13 +892,18 @@ def _reduce_backtest(name: str, output: Any) -> Optional[CompactedResult]:
     error_count = len(errors) if isinstance(errors, (dict, list, tuple)) else int(bool(errors))
     summary = f"backtest: metrics={metric_keys}, errors={error_count}"
     kept = _compact_top_level_fields(output)
+    # decision_replay must enter only through its bounded proof projection.
+    kept.pop("decision_replay", None)
     for key in ("result_type", "backtest_status", "strategy_id", "proposal_id", "backtest_ts", "title", "engine",
                 "evaluation_mode", "execution_mode", "performance_evidence", "replay", "provenance", "bias_checks", "research_checks",
                 "metrics_display", "start_utc", "end_utc", "coverage_message", "flags", "next_required_action", "equity_preview",
                 "requested_window_days", "requested_window_complete", "requested_start_utc", "requested_end_utc", "primary_timeframe", "data_manifest",
-                "run_receipt", "failure_path", "phase"):
+                "run_receipt", "failure_path", "phase", "gaps", "modeled_coverage", "observation_coverage"):
         if key in output:
             kept[key] = _compact_top_level_value(output[key])
+    decision_replay = _compact_decision_replay(output.get("decision_replay"))
+    if decision_replay is not None:
+        kept["decision_replay"] = decision_replay
     preview = output.get("equity_preview")
     if "replay" in output:
         kept["replay"] = _compact_execution_evidence(output["replay"])
@@ -1047,7 +1098,7 @@ def _reduce_connector_list(name: str, output: Any) -> Optional[CompactedResult]:
 def _compact_data_api_action_row(row: dict[str, Any]) -> dict[str, Any]:
     return {
         key: row.get(key)
-        for key in ("provider", "action", "title", "output_kind")
+        for key in ("provider", "action", "title", "output_kind", "replay_input")
         if row.get(key) not in (None, "", [], {})
     }
 
@@ -1067,9 +1118,193 @@ def _data_api_next_required_action_name(value: Any) -> str:
     return ""
 
 
+_TABLE_ROWS_MAX_BYTES = 16_384
+_TABLE_METADATA_MAX_BYTES = 8_192
+_TABLE_ENVELOPE_KEYS = (
+    'provider', 'mode', 'mock', 'pool', 'pool_identity_scope',
+    'token_identities', 'token_identity_status', 'row_contract',
+    'sources', 'source_timestamp', 'freshness', 'observation_kind',
+    'units', 'unit', 'apy_unit', 'apy_fields', 'rate_semantics', 'return_semantics',
+    'index_semantics', 'timestamp_semantics', 'uint_encoding', 'canonicality',
+    'base_supply_rate_percent_encoding', 'point_in_time_ready', 'replay_input',
+    'filters', 'requested_window', 'source_observed_range',
+    'matched_row_count', 'returned_row_count', 'provider_limit', 'provider_truncated',
+    'rows_sha256', 'rows_hash_scope', 'returned_rows_sha256', 'returned_rows_hash_scope',
+    'pool_count', 'duplicate_timestamps_removed', 'coverage',
+)
+
+
+def _compact_table_envelope(value: Any) -> tuple[dict[str, Any], bool]:
+    """Retain the producer's evidence contract without arbitrary response bodies."""
+    if not isinstance(value, dict):
+        return {}, False
+    truncated = False
+    nodes_left = 512
+
+    def bounded(node: Any, depth: int = 0) -> Any:
+        nonlocal truncated, nodes_left
+        nodes_left -= 1
+        if nodes_left < 0:
+            truncated = True
+            return '[omitted: metadata node budget]'
+        if isinstance(node, (str, int, float, bool)) or node is None:
+            if _bytes_of(node) <= 2048:
+                return node
+            truncated = True
+            return '[omitted: metadata byte budget]'
+        if depth >= 5:
+            truncated = True
+            return '[omitted: metadata depth budget]'
+        if isinstance(node, dict):
+            result = {}
+            for key, item in node.items():
+                public_identity = key in ('underlying_tokens', 'token', 'token_address')
+                if (key in _COMPACTION_INTERNAL_KEYS or key in ('raw_body', 'provider_body')
+                        or (_sensitive_json_key(str(key)) and not public_identity)):
+                    truncated = True
+                    continue
+                if len(result) >= 32 or len(str(key)) > 128:
+                    truncated = True
+                    break
+                result[key] = bounded(item, depth + 1)
+            return result
+        if isinstance(node, list):
+            truncated |= len(node) > 32
+            return [bounded(item, depth + 1) for item in node[:32]]
+        truncated = True
+        return '[omitted: unsupported metadata]'
+
+    kept = {}
+    # Scalar hashes, units and scopes must survive bulky coverage/source lists.
+    for key in sorted(_TABLE_ENVELOPE_KEYS, key=lambda k: isinstance(value.get(k), (dict, list))):
+        if key not in value:
+            continue
+        item = bounded(value[key])
+        if _bytes_of({**kept, key: item}) <= _TABLE_METADATA_MAX_BYTES:
+            kept[key] = item
+        else:
+            truncated = True
+    return kept, truncated
+
+
+_POOL_DISCOVERY_SCALARS = (
+    'provider', 'action', 'chain', 'chain_id', 'pool_identity_scope',
+    'candidate_count', 'fee_tier_policy', 'historical_data_verified',
+    'financial_execution_allowed', 'rows_sha256',
+)
+
+
+def _compact_pool_discovery_envelope(value: Any) -> tuple[dict[str, Any], bool] | None:
+    """Keep the bounded producer-owned identity proof for current pool discovery."""
+    if not isinstance(value, dict) or value.get('pool_identity_scope') != 'current_only':
+        return None
+    kept = {}
+    for key in _POOL_DISCOVERY_SCALARS:
+        item = value.get(key)
+        if key in {'historical_data_verified', 'financial_execution_allowed'}:
+            if type(item) is bool:
+                kept[key] = item
+        elif key in {'chain_id', 'candidate_count'}:
+            if type(item) is int and 0 <= item <= 1_000_000:
+                kept[key] = item
+        elif isinstance(item, str) and len(item) <= 512:
+            kept[key] = item
+    request_args = value.get('request_args')
+    if isinstance(request_args, dict):
+        args = {}
+        for key in ('base', 'quote', 'rpc_provider'):
+            item = request_args.get(key)
+            if isinstance(item, str) and len(item) <= 128:
+                args[key] = item
+        if args:
+            kept['request_args'] = args
+    block = value.get('block')
+    if isinstance(block, dict):
+        block_kept = {}
+        if type(block.get('number')) is int and 0 <= block['number'] <= 1_000_000_000:
+            block_kept['number'] = block['number']
+        if isinstance(block.get('hash'), str) and len(block['hash']) <= 128:
+            block_kept['hash'] = block['hash']
+        if type(block.get('timestamp')) is int and 0 <= block['timestamp'] <= 4_000_000_000:
+            block_kept['timestamp'] = block['timestamp']
+        if block_kept:
+            kept['block'] = block_kept
+    tiers = value.get('fee_tiers_scanned')
+    if isinstance(tiers, list):
+        kept['fee_tiers_scanned'] = [tier for tier in tiers[:16] if type(tier) is int]
+    sources = value.get('sources')
+    if isinstance(sources, list):
+        source_rows = []
+        for source in sources[:8]:
+            if not isinstance(source, dict):
+                continue
+            row = {}
+            url = source.get('url')
+            if isinstance(url, str) and len(url) <= 512:
+                try:
+                    parsed = urlsplit(url)
+                    if parsed.scheme == 'https' and parsed.hostname and not parsed.username and not parsed.password:
+                        row['url'] = urlunsplit((parsed.scheme, parsed.netloc, parsed.path, '', ''))
+                except ValueError:
+                    pass
+            digest = source.get('sha256')
+            if isinstance(digest, str) and len(digest) <= 128:
+                row['sha256'] = digest
+            count = source.get('request_count')
+            if type(count) is int and 0 <= count <= 1_000_000:
+                row['request_count'] = count
+            if row:
+                source_rows.append(row)
+        if source_rows:
+            kept['sources'] = source_rows
+    if _bytes_of(kept) > _TABLE_METADATA_MAX_BYTES:
+        return {
+            key: kept[key] for key in ('provider', 'action', 'pool_identity_scope',
+                                       'candidate_count', 'historical_data_verified',
+                                       'financial_execution_allowed', 'rows_sha256')
+            if key in kept
+        }, True
+    required = {'pool_identity_scope', 'candidate_count', 'block', 'rows_sha256',
+                'historical_data_verified', 'financial_execution_allowed', 'chain_id'}
+    truncated = (not required <= kept.keys()
+        or set(kept.get('block', {})) != {'number', 'hash', 'timestamp'}
+        or not {'base', 'quote'} <= kept.get('request_args', {}).keys()
+        or not kept.get('fee_tiers_scanned') or not kept.get('sources')
+        or any(not {'url', 'sha256', 'request_count'} <= row.keys() for row in kept.get('sources', [])))
+    return kept, truncated
+
+
 def _reduce_data_api(name: str, output: Any) -> Optional[CompactedResult]:
     if "data_api" not in name or not isinstance(output, dict):
         return None
+    if output.get('scope') == 'current_task' and isinstance(output.get('snapshots'), list):
+        snapshots = []
+        for row in output['snapshots'][:8]:
+            if not isinstance(row, dict):
+                continue
+            identity, truncated = _compact_table_envelope(row.get('identity'))
+            snapshots.append({**{key: row[key] for key in (
+                'provider', 'action', 'producer_ref', 'row_count', 'args', 'coverage', 'requested_window'
+            ) if key in row}, 'identity': identity, 'metadata_truncated': truncated})
+        return CompactedResult(rule_id='data_api.snapshots',
+            summary=f"data_api saved inputs: {len(snapshots)} task-bound snapshots",
+            kept={'scope': 'current_task', 'count': output.get('count', len(snapshots)),
+                  'snapshots': snapshots}, original_bytes=_bytes_of(output))
+    if isinstance(output.get("input_schema"), (dict, bool)):
+        # Registry schemas describe callable inputs, not provider response data.
+        # Keep the whole schema: preview budgets can silently lose required
+        # fields, enum members, nested constraints or alternative input shapes.
+        # Only retain declared discovery metadata beside it, never raw bodies.
+        kept = _compact_data_api_action_row(output)
+        if output.get("description"):
+            kept["description"] = output["description"]
+        kept["input_schema"] = output["input_schema"]
+        return CompactedResult(
+            rule_id="data_api.schema",
+            summary=f"data_api {output.get('provider', '')}.{output.get('action', '')}: input schema",
+            kept=kept,
+            original_bytes=_bytes_of(output),
+        )
     if isinstance(output.get("actions"), list) and isinstance(output.get("providers"), list):
         actions = output.get("actions") or []
         next_action_name = _data_api_next_required_action_name(
@@ -1135,14 +1370,59 @@ def _reduce_data_api(name: str, output: Any) -> Optional[CompactedResult]:
         "action": action,
         "kind": kind,
     }
+    if isinstance(output.get('producer_ref'), str) and re.fullmatch(r'replay://[0-9a-f]{64}', output['producer_ref']):
+        kept['producer_ref'] = output['producer_ref']
     if kind == "table":
         rows = output.get("rows") if isinstance(output.get("rows"), list) else []
-        sample_limit = 20 if provider == "wallet" and action == "readiness" else 5
+        # Keep complete rows, including identity and numeric units. Field slicing
+        # can turn distinct instruments into indistinguishable candidates.
+        sample = []
+        sample_bytes = 2
+        for row in rows[:50]:
+            row_bytes = _bytes_of(row) + 2
+            if sample_bytes + row_bytes > _TABLE_ROWS_MAX_BYTES:
+                break
+            sample.append(row)
+            sample_bytes += row_bytes
+        envelope = _compact_pool_discovery_envelope(output.get('_envelope'))
+        if envelope is not None:
+            envelope, metadata_truncated = envelope
+        else:
+            envelope, metadata_truncated = _compact_table_envelope(output.get('_envelope'))
         kept.update({
             "row_count": output.get("row_count", len(rows)),
             "truncated": bool(output.get("truncated")),
-            "rows_sample": rows[:sample_limit],
+            "rows_sample": sample,
+            "sample_truncated": len(sample) < len(rows),
+            "sample_omitted_rows": len(rows) - len(sample),
+            "sample_scope": "returned_rows_before_tool_compaction",
+            "metadata_truncated": metadata_truncated,
         })
+        if envelope:
+            kept['_envelope'] = envelope
+        if isinstance(output.get('source_url'), str):
+            if _bytes_of(output['source_url']) <= 2048:
+                kept['source_url'] = output['source_url']
+            else:
+                kept['metadata_truncated'] = True
+        if kept['sample_truncated']:
+            guidance = {
+                'action': 'narrow_supported_filters',
+                'tool': 'data_api',
+                'arguments': {'op': 'schema', 'provider': provider, 'action': action},
+                'hint': (
+                    'This is an incomplete display; omitted rows are not ruled out. '
+                    'Inspect the schema once, then use supported exact identity filters '
+                    'or a narrower time window and an appropriate limit. Do not repeat '
+                    'the unchanged call; if narrowing is unsupported, report the evidence '
+                    'gap instead of selecting a candidate from this sample.'
+                ),
+            }
+            existing = output.get('next_required_action')
+            kept['next_required_action'] = (
+                {**existing, 'sample_guidance': guidance} if isinstance(existing, dict)
+                else guidance
+            )
         summary = (
             f"data_api {provider}.{action}: table "
             f"rows={kept['row_count']} sample={len(kept['rows_sample'])}"
@@ -1592,6 +1872,69 @@ def _reduce_team_run(name: str, output: Any) -> Optional[CompactedResult]:
     )
 
 
+def _compact_native_task_fields(value: Any) -> Any:
+    priority = (
+        "status", "ok", "error", "error_kind", "error_code", "failure",
+        "kind", "message", "retryable", "detail", "diagnostics", "reason",
+        "provider", "action", "http_status", "rpc_error_code", "rpc_method",
+        "failure_stage", "job_id", "next_status_call", "next_required_action",
+        "tool", "arguments", "receipt", "progress", "counts", "output", "payload",
+    )
+
+    def project(node: Any, depth: int = 0) -> Any:
+        if not isinstance(node, dict) or depth >= 4:
+            return node
+        keys = sorted(node, key=lambda key: (
+            0 if key in priority else 1 if str(key).endswith(("_count", "_counts", "_total")) else 2,
+            priority.index(key) if key in priority else 0,
+        ))
+        kept = {}
+        for key in keys:
+            if len(kept) >= (_TOP_LEVEL_FIELD_LIMIT if depth == 0 else _JSON_EVIDENCE_KEY_LIMIT):
+                break
+            if key in _COMPACTION_INTERNAL_KEYS or _sensitive_json_key(str(key)):
+                continue
+            item = node[key]
+            # Keep runtime scalars and known structured evidence, not arbitrary
+            # producer bodies. The existing preview supplies leaf/string budgets.
+            if key in priority or not isinstance(item, (dict, list, tuple)):
+                kept[key] = project(item, depth + 1)
+        return kept
+
+    projected = project(value)
+    return _compact_top_level_fields(projected) if isinstance(projected, dict) else _compact_top_level_value(projected)
+
+
+def _reduce_native_task(name: str, output: Any) -> Optional[CompactedResult]:
+    if name not in {"task_get", "task_output"} or not isinstance(output, dict):
+        return None
+    kept = {
+        key: _compact_top_level_value(output[key])
+        for key in (
+            "task_id", "name", "state", "status", "error", "error_kind",
+            "started_at", "finished_at", "parent_turn_id", "parent_session_id",
+            "strategy_id", "tokens", "usd", "wall_ms", "is_terminal",
+            "wait_status", "next_required_action", "job_id", "next_status_call",
+            "progress_count",
+        ) if key in output
+    }
+    for key in ("payload", "output"):
+        if key in output:
+            kept[key] = _compact_native_task_fields(output[key])
+    progress = output.get("progress")
+    if isinstance(progress, list):
+        kept.setdefault("progress_count", len(progress))
+        kept["progress"] = [
+            {key: _compact_native_task_fields(item[key]) for key in ("ts", "note", "payload") if key in item}
+            if isinstance(item, dict) else _compact_top_level_value(item)
+            for item in progress[-1:]
+        ]
+    return CompactedResult(
+        rule_id="task.native", summary=f"{name}: state={kept.get('state')}",
+        kept=kept, original_bytes=_bytes_of(output),
+    )
+
+
 def _reduce_data_source_status(name: str, output: Any) -> Optional[CompactedResult]:
     if name != "data_source_status" or not isinstance(output, dict):
         return None
@@ -1660,6 +2003,90 @@ def _reduce_data_source_status(name: str, output: Any) -> Optional[CompactedResu
         summary=summary_text,
         kept=kept,
         original_bytes=_bytes_of(output),
+    )
+
+
+def _reduce_strategy_validation(name: str, output: Any) -> Optional[CompactedResult]:
+    """Keep actionable failure tails instead of only the first stack frame."""
+    if name != "strategy_validate" or not isinstance(output, dict):
+        return None
+    from ..core.redaction import redact_text
+
+    def diagnostic(value: Any, limit: int = 1800) -> str:
+        text = redact_text(str(value or ""))
+        if len(text) <= limit:
+            return text
+        return text[:500] + "\n…[middle omitted; full output in raw reference]\n" + text[-(limit - 560):]
+
+    def issues(value: Any) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            return []
+        rows = [{**{k: _compact_top_level_value(row[k]) for k in ("code", "where", "nodeid", "severity", "phase") if k in row},
+                 "message": diagnostic(row.get("message") or row.get("longrepr") or row.get("error"))}
+                for row in value[:8] if isinstance(row, dict)]
+        if len(value) > 8:
+            rows.append({"_truncated_items": len(value) - 8})
+        return rows
+
+    kept = _compact_top_level_fields(output)
+    kept["blockers"] = issues(output.get("blockers"))
+    behavior = output.get("behavioral")
+    if isinstance(behavior, dict):
+        kept["behavioral"] = {k: _compact_top_level_value(behavior[k])
+                              for k in ("status", "summary", "exit_code", "reason", "runner", "source_revision") if k in behavior}
+        kept["behavioral"]["failures"] = issues(behavior.get("failures"))
+        if behavior.get("status") not in {"passed", "not_run"}:
+            kept["behavioral"]["stderr"] = diagnostic(behavior.get("stderr"))
+            kept["behavioral"]["diagnostic"] = diagnostic(behavior.get("diagnostic"))
+    return CompactedResult(rule_id="strategy.validation", summary=f"strategy validation: ok={output.get('ok')}",
+                           kept=kept, original_bytes=_bytes_of(output))
+
+
+def _reduce_workspace_ui_inspect(name: str, output: Any) -> Optional[CompactedResult]:
+    if name != "workspace_ui_inspect" or not isinstance(output, dict):
+        return None
+
+    def fields(row: dict, keys: tuple[str, ...]) -> dict:
+        return {key: _compact_top_level_value(row[key]) for key in keys if key in row}
+
+    def page(row: dict) -> dict:
+        kept = fields(row, ("id", "href", "title", "description", "icon", "nav"))
+        widgets = row.get("widgets", [])
+        kept["widgets"] = [fields(widget, (
+            "id", "kind", "title", "description", "span", "source", "config", "read_only", "text",
+        )) for widget in widgets[:16] if isinstance(widget, dict)]
+        if len(widgets) > 16:
+            kept["widgets_truncated"] = len(widgets) - 16
+        return kept
+
+    kept = _compact_top_level_fields({
+        key: value for key, value in output.items() if key not in {"manifest", "catalog"}
+    })
+    manifest = output.get("manifest")
+    if isinstance(manifest, dict):
+        # Reset the preview depth/budget at each widget, not at the manifest root.
+        layout = fields(manifest, ("version", "_revision"))
+        if isinstance(manifest.get("home"), dict):
+            layout["home"] = page(manifest["home"])
+        pages = manifest.get("pages", [])
+        layout["pages"] = [page(row) for row in pages[:8] if isinstance(row, dict)]
+        if len(pages) > 8:
+            layout["pages_truncated"] = len(pages) - 8
+        kept["manifest"] = layout
+    catalog = output.get("catalog")
+    if isinstance(catalog, dict):
+        kept["catalog"] = {}
+        for key in ("widget_kinds", "extensions"):
+            rows = catalog.get(key, [])
+            kept["catalog"][key] = [fields(row, (
+                "id", "skill_id", "kind", "title", "description", "slot", "version",
+                "source", "read_only", "config_example", "data_contract",
+            )) for row in rows[:16] if isinstance(row, dict)]
+            if len(rows) > 16:
+                kept["catalog"][key + "_truncated"] = len(rows) - 16
+    return CompactedResult(
+        rule_id="workspace_ui.inspect", summary="Workspace UI editable layout and widget catalog",
+        kept=kept, original_bytes=_bytes_of(output),
     )
 
 
@@ -1738,7 +2165,10 @@ _REDUCERS: tuple[Callable[[str, Any], Optional[CompactedResult]], ...] = (
     _reduce_data_api,
     _reduce_sdk_account,
     _reduce_team_run,
+    _reduce_native_task,
     _reduce_data_source_status,
+    _reduce_strategy_validation,
+    _reduce_workspace_ui_inspect,
     _reduce_generic_json,
     _reduce_generic_text,
 )
@@ -1797,10 +2227,34 @@ def compact_tool_result(
             continue
         if result is None:
             continue
-        # Always preserve audit fields by re-extracting from the original.
-        audit = _extract_audit(output)
+        # Discovery metadata excludes provider bodies; do not reintroduce their
+        # nested error/status fields through the audit pass.
+        audit_source = result.kept if result.rule_id in {"data_api.schema", "data_api.catalog"} else output
+        if result.rule_id == "task.native":
+            # Nested producer status/errors belong to their own envelope. Never
+            # lift stale progress or reintroduce unbounded raw audit values.
+            audit_source = {key: value for key, value in result.kept.items() if key in AUDIT_FIELDS}
+        audit = _extract_audit(audit_source)
         for k, v in audit.items():
             result.kept.setdefault(k, v)
+        if raw_ref and raw_ref.startswith("raw://"):
+            result.kept["raw_ref"] = raw_ref
+            if result.rule_id == "data_api.table" and result.kept.get("sample_truncated"):
+                next_action = result.kept["next_required_action"]
+                guidance = {
+                    "action": "recover_raw_output",
+                    "raw_ref": raw_ref,
+                    "hint": (
+                        "Recover the supplied raw_ref first to inspect the omitted returned rows. "
+                        "Only if raw recovery is unavailable or the upstream rows are insufficient, "
+                        "use the fallback to narrow supported filters."
+                    ),
+                    "fallback": next_action.get("sample_guidance", next_action),
+                }
+                if "sample_guidance" in next_action:
+                    next_action["sample_guidance"] = guidance
+                else:
+                    result.kept["next_required_action"] = guidance
         result.summary = _truncate(result.summary)
         result.compacted_bytes = _bytes_of(result.kept) + _bytes_of(result.summary)
         result.raw_ref = raw_ref

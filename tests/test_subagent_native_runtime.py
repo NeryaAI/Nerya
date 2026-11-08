@@ -18,7 +18,7 @@ from nerya.subagents.registry import SubAgentExecutionPolicy, SubAgentSpec
 from nerya.subagents.runtime import SubAgentRuntime, _native_final_output
 from nerya.tools import NativeToolExecutor, PermissionContext, PermissionEngine
 from nerya.tools.registry import ToolRegistry, make_native_descriptor
-from nerya.tools.types import PermissionScope, RiskLevel, ToolError, ToolErrorKind, ToolResult
+from nerya.tools.types import PermissionScope, RiskLevel, ToolCall, ToolError, ToolErrorKind, ToolResult
 
 pytestmark = pytest.mark.smoke
 
@@ -110,6 +110,20 @@ def test_real_tool_result_returns_to_model_with_usage(tmp_path):
     assert result["steps"][-1]["kind"] == "close"
 
 
+def test_default_collector_can_finish_after_seven_source_reads(tmp_path):
+    from nerya.subagents.registry import build_inline_spec
+
+    gateway = Gateway(*(call("web_fetch", str(i), url=f"https://example.com/{i}") for i in range(7)), final())
+    child = build_inline_spec(WorkspacePaths(tmp_path), name="web_researcher")
+    rt = runtime(tmp_path, gateway, [descriptor("web_fetch")])
+    result = run(rt, child, max_wall_seconds=42.0)
+    assert len(result["metrics"]["skill_calls"]) == 7
+    assert result["output"]["done"] is True
+    assert rt._max_iterations(child) == 0
+    assert rt._max_skill_calls(child) == 0
+    assert rt._max_wall_seconds(child) == 0
+
+
 @pytest.mark.parametrize("status", ["cancelled", "approval_pending", "max_iterations", "wall_time"])
 def test_host_stop_overrules_model_claiming_done(status):
     output = _native_final_output('{"done":true,"summary":"claimed completion"}', stop_reason=status)
@@ -157,6 +171,63 @@ def test_failures_count_against_tool_budget(tmp_path, same_batch):
     gateway = Gateway(*responses, final("explicit evidence gap"))
     run(runtime(tmp_path, gateway, [descriptor(handler=handler)]), spec(tmp_path, max_skill_calls=1))
     assert len(attempts) == 1
+
+
+@pytest.mark.parametrize("policy_block", [False, True])
+def test_incomplete_child_reason_survives_research_error_envelope(tmp_path, monkeypatch, policy_block):
+    from nerya.subagents.dispatcher import SubAgentDispatcher
+    from nerya.tools.native.agents import research_run_handler
+
+    captures = [{"saved_path": "state/research_data/capture.json", "url": "https://example.com/docs"}]
+    gaps = ["Field definitions were not captured."]
+    batch = MessagesResponse(
+        content=[call(call_id=str(i)).content[0] for i in range(2)],
+        stop_reason="tool_use",
+    )
+    gateway = Gateway(batch, final("Partial capture only.", done=False, captures=captures, gaps=gaps))
+    attempts = []
+    rt = runtime(tmp_path, gateway, [descriptor(handler=lambda c: attempts.append(c.id) or ToolResult.from_json(
+        tool_use_id=c.id, name=c.name, data={"body": "provider body must not become a failure reason"},
+    ))])
+    child = spec(tmp_path, max_skill_calls=1)
+    monkeypatch.setattr("nerya.subagents.dispatcher.LLMGateway", lambda config: gateway)
+    monkeypatch.setattr(SubAgentDispatcher, "_resolve_spec", lambda self, name, **kwargs: child)
+    original_run = SubAgentRuntime.run
+    def capture_run(self, sp, **kwargs):
+        if policy_block:
+            kwargs["completion_gate"] = lambda snapshot: GateDecision.blocked(
+                "required_artifact_missing", feedback="Private provider feedback must stay out of completion detail.",
+            )
+        raw = original_run(self, sp, **kwargs)
+        assert raw["completion_status"] == "blocked"
+        assert raw["completion"]["status"] == ("blocked" if policy_block else "complete")
+        return raw
+    monkeypatch.setattr(SubAgentRuntime, "run", capture_run)
+    rt.tool_registry.register(replace(descriptor("research_run"), delegates_to=child.name))
+
+    result = research_run_handler(
+        ToolCall(id="parent", name="research_run", arguments={"query": "Capture field definitions"}),
+        config=rt.config, skills=rt.skills, tool_registry=rt.tool_registry, executor=rt.tool_executor,
+    )
+
+    assert attempts == ["0"]
+    assert result.is_error
+    envelope = result.error.detail["envelope"]
+    assert envelope["ok"] is False
+    assert envelope["output"]["done"] is False
+    assert envelope["output"]["captures"] == captures
+    assert envelope["output"]["gaps"] == gaps
+    assert envelope["output"]["summary"] == "Partial capture only."
+    assert envelope["metrics"]["rejected_actions"][0]["recovery_hint"] == {
+        "action": "finish_from_existing_evidence",
+    }
+    reason = "required_artifact_missing" if policy_block else "max_tool_calls"
+    assert result.error.message == reason
+    assert envelope["error_kind"] == ("policy" if policy_block else "incomplete")
+    assert envelope["completion"] == {
+        "status": "blocked" if policy_block else "incomplete", "reason": reason,
+        **({} if policy_block else {"limit": 1, "used": 2}),
+    }
 
 
 def test_approval_after_evidence_stops_without_hidden_synthesis(tmp_path):

@@ -86,14 +86,9 @@ def session_view(config, sid, *, summary=False):
         session = con.execute("SELECT * FROM agent_sessions WHERE session_id=?", (sid,)).fetchone()
         commands = [dict(r) for r in con.execute("SELECT command_id,kind,state,revision,turn_id,created_at,updated_at FROM agent_commands WHERE session_id=? AND (state IN ('running','stopping','queued','unconfirmed') OR command_id IN (SELECT command_id FROM agent_commands WHERE session_id=? ORDER BY created_at DESC LIMIT 30)) ORDER BY created_at", (sid,sid))]
         rows = list(con.execute("SELECT message_id,turn_id,meta_json FROM agent_messages WHERE session_id=? AND role='assistant' AND deleted=0 ORDER BY ts DESC LIMIT ?", (sid,1 if summary else 60)))
-        turns = [record(record(r["meta_json"]).get("turn")) for r in reversed(rows)]
         interactions = []
         if con.execute("SELECT 1 FROM sqlite_master WHERE name='agent_interactions'").fetchone():
             interactions = [dict(r) for r in con.execute("SELECT * FROM agent_interactions WHERE session_id=? AND state IN ('pending','deferred','answered') ORDER BY created_at", (sid,))]
-            for item in interactions:
-                item["payload"] = record(item.pop("payload_json"))
-                for key in ("response_json", "response_id", "actor_id"):
-                    item.pop(key, None)
         queue = con.execute("SELECT paused,pause_reason,revision,lease_until,worker_owner FROM agent_command_queues WHERE session_id=?", (sid,)).fetchone()
         if queue and queue["worker_owner"] and queue["lease_until"] < time.time():
             for command in commands:
@@ -102,6 +97,11 @@ def session_view(config, sid, *, summary=False):
         con.commit()
     finally:
         con.close()
+    turns = [record(record(r["meta_json"]).get("turn")) for r in reversed(rows)]
+    for item in interactions:
+        item["payload"] = record(item.pop("payload_json"))
+        for key in ("response_json", "response_id", "actor_id"):
+            item.pop(key, None)
     if not session and not commands:
         from .session import SessionStore
         legacy = SessionStore(config.paths.root).load(sid)

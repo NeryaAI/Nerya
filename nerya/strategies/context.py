@@ -1474,6 +1474,16 @@ class StrategyTrading:
         api = TradingAPI(config=self.config, skills=SkillKernel.boot(self.config))
         return api.cancel_executor(executor_id=executor_id)
 
+    def execution_status(self, receipt: Any) -> dict[str, Any]:
+        """Observe a receipt in local records, scoped to this strategy/accounts.
+
+        Only terminal+filled confirms execution. Unknown requires verification;
+        this accessor never polls a venue, reconciles, or resubmits an order.
+        """
+        from .execution_status import execution_status
+
+        return execution_status(self.config, self.strategy_id, self.accounts, receipt)
+
     def portfolio_snapshot(self, *, account: Optional[str] = None) -> dict[str, Any]:
         from ..sdk.trading_api import TradingAPI
         from ..skills.kernel import SkillKernel
@@ -2408,6 +2418,16 @@ def build_strategy_context(
     run_deadline = StrategyRunDeadline()
     state = StrategyState(store=StateStore(state_path), run_deadline=run_deadline)
 
+    def _read_data_api(provider_id: str, action: str, args: dict[str, Any]) -> Any:
+        # Lazy public-only SDK producer: never give data actions workspace,
+        # wallet, account or vault configuration. No registry/IO at ctx build.
+        run_deadline.raise_if_exceeded()
+        from ..data_api import build_data_api_registry
+
+        value = build_data_api_registry().call_replay_input(provider_id, action, args)
+        run_deadline.raise_if_exceeded()
+        return value
+
     dedupe = StrategyDedupe(state=state)
 
     llm = StrategyLLMFacade(
@@ -2518,7 +2538,8 @@ def build_strategy_context(
         financial=financial,
         run_deadline=run_deadline,
         inputs=StrategyInputContext(sources=manifest.extras.get("data_sources", []),
-            market=market, news=news, markets=manifest.markets, run_id=rid),
+            market=market, news=news, markets=manifest.markets, run_id=rid,
+            clock=clock, _data_api_reader=_read_data_api),
     )
 
 

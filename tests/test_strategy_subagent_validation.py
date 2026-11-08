@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
+
+from nerya.strategies.agent_task import StrategyAgentTask
+from nerya.strategies.result import ResultBuilder
+from nerya.triggers.strategy_agent_task_executor import StrategyAgentTaskExecutor
 
 from nerya.strategies.validator import validate_proposal_files
 
@@ -717,6 +722,150 @@ agent_task:
     ]
     assert blockers
     assert "on_response" in blockers[0].message
+
+
+@pytest.mark.parametrize("body", [
+    "return ctx.result.ok(agent_task=StrategyAgentTask.dispatch(prompt='confirm'))",
+    "task = StrategyAgentTask.dispatch(prompt='confirm')\n    return ctx.result.ok(metadata={'agent_task': task})",
+    "task = StrategyAgentTask.dispatch(prompt='confirm')\n    result = ctx.result.ok(agent_task=task)\n    return result",
+    "return StrategyResult.ok(metadata={'task': StrategyAgentTask.skip('no signal')})",
+])
+def test_agent_task_nested_result_is_blocked(body):
+    files = _files_with_main(
+        "from nerya.strategies import StrategyAgentTask, StrategyResult\n"
+        f"def run(ctx):\n    {body}\n", agent_task=True)
+    result = validate_proposal_files(strategy_id='no_subagent_required', files=files, smoke_test=False)
+    assert any(issue.code == 'agent_task_nested_result' for issue in result.blockers), result.asdict()
+
+
+@pytest.mark.parametrize("expression", [
+    "ctx.result.ok(reason='exit submitted')",
+    "ctx.result.error(message='bad candles')",
+    "StrategyResult.hold(reason='no signal')",
+    "StrategyResult.from_trade_envelope({'status': 'filled'})",
+    "{'status': 'ok', 'agent_task': StrategyAgentTask.dispatch(prompt='confirm')}",
+])
+def test_agent_task_known_incompatible_return_is_blocked(expression):
+    files = _files_with_main(
+        "from nerya.strategies import StrategyAgentTask, StrategyResult\n"
+        f"def run(ctx):\n    if ctx.config.params.get('stop'):\n        return {expression}\n"
+        "    return StrategyAgentTask.dispatch(prompt='confirm')\n", agent_task=True)
+    result = validate_proposal_files(strategy_id='no_subagent_required', files=files, smoke_test=False)
+    assert any(issue.code == 'agent_task_incompatible_return' for issue in result.blockers), result.asdict()
+
+
+def test_agent_task_returned_helper_is_checked_without_crossing_scopes():
+    files = _files_with_main(
+        "def exit_result(context):\n    value = context.result.ok(reason='exit')\n    return value\n"
+        "def run(ctx):\n    return exit_result(ctx)\n", agent_task=True)
+    result = validate_proposal_files(strategy_id='no_subagent_required', files=files, smoke_test=False)
+    assert any(issue.code == 'agent_task_incompatible_return' for issue in result.blockers), result.asdict()
+
+
+@pytest.mark.parametrize('script', [
+    "def run(ctx):\n    return StrategyAgentTask.skip('no signal')\n",
+    "def run(ctx):\n    return {'status': 'skip', 'reason': 'no signal'}\n",
+    "def run(ctx):\n    return None\n",
+    "def run(ctx):\n    return external_builder(ctx)\n",
+    "def unused(ctx):\n    return ctx.result.ok()\ndef run(ctx):\n    return StrategyAgentTask.error('bad data')\n",
+    "def run(ctx):\n    return ctx.result.ok()\ndef build_agent_task(ctx):\n    return StrategyAgentTask.dispatch(prompt='confirm')\n",
+    "def helper(ctx):\n    value = ctx.result.ok()\n    return value\ndef run(ctx):\n    value = StrategyAgentTask.skip('no signal')\n    return value\n",
+    "def run(ctx):\n    value = ctx.result.ok()\n    value = StrategyAgentTask.skip('no signal')\n    return value\n",
+])
+def test_agent_task_return_check_keeps_valid_and_unknown_paths(script):
+    files = _files_with_main(
+        'from nerya.strategies import StrategyAgentTask\n' + script, agent_task=True)
+    files['tests/test_fixture.py'] = 'def fixture(ctx):\n    return ctx.result.ok()\n'
+    result = validate_proposal_files(strategy_id='no_subagent_required', files=files, smoke_test=False)
+    assert result.ok, result.asdict()
+
+
+def test_script_result_is_not_an_agent_task_contract_violation():
+    result = validate_proposal_files(strategy_id='no_subagent_required', smoke_test=False,
+        files=_files_with_main('def run(ctx):\n    return ctx.result.ok()\n'))
+    assert result.ok, result.asdict()
+
+
+def test_actual_agent_builder_rejects_nested_result_and_skips_without_inputs():
+    # Exercise the executor's real preparation seam; no kernel, model or I/O.
+    executor = StrategyAgentTaskExecutor(config=None)
+    package = SimpleNamespace(manifest=SimpleNamespace(
+        policy=SimpleNamespace(max_run_seconds=0), extras={}, subagents=()))
+    ctx = SimpleNamespace(cancel_token=None, result=ResultBuilder())
+    bad = executor._call_task_builder(package, lambda ctx: ctx.result.ok(
+        agent_task=StrategyAgentTask.dispatch(prompt='confirm')), ctx)
+    assert bad.status == 'error'
+    assert bad.reason == 'unsupported agent task return: StrategyResult'
+    # ctx intentionally has no input collector/model: skip must not access it.
+    stopped = executor._call_task_builder(package, lambda _: StrategyAgentTask.skip('no signal'), ctx)
+    assert stopped.status == 'skip' and stopped.reason == 'no signal'
+
+
+def test_confirmation_reference_consumes_verdict_and_preserves_trade_receipts(monkeypatch):
+    from pathlib import Path
+    from types import ModuleType
+    import sys
+
+    root = Path(__file__).resolve().parents[1] / 'nerya/skills/builtin/strategy_author'
+    helper = ModuleType('strategy_execution')
+    exec((root / 'templates/strategy_execution.py.j2').read_text(), helper.__dict__)
+    monkeypatch.setitem(sys.modules, 'strategy_execution', helper)
+    signal_module = ModuleType('ema_cross')
+    exec((root / 'templates/ema_cross.py.j2').read_text(), signal_module.__dict__)
+    monkeypatch.setitem(sys.modules, 'ema_cross', signal_module)
+    namespace = {}
+    exec((root / 'templates/ema_cross_confirm.py.j2').read_text(), namespace)
+    run, signal = namespace['run'], namespace['ema_cross']
+    params = {'confidence': 0.8, 'confirmation_min_confidence': 0.6,
+              'confirmation_agent': 'market_analyst',
+              'indicator': {'fast_period': 12, 'slow_period': 48}, 'lookback': 61,
+              'sizing': {'method': 'pct_nav', 'pct_nav': 0.1},
+              'protection': {'stop_loss': {'type': 'pct', 'value': 0.02}}}
+    calls, positions = [], []
+    envelope = {'ok': True, 'output': {'decision': 'ENTRY', 'confidence': 0.9}}
+    receipt = {'status': 'pending_approval', 'approval_id': 'fixture'}
+
+    def analyst(name, *, payload):
+        calls.append(('analyst', name, payload))
+        return envelope
+
+    def enter(*, market, side, sizing, protection, confidence, reasoning_ref):
+        calls.append(('entry', market, side, sizing, protection, confidence))
+        return receipt
+
+    def close(*, market, side, confidence, reasoning_ref):
+        calls.append(('exit', market, side))
+        return receipt
+
+    ctx = SimpleNamespace(config=SimpleNamespace(params=params, timeframe='1h', markets=('fixture:ETHUSDT',)),
+        trigger={'market': 'fixture:ETHUSDT'}, clock=SimpleNamespace(now_ms=lambda: (1700006400+61*3600)*1000),
+        portfolio=SimpleNamespace(positions=lambda market: positions), result=ResultBuilder(),
+        subagents=SimpleNamespace(run=analyst), trading=SimpleNamespace(open_position=enter, close_position=close))
+    def evaluate(last):
+        state = {}
+        ctx.state = SimpleNamespace(get=state.get, set=state.__setitem__)
+        candles = [{'ts': 1700006400 + i * 3600, 'close': price} for i, price in enumerate([100.] * 60 + [last])]
+        ctx.market = SimpleNamespace(candles=lambda market, *, timeframe, limit: candles[-limit:])
+        flags = signal(candles, fast_period=12, slow_period=48)
+        assert flags['buy'][-1] == (last > 100) and flags['sell'][-1] == (last < 100)
+        return run(ctx)
+
+    result = evaluate(120.)
+    assert [c[0] for c in calls] == ['analyst', 'entry']
+    assert calls[1][3:] == (params['sizing'], params['protection'], 0.9)
+    assert result.status.value == 'pending_approval'
+    assert result.approval_id == 'fixture' and result.metadata['execution'] == receipt
+    calls.clear()
+    envelope['output']['decision'] = 'HOLD'
+    assert evaluate(120.).reason == 'confirmation_veto'
+    assert [c[0] for c in calls] == ['analyst']
+    calls.clear()
+    assert evaluate(100.).reason == 'no_new_trade_signal' and calls == []
+    positions.append(SimpleNamespace(size=1.0))
+    result = evaluate(80.)
+    assert calls == [('exit', 'fixture:ETHUSDT', 'long')]
+    assert result.status.value == 'pending_approval'
+    assert result.approval_id == 'fixture' and result.metadata['execution'] == receipt
 
 
 def test_backtest_incompatible_portfolio_and_trading_surfaces_are_blocked() -> None:

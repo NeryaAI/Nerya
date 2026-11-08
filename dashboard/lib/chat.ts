@@ -1,5 +1,5 @@
 import { getWorkspaceIdentity, subscribeWorkspaceIdentity, workspaceStorageKey } from "./workspaceIdentity";
-import { mergeStreamEvents, streamEventKey } from "./streamEvents";
+import { mergeStreamEvents, mergeStreamText, streamEventKey } from "./streamEvents";
 import type { ArtifactIndex, VerifierOutcome, ExecutionState } from "./workbench";
 // Runtime commands and history are authoritative. This module stores only a
 // workspace-scoped rendering cache, never execution or ownership evidence.
@@ -148,12 +148,26 @@ export type TurnPayload = {
   /** Identifies which agent harness produced this turn. Useful for
    * debug overlays (legacy vs native). */
   harness?: "legacy" | "native" | string;
+  delivery?: TaskDelivery | null;
+};
+
+export type DeliveryStage = { id: string; label: string; state: string; required_artifacts?: string[]; required_checks?: string[]; reason?: string };
+export type DeliveryCheck = { check_id: string; status: string; required?: boolean; revision?: string; label?: string; message?: string; evidence_ref?: string };
+export type DeliveryArtifact = { artifact_id: string; kind?: string; label?: string; ref?: string; revision?: string; status?: string };
+export type TaskDelivery = {
+  protocol: "nerya.task_delivery.v1" | string; delivery_id: string; command_id: string; skill_id: string; workflow_id: string;
+  requested_scope?: { summary?: string; scope_hash?: string; limitations?: string[] };
+  stages: DeliveryStage[]; artifacts: DeliveryArtifact[]; checks: DeliveryCheck[]; limitations?: string[];
+  completion: { allowed: boolean; status: string; reasons?: string[]; computed_at?: number };
+  recovery?: { action?: string; safe_to_retry?: boolean; requires_receipt_reconciliation?: boolean; reason?: string };
+  delivery_revision: number; updated_at?: number;
 };
 
 export type ExternalUserRequest = { id: string; sequence: number; after_call_id?: string;
   state: 'queued' | 'delivered' | 'acknowledged'; delivered_at?: number; acknowledged_at?: number };
 
 export type UserMessage = {
+  task_message?: { sender_session_id: string; target_task_id: string; request_id: string };
   command_id?: string;
   command_revision?: number;
   delivery_state?: string;
@@ -216,6 +230,9 @@ export type AssistantMessage = {
     title: string;
     state: string;
     legacy?: boolean;
+    task_complete?: boolean;
+    delivery_completion?: { allowed: boolean; status: string };
+    unresolved_deliveries?: { command_id: string; delivery_id: string; delivery_revision: number; reasons: string[] }[];
   };
   command_created_at?: number;
   command_id?: string;
@@ -1482,10 +1499,23 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
     return null;
   }
 
+  const streamIdentity = (ev: LiveEvent) =>
+    [ev.epoch || "", ev.session_id || "", ev.turn_id || "", ev.stream_id || ""].join(":");
+  const discardedStreams = new Set(events.filter(ev =>
+    ev.kind === "model.model_transport" && ev.status === "discarded" && ev.stream_id
+  ).map(streamIdentity));
   for (const ev of mergeStreamEvents(events)) {
     const eventKey = streamEventKey(ev);
     if (eventKey && seenEvents.has(eventKey)) continue;
     if (eventKey) seenEvents.add(eventKey);
+    if (ev.kind === "model.model_transport" && ev.status === "discarded") {
+      out.push({ kind: "model_transport", block: { kind: "model_transport", status: "discarded",
+        stream_id: ev.stream_id, epoch: ev.epoch, session_id: ev.session_id, turn_id: ev.turn_id,
+        discard_partial: true } });
+      continue;
+    }
+    if (discardedStreams.has(streamIdentity(ev)) &&
+        ["message.delta", "turn.step", "model.tool_input_delta"].includes(ev.kind)) continue;
     if (ev.kind === "message.delta") {
       const piece =
         typeof ev.text === "string"
@@ -1494,11 +1524,16 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           ? ev.message
           : "";
       if (typeof ev.stream_id === "string" && ev.stream_id) {
-        const index = streamedText.get(ev.stream_id);
-        const prior = index === undefined ? "" : String(out[index].block?.text || "");
-        const content = ev.mode === "replace" ? piece : prior + piece;
-        const block = { kind:"text", text:content, stream_id:ev.stream_id, stream_mode:ev.stream_mode, completed:ev.completed === true, index:index ?? out.length };
-        if (index === undefined) { streamedText.set(ev.stream_id,out.length); out.push({kind:"text",block}); }
+        const textStreamKey = [ev.epoch || "", ev.session_id || "", ev.turn_id || "", ev.stream_id].join(":");
+        const index = streamedText.get(textStreamKey);
+        const priorBlock = index === undefined ? undefined : out[index].block;
+        if (priorBlock?.completed === true && ev.mode !== "replace" && ev.stream_mode !== "replace") {
+          continue;
+        }
+        const prior = String(priorBlock?.text || "");
+        const content = mergeStreamText(prior, piece, ev.mode || ev.stream_mode);
+        const block = { kind:"text", text:content, stream_id:ev.stream_id, stream_mode:ev.stream_mode, epoch:ev.epoch, session_id:ev.session_id, turn_id:ev.turn_id, completed:ev.completed === true, index:index ?? out.length };
+        if (index === undefined) { streamedText.set(textStreamKey,out.length); out.push({kind:"text",block}); }
         else out[index] = {kind:"text",block};
         continue;
       }
@@ -1512,7 +1547,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
         textIdx = out.length;
         out.push(env);
       } else {
-        textAccum = ev.mode === "replace" ? piece : ev.mode === "append" ? textAccum + piece : mergeStreamingText(textAccum, piece);
+        textAccum = mergeStreamText(textAccum, piece, ev.mode);
         const env = out[textIdx];
         if (env.block) {
           env.block = { ...env.block, text: textAccum };
@@ -1544,11 +1579,17 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           (detail && typeof detail.reasoning === "string" && detail.reasoning) ||
           "";
         const streamId = String(ev.stream_id || detail?.stream_id || "");
-        const existing = streamId ? streamedThinking.get(streamId) : undefined;
-        const prior = existing === undefined ? "" : String(out[existing].block?.text || "");
-        const content = ev.mode === "replace" ? String(text) : prior + String(text);
+        const thinkingStreamKey = streamId ? [ev.epoch || "", ev.session_id || "", ev.turn_id || "", streamId].join(":") : "";
+        const existing = thinkingStreamKey ? streamedThinking.get(thinkingStreamKey) : undefined;
+        const existingBlock = existing === undefined ? undefined : out[existing].block;
+        if (existingBlock?.completed === true && ev.mode !== "replace" && ev.stream_mode !== "replace") {
+          continue;
+        }
+        const prior = String(existingBlock?.text || "");
+        const content = mergeStreamText(prior, String(text), ev.mode || ev.stream_mode);
         const envelope: NativeBlockEnvelope = {
           block: { kind: "thinking", text: content, index: existing ?? out.length,
+            epoch:ev.epoch, session_id:ev.session_id, turn_id:ev.turn_id,
             stream_id: streamId || undefined, completed: ev.completed === true,
             summary: detail?.summary, elapsed_ms: typeof step.wall_ms === "number" ? step.wall_ms : undefined,
             ...(detail?.retry && typeof detail.retry === "object" ? { retry: detail.retry } : {}),
@@ -1556,7 +1597,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           kind: "thinking",
         };
         if (existing === undefined) {
-          if (streamId) streamedThinking.set(streamId, out.length);
+          if (thinkingStreamKey) streamedThinking.set(thinkingStreamKey, out.length);
           out.push(envelope);
         } else out[existing] = envelope;
       }
@@ -1573,7 +1614,8 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       if (previous && previous.phase !== "input_streaming") continue;
       const partial = (String(previous?.payload_preview || "") + String(ev.partial_json || "")).slice(-16000);
       const envelope: NativeBlockEnvelope = {kind:"tool_use",block:{...previous,kind:"tool_use",call_id:callId,
-        action:String(ev.name || previous?.action || ""),skill_id:"native",phase:"input_streaming",payload_preview:partial,payload:{}}};
+        action:String(ev.name || previous?.action || ""),skill_id:"native",phase:"input_streaming",payload_preview:partial,payload:{},
+        stream_id:ev.stream_id, epoch:ev.epoch, turn_id:ev.turn_id, session_id:ev.session_id}};
       if (index === undefined) {flushText();toolUseIndex.set(callKey,out.length);out.push(envelope);}
       else out[index]=envelope;
       continue;
@@ -1649,6 +1691,9 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           display_result: ev.display_result,
           recovery: (ev as Record<string, unknown>).recovery,
           compaction: ev.compaction,
+          semantic_success: ev.semantic_success,
+          verification: ev.verification,
+          result_protocol: ev.result_protocol,
           attempt: ev.attempt,
           index: out.length,
         },
@@ -1685,6 +1730,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
       );
       if (dup) continue;
       const callId = String(evRec.call_id ?? evRec.tool_call_id ?? "");
+      const callKey = callId ? String(evRec.attempt || 1) + ":" + callId : "";
       const block: Record<string, unknown> = {
         ...chartBlock,
         kind: "chart",
@@ -1701,7 +1747,7 @@ export function liveEventsToBlocks(events: LiveEvent[]): NativeBlockEnvelope[] {
           if (
             entry.kind === "tool_result" &&
             entry.block &&
-            (entry.block as Record<string, unknown>).call_id === callId
+            String((entry.block as Record<string, unknown>).attempt || 1) + ":" + String((entry.block as Record<string, unknown>).call_id || "") === callKey
           ) {
             insertAt = i + 1;
             break;

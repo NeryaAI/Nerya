@@ -8,6 +8,41 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Any, Iterable
+import re
+import unicodedata
+
+
+def rank_skill_metadata(query: str, rows: Iterable[tuple[str, str]]) -> list[dict[str, Any]]:
+    """Bounded, offline multilingual discovery. Never selects permission policy.
+
+    Callers filter access BEFORE this function. Only names/descriptions are
+    searched; no playbook, reference, script, model or network is read here.
+    """
+    query = unicodedata.normalize("NFKC", query).strip().casefold()[:512]
+    rows = list(rows)
+    # An operator-provided namespace prefix is precise, not a bag of concepts.
+    if re.fullmatch(r"[a-z0-9]+(?:[._-][a-z0-9]+)+", query):
+        exact_prefix = [(name, description) for name, description in rows if name.casefold().startswith(query)]
+        if exact_prefix:
+            rows = exact_prefix
+    terms = set(re.findall(r"[a-z0-9][a-z0-9.-]+", query))
+    terms.difference_update({"the", "and", "for", "with", "this", "that", "please", "help", "me", "to", "of", "in"})
+    for phrase in re.findall(r"[\u3400-\u9fff]+", query):
+        for width in (2, 3):
+            terms.update(phrase[i:i + width] for i in range(len(phrase) - width + 1))
+    ranked = []
+    for skill_id, description in rows:
+        name = unicodedata.normalize("NFKC", skill_id).casefold()
+        body = unicodedata.normalize("NFKC", description).casefold()
+        matches = sorted(term for term in terms if term in name or term in body)
+        score = sum(3 * (term in name) + 2 * (term in body) for term in matches)
+        if query and query == name:
+            score += 100
+        elif query and (query in name or query in body):
+            score += 8
+        if score:
+            ranked.append({"skill_id": skill_id, "score": score, "matched_terms": matches[:8]})
+    return sorted(ranked, key=lambda row: (-row["score"], row["skill_id"]))
 
 
 def catalog_parent(metadata: Any) -> str:

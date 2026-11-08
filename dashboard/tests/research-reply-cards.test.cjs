@@ -43,8 +43,17 @@ test('absent observations produce no invented quote or curve', () => {
   assert.equal(html({ role: 'assistant', id: 'plain', ts: 1, turn: { reply_text: 'BTC text is not evidence' } }), '');
 });
 test('card is mounted after the reply Markdown, not below the composer', () => {
-  const bubble = fs.readFileSync(path.join(__dirname, '../components/chat/ChatMessage.tsx'), 'utf8');
+  const { AssistantBubble } = require('../components/chat/ChatMessage.tsx');
+  const translations = Object.assign({}, ...fs.readdirSync(path.join(__dirname, '../messages/en'))
+    .filter(file => file.endsWith('.json')).map(file => require('../messages/en/' + file)));
+  const msg = reply('mounted', 'BTC/USDT', [100, 102]);
+  const rendered = renderToStaticMarkup(React.createElement(NextIntlClientProvider,
+    { locale: 'en', messages: translations, timeZone: 'UTC' },
+    React.createElement(ResearchInstrumentContext.Provider, { value: () => {} },
+      React.createElement(AssistantBubble, { msg }))));
+  assert.ok(rendered.indexOf('Unit test') >= 0);
+  assert.ok(rendered.indexOf('research-instrument-card') > rendered.indexOf('Unit test'));
+  assert.equal((rendered.match(/data-testid="research-instrument-card"/g) || []).length, 1);
   const view = fs.readFileSync(path.join(__dirname, '../components/chat/ChatView.tsx'), 'utf8');
-  assert.match(bubble, /<StreamedMarkdown\b[^>]*text=\{reply\}[^>]*\/>\s*<ResearchReplyCards message=\{msg\} \/>/);
   assert.doesNotMatch(view, /<ResearchInstrumentBar/);
 });

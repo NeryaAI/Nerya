@@ -29,6 +29,12 @@ from __future__ import annotations
 
 import difflib
 import fnmatch
+import hashlib
+import json
+import os
+import sqlite3
+import stat
+from contextlib import closing
 from pathlib import Path
 from typing import Any, Optional
 
@@ -47,7 +53,7 @@ from ..types import (
     ToolResult,
     ToolResultPart,
 )
-from .conversation_files import place_new_conversation_file
+from .conversation_files import conversation_files_dir, place_new_conversation_file
 from .paths import (
     WorkspaceEscapeError,
     resolve_workspace_path,
@@ -59,6 +65,7 @@ _DEFAULT_FILE_BYTES = 64 * 1024
 _HARD_FILE_BYTES = 1 * 1024 * 1024
 _DEFAULT_LIST_ENTRIES = 200
 _HARD_LIST_ENTRIES = 1000
+_BUILTIN_SKILL_ROOT = Path(__file__).resolve().parents[2] / "skills" / "builtin"
 
 
 _SENSITIVE_MUTATION_GLOBS = (
@@ -211,8 +218,223 @@ def _read_text(path: Path) -> tuple[str, bool, int]:
     return text, was_replaced, len(raw)
 
 
+def _proposal_task_commands(config, con):
+    """Resolve host-owned task identity without semantic scope admission."""
+    from ...agent.assistant_intent import assistant_request_digest
+    from ...agent.continuation_binding import trusted_continuation_source
+    from ...task_delivery import delivery_command_chain
+
+    chain = delivery_command_chain(config.paths, con, config.get('runtime.command_id'))
+    current = chain[0]
+    if (current['state'] != 'running' or current['kind'] == 'guide'
+            or json.loads(current['context_json']).get('stop_requested')):
+        raise ValueError('inactive command')
+    for field, key in (('actor_id', 'financial_actor_id'), ('session_id', 'command_session_id'),
+                       ('turn_id', 'command_turn_id')):
+        if config.get('runtime.' + key) not in (None, '', current[field]):
+            raise ValueError('runtime identity mismatch')
+    session, actor = current['session_id'], current['actor_id']
+    if con.execute('SELECT 1 FROM agent_deleted_sessions WHERE session_id=?', (session,)).fetchone():
+        raise ValueError('deleted task session')
+    work = None
+    if con.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='assistant_work'").fetchone():
+        work = con.execute('SELECT * FROM assistant_work WHERE task_session_id=?', (session,)).fetchone()
+    rows = con.execute(
+        "SELECT * FROM agent_commands WHERE session_id=? AND kind!='guide' "
+        'AND (created_at<? OR (created_at=? AND position<=?)) ORDER BY created_at,position',
+        (session, current['created_at'], current['created_at'], current['position'])).fetchall()
+    if work:
+        if (work['actor_id'] != actor or not rows or rows[0]['command_id'] != work['command_id']
+                or json.loads(work['request_json']).get('payload') != json.loads(rows[0]['request_json']).get('payload')
+                or con.execute('SELECT 1 FROM agent_deleted_sessions WHERE session_id=?',
+                               (work['parent_session_id'],)).fetchone()):
+            raise ValueError('task ownership mismatch')
+    verified = set()
+    for row in rows:
+        request = json.loads(row['request_json'])
+        payload = request.get('payload') or {}
+        if row['actor_id'] != actor or request.get('_auth_actor_id') != actor:
+            raise ValueError('command actor mismatch')
+        if row['command_id'] == current['command_id']:
+            scopes = request.get('_auth_scopes') or [request.get('_auth_scope')]
+            if (not isinstance(scopes, list)
+                    or not set(s for s in scopes if isinstance(s, str)) & {'api:all', 'execute:strategy'}):
+                raise ValueError('command authorization missing')
+        source = trusted_continuation_source(config, row, connection=con)
+        if source is not None:
+            if source['command_id'] not in verified:
+                raise ValueError('unverified continuation source')
+        elif work and request.get('source') != 'user_chat':
+            binding = request.get('assistant_request_binding')
+            nested = payload.get('assistant_request_binding')
+            if row['command_id'] == work['command_id']:
+                recorded = json.loads(work['request_json']).get('assistant_request_binding')
+                if not isinstance(recorded, dict) or nested != recorded or binding not in (None, recorded):
+                    raise ValueError('unbound original task')
+                binding = recorded
+            if not isinstance(binding, dict) or nested != binding:
+                raise ValueError('unbound parent command')
+            parent = con.execute('SELECT * FROM agent_commands WHERE command_id=?',
+                                 (binding.get('command_id'),)).fetchone()
+            if (not parent or any(parent[key] != binding.get(key)
+                                  for key in ('command_id', 'session_id', 'turn_id', 'actor_id'))
+                    or parent['actor_id'] != actor or parent['session_id'] != work['parent_session_id']):
+                raise ValueError('parent identity mismatch')
+            original = json.loads(parent['request_json'])
+            if (original.get('_auth_actor_id') != actor
+                    or assistant_request_digest(original) != binding.get('input_digest')
+                    or (original.get('payload') or {}).get('text') != payload.get('text')):
+                raise ValueError('parent input mismatch')
+            if row['command_id'] != work['command_id']:
+                message = con.execute('SELECT * FROM assistant_task_messages WHERE command_id=?',
+                                      (row['command_id'],)).fetchone()
+                if (not message or message['kind'] != 'follow_up'
+                        or message['target_task_id'] != work['task_id']
+                        or message['target_session_id'] != session
+                        or message['parent_session_id'] != work['parent_session_id']
+                        or message['sender_session_id'] != parent['session_id']
+                        or message['message'] != payload.get('text')):
+                    raise ValueError('task followup mismatch')
+        elif (row['kind'] != 'send' or request.get('kind', 'user.chat') != 'user.chat'
+                or request.get('session_id') != session
+                or request.get('source') in {'assistant_task', 'assistant_task_message', 'goal_continue', 'approval_continue'}
+                or 'assistant_request_binding' in request or 'assistant_request_binding' in payload
+                or 'task_message' in payload):
+            raise ValueError('unbound task command')
+        verified.add(row['command_id'])
+    return current, rows
+
+
+def _proposal_task_guard(call, *, path, root, config, task_session_id, task_actor_id):
+    """Authorize staged strategy writes from exact host draft ownership receipts.
+
+    Proposal files and delivery artifact declarations are model-writable;
+    neither is an ownership record. Offline operators have no task context.
+    """
+    parts = Path(path).parts
+    if (len(parts) < 6 or parts[:2] != ('evolution', 'proposals')
+            or parts[3:5] != ('after', 'strategies')):
+        return None
+    command_id = config.get('runtime.command_id') if config is not None else None
+    if not command_id:
+        return None
+    pid, sid = parts[2], parts[5]
+    diagnostic = 'ownership_unverified'
+    try:
+        from ..verification import read_verification_receipt
+
+        if not command_id or config.paths.root.resolve() != root.resolve():
+            raise ValueError('missing command context')
+        with closing(sqlite3.connect(config.paths.db.as_uri() + '?mode=ro',
+                                     uri=True, timeout=4.0)) as con:
+            con.row_factory = sqlite3.Row
+            con.execute('PRAGMA query_only=ON')
+            con.execute('PRAGMA busy_timeout=4000')
+            con.execute('BEGIN')
+            current, commands = _proposal_task_commands(config, con)
+            session = current['session_id']
+            if task_session_id and task_session_id != session:
+                raise ValueError('session mismatch')
+            # Kernel deps use memory aliases; durable auth above stays exact.
+            from ...memory.scope import memory_actor
+            if task_actor_id and memory_actor(task_actor_id) != memory_actor(current['actor_id']):
+                raise ValueError('actor mismatch')
+            row = con.execute('SELECT state,revision FROM agent_commands WHERE command_id=?',
+                              (command_id,)).fetchone()
+            if row is None or row['state'] != 'running' or row['revision'] != current['revision']:
+                diagnostic = 'command_context_changed'
+                raise ValueError('command changed during reconciliation')
+            diagnostic = 'producer_receipt_missing'
+            for producer in commands:
+                cid = producer['command_id']
+                if cid != command_id and producer['state'] not in {
+                        'succeeded', 'failed', 'interrupted', 'blocked', 'awaiting_input', 'awaiting_approval'}:
+                    continue
+                events = con.execute(
+                    "SELECT payload_json FROM agent_command_events WHERE command_id=? "
+                    "AND CASE WHEN json_valid(payload_json) THEN "
+                    "json_extract(payload_json,'$.kind')='tool.complete' "
+                    "AND json_extract(payload_json,'$.action')='strategy_draft_proposal' "
+                    "AND coalesce(json_extract(payload_json,'$.skill_id'),'native')='native' "
+                    "ELSE 0 END ORDER BY id LIMIT 1001", (cid,)).fetchall()
+                if len(events) > 1000:
+                    raise ValueError('unbounded producer history')
+                for saved in events:
+                    event = json.loads(saved['payload_json'])
+                    if (not isinstance(event, dict) or event.get('kind') != 'tool.complete'
+                            or event.get('session_id') != session
+                            or event.get('turn_id') != producer['turn_id']
+                            or event.get('action') != 'strategy_draft_proposal'
+                            or event.get('skill_id', 'native') != 'native'
+                            or event.get('ok') is not True or event.get('error')):
+                        continue
+                    receipt = read_verification_receipt(event.get('verification'))
+                    if (receipt and receipt['artifact_id'] == f'strategy:{sid}:proposal:{pid}'
+                            and receipt['revision'] != 'unbound'
+                            and any(check['check_id'] == 'source_binding' and check['status'] == 'passed'
+                                    and check['evidence_ref'] == '/'.join(parts[:6])
+                                    for check in receipt['checks'])):
+                        return None
+    except sqlite3.Error:
+        diagnostic = 'receipt_snapshot_unavailable'
+    except (OSError, ValueError, TypeError, KeyError):
+        pass
+    return ToolResult.from_error(tool_use_id=call.id, name=call.name, error=ToolError(
+        kind=ToolErrorKind.PERMISSION_DENIED,
+        message=('proposal_task_binding_unverified: ' + diagnostic + '. Reconcile the existing candidate '
+                 'with its owning task before writing; do not create a replacement draft. '
+                 'Delivery updates and switching file tools cannot grant ownership.'),
+        retryable=False,
+        detail={'reason': 'proposal_task_binding_unverified', 'diagnostic_code': diagnostic},
+        recovery_hint={'reason': 'proposal_task_binding_unverified',
+                       'diagnostic_code': diagnostic,
+                       'action': 'reconcile_existing_candidate', 'proposal_id': pid,
+                       'strategy_id': sid, 'side_effects': 'none'}))
+
+
 def _short_path(path: Path, root: Path) -> str:
     return to_workspace_relative(path, root)
+
+
+def _builtin_skill_read_hint(raw_path: str) -> dict[str, Any]:
+    """Suggest Skill for a real bundled asset; never grant/read the requested file."""
+    from ...skills.registry import load_entry
+
+    try:
+        path = Path(raw_path)
+        builtin = _BUILTIN_SKILL_ROOT
+        if not path.is_absolute() or ".." in path.parts or builtin.is_symlink():
+            return {}
+        relative = path.relative_to(builtin)
+        current = builtin
+        for part in relative.parts:
+            current /= part
+            if current.is_symlink():
+                return {}
+        resolved = path.resolve(strict=True)
+        if not resolved.is_relative_to(builtin.resolve(strict=True)) or not resolved.is_file():
+            return {}
+        directory = path.parent
+        while directory != builtin:
+            playbook = directory / "SKILL.md"
+            if playbook.is_symlink():
+                return {}
+            if playbook.is_file():
+                if playbook.stat().st_size > _HARD_FILE_BYTES:
+                    return {}
+                entry = load_entry(playbook, source="builtin")
+                if entry is None:
+                    return {}
+                return {"next_required_action": {
+                    "tool": "Skill",
+                    "arguments": {"skill": entry.manifest.id,
+                                  "file": path.relative_to(directory).as_posix()},
+                    "reason": "builtin_skill_asset_requires_skill",
+                }}
+            directory = directory.parent
+    except (OSError, RuntimeError, ValueError):
+        pass
+    return {}
 
 
 # ---------------------------------------------------------------------------
@@ -248,6 +470,7 @@ def read_file_handler(
                 kind=ToolErrorKind.PERMISSION_DENIED,
                 message=str(exc),
                 detail={"path": str(raw_path)},
+                recovery_hint=_builtin_skill_read_hint(str(raw_path)),
             ),
         )
     except FileNotFoundError as exc:
@@ -350,7 +573,9 @@ def read_file_handler(
 # ---------------------------------------------------------------------------
 
 
-def list_dir_handler(call: ToolCall, *, root: Path) -> ToolResult:
+def list_dir_handler(
+    call: ToolCall, *, root: Path, session_id: str | None = None,
+) -> ToolResult:
     args = call.arguments or {}
     raw_path = args.get("path") or "."
     show_hidden = bool(args.get("show_hidden", False))
@@ -367,7 +592,13 @@ def list_dir_handler(call: ToolCall, *, root: Path) -> ToolResult:
             error=ToolError(kind=ToolErrorKind.PERMISSION_DENIED, message=str(exc)),
         )
 
-    if not p.exists():
+    # Conversation output directories are lazy: a panel proposal need not write
+    # any free-form files. Listing the current, not-yet-created root is empty.
+    empty_conversation = (
+        not p.exists() and not p.is_symlink() and session_id is not None
+        and p == conversation_files_dir(root, session_id)
+    )
+    if not p.exists() and not empty_conversation:
         return ToolResult.from_error(
             tool_use_id=call.id,
             name=call.name,
@@ -376,7 +607,7 @@ def list_dir_handler(call: ToolCall, *, root: Path) -> ToolResult:
                 message=f"directory not found: {_short_path(p, root)}",
             ),
         )
-    if not p.is_dir():
+    if not empty_conversation and not p.is_dir():
         return schema_validation_result(
             call, f"{_short_path(p, root)} is not a directory; use read_file",
         )
@@ -384,7 +615,9 @@ def list_dir_handler(call: ToolCall, *, root: Path) -> ToolResult:
     items: list[dict[str, Any]] = []
     truncated = False
     try:
-        entries = sorted(p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()))
+        entries = [] if empty_conversation else sorted(
+            p.iterdir(), key=lambda x: (x.is_file(), x.name.lower()),
+        )
     except OSError as exc:
         return ToolResult.from_error(
             tool_use_id=call.id,
@@ -460,6 +693,9 @@ def edit_file_handler(
     *,
     root: Path,
     file_state: Optional[FileStateCache],
+    config: Any = None,
+    task_session_id: Optional[str] = None,
+    task_actor_id: Optional[str] = None,
 ) -> ToolResult:
     args = call.arguments or {}
     raw_path = args.get("path")
@@ -495,6 +731,10 @@ def edit_file_handler(
         return schema_validation_result(call, "cannot edit a directory")
 
     rel_path = _short_path(p, root)
+    denied = _proposal_task_guard(call, path=rel_path, root=root, config=config,
+                                  task_session_id=task_session_id, task_actor_id=task_actor_id)
+    if denied is not None:
+        return denied
     proposal_tools = _proposal_required_tools(rel_path)
     if proposal_tools:
         return _proposal_required_result(
@@ -524,7 +764,14 @@ def edit_file_handler(
                     message=str(exc),
                     detail=exc.as_dict(),
                     retryable=True,
-                    recovery_hint={"action": "read_file", "path": _short_path(p, root)},
+                    recovery_hint={
+                        "action": "read_file",
+                        "path": _short_path(p, root),
+                        "next_required_action": {
+                            "tool": "read_file",
+                            "arguments": {"path": _short_path(p, root)},
+                        },
+                    },
                 ),
             )
 
@@ -619,12 +866,76 @@ def edit_file_handler(
 # ---------------------------------------------------------------------------
 
 
+def _skill_template_source(call, source, skill_index):
+    """Read only a current catalog's bounded, bundled Python template."""
+    from .skill import skill_access_error, skill_asset_access_error
+
+    if (not isinstance(source, dict)
+            or set(source) != {"skill", "file", "expected_revision"}
+            or any(not isinstance(value, str) or not value for value in source.values())):
+        return schema_validation_result(call, "source_asset requires skill, file and expected_revision strings")
+    sid, relative, expected = source["skill"], source["file"], source["expected_revision"]
+    if len(expected) != 64 or any(c not in "0123456789abcdef" for c in expected):
+        return schema_validation_result(call, "expected_revision must copy the complete 64-character lowercase SHA-256 literal from the template Skill read response's TOP-LEVEL revision, not skill.revision or catalog_revision")
+    denied = skill_access_error(call, sid)
+    if denied is not None:
+        return denied
+    record = skill_index.get(sid) if skill_index is not None else None
+    if record is None:
+        return ToolResult.from_error(tool_use_id=call.id, name=call.name, error=ToolError(
+            kind=ToolErrorKind.NOT_FOUND, message="source Skill is not in the active catalog"))
+    try:
+        asset = Path(relative)
+        playbook = Path(record.path)
+        builtin = _BUILTIN_SKILL_ROOT
+        target = playbook.parent / asset
+        if (record.source != "builtin" or record.skill_id != sid
+                or asset.is_absolute() or "\\" in relative or ".." in asset.parts
+                or len(asset.parts) < 2 or asset.parts[0] != "templates"
+                or not asset.name.endswith(".py.j2") or builtin.is_symlink()):
+            raise ValueError()
+        for path in (playbook, target):
+            current = builtin
+            for part in path.relative_to(builtin).parts:
+                current /= part
+                if current.is_symlink():
+                    raise ValueError()
+            if not path.resolve(strict=True).is_relative_to(builtin.resolve(strict=True)):
+                raise ValueError()
+        denied = skill_asset_access_error(call, record, target, skill_index)
+        if denied is not None:
+            return denied
+        if not stat.S_ISREG(target.stat().st_mode):
+            raise ValueError()
+        with open(target, "rb", opener=lambda path, flags: os.open(
+                path, flags | getattr(os, "O_NOFOLLOW", 0))) as stream:
+            if not stat.S_ISREG(os.fstat(stream.fileno()).st_mode):
+                raise ValueError()
+            raw = stream.read(_HARD_FILE_BYTES + 1)
+        if len(raw) > _HARD_FILE_BYTES or b"\x00" in raw:
+            raise ValueError()
+        content = raw.decode("utf-8")
+    except (OSError, ValueError, RuntimeError):
+        return schema_validation_result(call, "source_asset must be a non-symlink builtin templates/*.py.j2 UTF-8 file of at most 1 MiB")
+    revision = hashlib.sha256(raw).hexdigest()
+    if revision != expected:
+        return ToolResult.from_error(tool_use_id=call.id, name=call.name, error=ToolError(
+            kind=ToolErrorKind.STALE_FILE, message="source_asset revision mismatch; read the template with Skill again and copy its TOP-LEVEL revision as the complete 64-character lowercase SHA-256 literal, not skill.revision or catalog_revision",
+            retryable=True, recovery_hint={"next_required_action": {"tool": "Skill",
+                "arguments": {"skill": sid, "file": relative}}}))
+    return content, {"skill": sid, "file": asset.as_posix(), "revision": revision}
+
+
 def write_file_handler(
     call: ToolCall,
     *,
     root: Path,
     file_state: Optional[FileStateCache],
     session_id: Optional[str] = None,
+    config: Any = None,
+    task_session_id: Optional[str] = None,
+    task_actor_id: Optional[str] = None,
+    skill_index: Any = None,
 ) -> ToolResult:
     args = call.arguments or {}
     raw_path = args.get("path")
@@ -637,13 +948,16 @@ def write_file_handler(
     else:
         content = args.get("contents")
     require_existing_read = bool(args.get("require_existing_read", True))
+    source_requested = "source_asset" in args
+    if source_requested and ("contents" in args or "content" in args):
+        return schema_validation_result(call, "source_asset and contents/content are mutually exclusive")
 
-    if not raw_path or content is None:
+    if not raw_path or (not source_requested and content is None):
         return schema_validation_result(
-            call, "write_file requires path and contents (string body)",
+            call, "write_file requires path and either contents (string body) or source_asset",
         )
 
-    if not isinstance(content, str):
+    if not source_requested and not isinstance(content, str):
         return schema_validation_result(
             call, "content must be a string (write binary via separate handler)",
         )
@@ -658,6 +972,10 @@ def write_file_handler(
         )
 
     rel_path = _short_path(p, root)
+    denied = _proposal_task_guard(call, path=rel_path, root=root, config=config,
+                                  task_session_id=task_session_id, task_actor_id=task_actor_id)
+    if denied is not None:
+        return denied
     proposal_tools = _proposal_required_tools(rel_path)
     if proposal_tools:
         return _proposal_required_result(
@@ -665,6 +983,13 @@ def write_file_handler(
             path=rel_path,
             tools=proposal_tools,
         )
+
+    provenance = None
+    if source_requested:
+        source = _skill_template_source(call, args["source_asset"], skill_index)
+        if isinstance(source, ToolResult):
+            return source
+        content, provenance = source
 
     requested_path = p
     existed = requested_path.exists()
@@ -714,6 +1039,10 @@ def write_file_handler(
                         recovery_hint={
                             "action": "read_file",
                             "path": _short_path(p, root),
+                            "next_required_action": {
+                                "tool": "read_file",
+                                "arguments": {"path": _short_path(p, root)},
+                            },
                         },
                     ),
                 )
@@ -765,6 +1094,8 @@ def write_file_handler(
     }
     if result_path != requested_rel:
         payload["requested_path"] = requested_rel
+    if provenance is not None:
+        payload["source_asset"] = provenance
     if outside_reason:
         payload["outside_conversation_reason"] = outside_reason
     return ToolResult(

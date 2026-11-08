@@ -33,6 +33,14 @@ _VOLATILE_ROOTS = frozenset({
     "agent_tasks", "artifacts", "dev_logs", "evidence", "logs", "reports",
     "teams", ".cleanup-backups",
 })
+# Exact workspace paths: keep similarly named strategy files and approval
+# control configuration (for example kill_switch.yml) in the source revision.
+_VOLATILE_PATHS = frozenset({
+    "nerya.db", "nerya.db-wal", "nerya.db-shm", "nerya.db-journal",
+    "approvals/pending.jsonl", "approvals/approved.jsonl", "approvals/rejected.jsonl",
+    "approvals/.pending.jsonl.lock", "approvals/.approved.jsonl.lock",
+    "approvals/.rejected.jsonl.lock",
+})
 _RUNTIME_FINGERPRINTS = {
     "model_schema": ("llm/model_registry.py",),
     "tool_schema": ("tools/registry.py", "tools/native/bootstrap.py"),
@@ -358,6 +366,8 @@ def _tree_digest(root: Path, *, exclude_roots: frozenset[str]) -> str:
                 if name in exclude_roots:
                     continue
                 relative = PurePosixPath(*(parts + (name,)))
+                if relative.as_posix() in _VOLATILE_PATHS:
+                    continue
                 path = Path(entry.path)
                 try:
                     if entry.is_symlink():

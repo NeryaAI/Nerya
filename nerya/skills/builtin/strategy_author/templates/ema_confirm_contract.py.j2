@@ -1,0 +1,144 @@
+"""Synthetic behavior only; no historical model, account or performance evidence.
+
+Runs the candidate's actual main and helpers with real SDK result/position types.
+Fixture parameters are test inputs, not changes to strategy.yml or account policy.
+"""
+from types import SimpleNamespace as NS
+
+from nerya.strategies import ResultBuilder, StrategyResult
+from nerya.strategies.context import StrategyPosition
+from main import ema_cross, run
+
+
+def _context(*, last=120., quantity=0., count=61):
+    market = 'MOCK:PAIR'
+    rows = [dict(ts=1700006400 + i * 3600, open=price, high=price, low=price,
+                 close=price, volume=100.)
+            for i, price in enumerate([100.] * (count - 1) + [last])]
+    params = dict(indicator={'fast_period': 12, 'slow_period': 48}, lookback=160,
+                  confidence=.7, confirmation_agent='fixture_analyst', confirmation_min_confidence=.6,
+                  sizing={'method': 'pct_nav', 'pct_nav': .17},
+                  protection={'stop_loss': {'type': 'pct', 'value': .03}})
+    state, calls = {}, []
+    ctx = NS(config=NS(markets=(market,), timeframe='1h', params=params),
+             trigger={'market': market}, rows=rows, calls=calls, saved=state,
+             result=ResultBuilder(), state=NS(get=state.get, set=state.__setitem__),
+             clock=NS(now_ms=lambda: (rows[-1]['ts'] + 3600) * 1000),
+             verdict={'ok': True, 'output': {'decision': 'ENTRY', 'confidence': .8}},
+             failure=None, receipt={'status': 'submitted', 'order_id': 'fixture-order'})
+    def candles(requested, *, timeframe, limit):
+        assert (requested, timeframe, limit) == (market, '1h', params['lookback'])
+        return rows[-limit:]
+    def positions(requested):
+        assert requested == market
+        return [StrategyPosition(market=market, size=quantity)] if quantity else []
+    def confirm(name, *, payload):
+        assert name == params['confirmation_agent']
+        assert payload['market'] == market and payload['timeframe'] == '1h'
+        assert all((row['ts'] + 3600) * 1000 <= ctx.clock.now_ms()
+                   for row in payload['candles'])
+        calls.append('agent')
+        if ctx.failure is not None:
+            raise ctx.failure
+        return ctx.verdict
+    def enter(*, market, side, sizing, protection, confidence, reasoning_ref):
+        assert market == 'MOCK:PAIR' and side == 'long'
+        assert sizing == params['sizing'] and protection == params['protection']
+        assert confidence == .8 and reasoning_ref == f"ema_cross:buy:{rows[-1]['ts']}"
+        calls.append('open')
+        return ctx.receipt
+    def close(*, market, side, confidence, reasoning_ref):
+        assert market == 'MOCK:PAIR' and side == 'long'
+        assert confidence == params['confidence'] and reasoning_ref == f"ema_cross:sell:{rows[-1]['ts']}"
+        calls.append('close')
+        return ctx.receipt
+    def execution_status(receipt):
+        assert receipt == ctx.receipt
+        return {'status': 'unknown', 'terminal': False, 'reconciled': False,
+                'has_open_orders': None, 'recovery': 'verify_execution'}
+    ctx.market = NS(candles=candles)
+    ctx.portfolio = NS(positions=positions)
+    ctx.subagents = NS(run=confirm)
+    ctx.trading = NS(open_position=enter, close_position=close, execution_status=execution_status)
+    return ctx
+
+
+def _cross(ctx, direction):
+    flags = ema_cross(ctx.rows, **ctx.config.params['indicator'])
+    assert flags[direction][-1] is True and not any(flags[direction][:-1])
+    if direction == 'buy':
+        assert flags['fast'][-2] <= flags['slow'][-2] and flags['fast'][-1] > flags['slow'][-1]
+    else:
+        assert flags['fast'][-2] >= flags['slow'][-2] and flags['fast'][-1] < flags['slow'][-1]
+
+
+def test_no_signal_zero_agent_calls():
+    for last, quantity, count in ((100., 0., 61), (100., 2., 61), (120., 2., 61),
+                                  (80., 0., 61), (120., 0., 20)):
+        ctx = _context(last=last, quantity=quantity, count=count)
+        result = run(ctx)
+        assert isinstance(result, StrategyResult) and result.status.value == 'hold'
+        expected = 'insufficient_closed_history' if count < 49 else 'no_new_trade_signal'
+        assert result.reason == expected and ctx.calls == []
+        repeated = expected if count < 49 else 'duplicate_closed_candles'
+        assert run(ctx).reason == repeated and ctx.calls == []
+
+
+def test_confirmed_entry():
+    ctx = _context()
+    _cross(ctx, 'buy')
+    result = run(ctx)
+    assert isinstance(result, StrategyResult) and result.status.value == 'submitted'
+    assert result.metadata['execution'] == ctx.receipt and result.order_id == 'fixture-order'
+    assert ctx.calls == ['agent', 'open']
+
+
+def test_entry_veto():
+    for decision, confidence in (('HOLD', .8), ('ENTRY', .59)):
+        ctx = _context()
+        _cross(ctx, 'buy')
+        ctx.verdict = {'ok': True, 'output': {'decision': decision, 'confidence': confidence}}
+        result = run(ctx)
+        assert isinstance(result, StrategyResult) and result.status.value == 'hold'
+        assert result.reason == 'confirmation_veto' and ctx.calls == ['agent']
+        assert run(ctx).reason == 'duplicate_closed_candles' and ctx.calls == ['agent']
+
+
+def test_deterministic_exit():
+    ctx = _context(last=80., quantity=2.)
+    _cross(ctx, 'sell')
+    ctx.failure = AssertionError('exits must never ask the Agent')
+    ctx.receipt = {'status': 'pending_approval', 'approval_id': 'fixture-approval'}
+    result = run(ctx)
+    assert isinstance(result, StrategyResult) and result.status.value == 'pending_approval'
+    assert result.approval_id == 'fixture-approval' and result.metadata['execution'] == ctx.receipt
+    assert ctx.calls == ['close']
+
+
+def test_pending_no_resubmit():
+    ctx = _context()
+    assert run(ctx).status.value == 'submitted'
+    for last in (None, 80., 120.):
+        if last is not None:
+            ctx.rows.append({'ts': ctx.rows[-1]['ts'] + 3600, 'close': last})
+        result = run(ctx)
+        assert isinstance(result, StrategyResult) and result.status.value == 'error'
+        assert result.metadata['execution'] == ctx.receipt
+        assert result.metadata['recovery'] == 'verify_execution'
+        assert ctx.calls == ['agent', 'open']
+        assert ctx.saved['closed_signal:ema_cross:MOCK:PAIR:1h']['pending']['receipt'] == ctx.receipt
+
+
+def test_confirmation_failure_retry():
+    for failure in (None, RuntimeError('model unavailable')):
+        ctx = _context()
+        ctx.failure = failure
+        ctx.verdict = {'ok': False, 'output': {}}
+        result = run(ctx)
+        assert isinstance(result, StrategyResult) and result.status.value == 'error'
+        assert result.error_kind == 'confirmation_error' and ctx.calls == ['agent']
+        assert ctx.saved == {}
+        ctx.failure = None
+        ctx.verdict = {'ok': True, 'output': {'decision': 'ENTRY', 'confidence': .8}}
+        assert run(ctx).status.value == 'submitted'
+        assert ctx.calls == ['agent', 'agent', 'open']

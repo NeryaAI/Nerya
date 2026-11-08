@@ -1,0 +1,170 @@
+# @nerya.version 1
+# @nerya.title Configured Aave rate strategy
+# @nerya.description Reusable APY or explicitly configured APR entrypoint; not live-ready.
+# @nerya.logic Delegate every entry/exit decision to the adjacent pure rate policy.
+# @nerya.rationale Host replay consumes actual run metadata without duplicating the policy.
+# @nerya.scope Paper/backtest signals and existing live action recovery; no activation.
+# @nerya.input Configured rate_policy/rate_source, injected clock, simulation trigger or declared live source.
+# @nerya.output StrategyResult; simulated signals retain hold status and never claim fills.
+# @nerya.risk Current account_state cannot attest strategy-owned supply or available cash.
+# @nerya.validation Run offline contracts with real ResultBuilder and the unchanged Aave helper.
+
+"""Copy as main.py beside aave_rate_policy.py and unchanged aave_supply.py.
+
+params.rate_policy = {entry_apy_percent, exit_apy_percent, max_age_seconds,
+                      allocation_units} (finite nonnegative JSON numbers).
+params.rate_source = {pool_id, chain, asset, project} (exact catalog strings).
+Paper/backtest inputs are trigger.rate_observation = {timestamp (UTC ISO),
+deposit_apy_percent, pool_id, chain, asset, project} and
+trigger.lending_position = {supplied_units, cash_units}. ctx.clock.now() is
+the cutoff. Host replay must consume this run's metadata.rate_decision and
+own prior positions, fees and accrual; do not reimplement this policy there.
+For explicit rate_source.rate_metric='base_supply_rate_percent', use
+entry_apr_percent/exit_apr_percent instead of APY fields, and inject numeric
+base_supply_rate_percent with the actual source_timestamp as observation.timestamp.
+The host v2 replay uses the requested grid clock and exact normalized-income
+ratios for accounting; APR is only a policy signal and is never aliased to APY.
+This mode grants no new live execution or ownership authority.
+For backtest only, when params.rate_replay is present, its explicit finite
+fee_bps must satisfy 0 <= fee_bps < 10000. Pass a detached position with
+cash_units / (1 + fee_bps / 10000) into the pure policy. Actual trigger cash
+and supplied units are unchanged; only the host applies costs and fills.
+
+Live reads params.source_id through ctx.inputs.source(source_id), backed by
+a declared data_sources entry or its prepublished snapshot. Supply rows plus
+_envelope.pool with pool_id/chain/symbol/project. Live never reads simulation
+trigger inputs. params.financial_request must be an explicit reviewed Aave
+request (kind, component_id, protocol, wallet_id, chain, asset, amount); SDK
+resource/deployment checks remain authoritative. It is never synthesized
+from pool identity, nor are kind/amount rewritten to fit a signal.
+
+LIVE BOUNDARY: account_state currently returns wallet-level state.supply_base
+and state.decimals, not strategy-owned supply or available cash. Computing
+supply_base / 10**decimals would not attest ownership. v1 reads that account
+and returns configuration_required, without inventing an ownership field or
+using trigger positions. An SDK contract for strategy-owned supplied units,
+available cash and reviewed rate-pool/token binding is required before new
+live actions can be enabled. Existing saved actions may only be reconciled
+with the unchanged helper and matching explicit request; no prepare/execute.
+"""
+
+from collections.abc import Mapping
+from decimal import Decimal, InvalidOperation
+from math import isfinite
+
+from aave_rate_policy import (
+    RatePolicyError, decide_aave_rate, select_rate_observation, validate_rate_observation,
+)
+from aave_supply import aave_supply_tick
+
+
+def _bound_request(raw):
+    if not isinstance(raw, Mapping):
+        raise RatePolicyError('Explicit reviewed financial_request required',
+                              kind='configuration_required')
+    request = dict(raw)
+    if (request.get('component_id') != 'builtin:aave'
+            or request.get('protocol') != 'aave_v3'
+            or request.get('kind') not in {'lend_supply', 'lend_withdraw'}
+            or any(not isinstance(request.get(key), str) or not request[key].strip()
+                   for key in ('wallet_id', 'chain', 'asset'))):
+        raise RatePolicyError('Explicit Aave resource/request binding required',
+                              kind='configuration_required')
+    try:
+        amount = Decimal(str(request.get('amount')))
+        if not amount.is_finite() or amount <= 0 or abs(amount.adjusted()) > 255:
+            raise InvalidOperation
+    except (InvalidOperation, ValueError):
+        raise RatePolicyError('financial_request.amount must be finite and positive',
+                              kind='configuration_required') from None
+    return request
+
+
+def _live(ctx, params, metadata):
+    metadata.update(live_ready=False)
+    request = _bound_request(params.get('financial_request'))
+    saved = ctx.state.get('aave_supply_action')
+    if saved is not None:
+        # Recovery precedes rate/config gates. No new decision can obstruct
+        # reconciliation or authorize a prepared action in this v1 boundary.
+        metadata.pop('funds_sent', None)
+        if not isinstance(saved, Mapping) or saved.get('request') != request:
+            raise RatePolicyError('Recovery requires the original reviewed financial_request',
+                                  kind='configuration_required')
+        operation_key = saved.get('operation_key')
+        if not isinstance(operation_key, str) or not operation_key.strip() or len(operation_key) > 200:
+            raise RatePolicyError('Recovery requires the original operation_key',
+                                  kind='configuration_required')
+        try:
+            result = aave_supply_tick(ctx, request=request, operation_key=operation_key,
+                                      data_ready=False, decision=False)
+        except Exception:
+            return ctx.result.error(
+                message='Original Aave action recovery is unavailable; do not resubmit',
+                kind='execution_unknown',
+                metadata={**metadata, 'action_id': saved.get('action_id')},
+            )
+        result.metadata.update(metadata)
+        return result
+    source_id = params.get('source_id')
+    if not isinstance(source_id, str) or not source_id.strip():
+        raise RatePolicyError('source_id must name a declared rate data source',
+                              kind='configuration_required')
+    try:
+        snapshot = ctx.inputs.source(source_id)
+    except Exception:
+        raise RatePolicyError('Declared rate source is unavailable') from None
+    as_of = ctx.clock.now()
+    observation = select_rate_observation(snapshot=snapshot, source=params.get('rate_source'), as_of=as_of)
+    validate_rate_observation(policy=params.get('rate_policy'), source=params.get('rate_source'),
+                              observation=observation, as_of=as_of)
+    try:
+        account = ctx.financial.account_state(request)
+    except Exception:
+        raise RatePolicyError('Bound Aave account state is unavailable',
+                              kind='configuration_required') from None
+    if not isinstance(account, Mapping) or account.get('health') != 'ok':
+        raise RatePolicyError('Bound Aave account state is unavailable or stale')
+    metadata['missing_attestations'] = ['strategy_owned_supplied_units', 'available_cash_units']
+    raise RatePolicyError('Account state cannot attest strategy-owned supply and available cash; v1 is not live-ready',
+                          kind='configuration_required')
+
+
+# @nerya.step run | Evaluate a rate tick | Return the actual policy decision as explicit signal metadata.
+def run(ctx):
+    metadata = {'financial_execution_allowed': False, 'funds_sent': False}
+    params = ctx.config.params
+    try:
+        if not isinstance(params, Mapping):
+            raise RatePolicyError('Strategy params must be a mapping', kind='configuration_required')
+        if ctx.mode == 'live':
+            return _live(ctx, params, metadata)
+        if ctx.mode not in {'paper', 'backtest'}:
+            raise RatePolicyError('Rate simulation requires paper or backtest mode',
+                                  kind='configuration_required')
+        position = ctx.trigger.get('lending_position')
+        if ctx.mode == 'backtest' and 'rate_replay' in params:
+            replay = params['rate_replay']
+            fee = replay.get('fee_bps') if isinstance(replay, Mapping) else None
+            if type(fee) not in (int, float) or not 0 <= fee < 10000:
+                raise RatePolicyError('rate_replay.fee_bps must be a finite number in [0, 10000)',
+                                      kind='configuration_required')
+            cash = position.get('cash_units') if isinstance(position, Mapping) else None
+            try:
+                valid_cash = type(cash) in (int, float) and isfinite(cash) and cash >= 0
+            except OverflowError:
+                valid_cash = False
+            if not valid_cash:
+                raise RatePolicyError('cash_units must be a finite nonnegative number')
+            position = {**position, 'cash_units': cash / (1 + fee / 10000)}
+        decision = decide_aave_rate(
+            policy=params.get('rate_policy'), source=params.get('rate_source'),
+            observation=ctx.trigger.get('rate_observation'),
+            position=position, as_of=ctx.clock.now(),
+        )
+    except RatePolicyError as exc:
+        return ctx.result.error(message=str(exc), kind=exc.kind, metadata=metadata)
+    return ctx.result.hold(
+        reason='Aave rate simulation signal; no financial execution',
+        metadata={**metadata, 'rate_decision': decision},
+    )

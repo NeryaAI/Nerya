@@ -335,7 +335,7 @@ async function forward(req: NextRequest, path: string[], method: string) {
     headers.set("Authorization", `Bearer ${SERVER_TOKEN}`);
   }
   const dashboardInternalToken = _dashboardInternalToken();
-  if ((joined === "agent/interactions/respond" || joined === "agent/run_turn_internal" || joined === "agent/commands" || joined.startsWith("agent/commands/")) && dashboardInternalToken) {
+  if ((joined === "agent/interactions/respond" || joined === "agent/run_turn_internal" || joined === "agent/commands" || joined.startsWith("agent/commands/") || joined === "agent/goals/control") && dashboardInternalToken) {
     headers.set("X-Nerya-Dashboard-Internal", dashboardInternalToken);
   }
   if (method === "GET" && isSSEPath(joined)) {

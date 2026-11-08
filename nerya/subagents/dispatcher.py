@@ -15,7 +15,7 @@ native subagent runtime.
 from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from typing import Any, Iterable
 
 from ..core import jsonl
@@ -72,6 +72,7 @@ class SubAgentResult:
     steps: list[dict[str, Any]] = field(default_factory=list)
     audit: dict[str, Any] = field(default_factory=dict)
     agent_id: str = ""
+    completion: dict[str, Any] = field(default_factory=dict)
 
     def asdict(self) -> dict[str, Any]:
         return asdict(self)
@@ -93,6 +94,7 @@ class SubAgentDispatcher:
     # Every caller supplies an execution scope. Standalone jobs construct one explicitly.
     tool_registry: Any
     executor: Any
+    parent_model_selection: dict[str, Any] = field(default_factory=dict)
 
     @classmethod
     def for_workspace(
@@ -191,6 +193,11 @@ class SubAgentDispatcher:
             role_state = describe_role(self.config.paths, spec.name)
             if role_state and role_state.get("enabled") is False:
                 return SubAgentResult(ok=False, subagent=name, error_kind="disabled", error="Agent is disabled")
+            if not agent_id and not spec.provider and not spec.model and role_state:
+                spec = replace(
+                    spec, provider=role_state.get("provider") or "",
+                    model=role_state.get("model") or "",
+                )
             _assert_allowed_skills(spec)
             required_native_tools = tuple(
                 getattr(spec.execution_policy, "required_native_tools", ()) or ()
@@ -213,6 +220,7 @@ class SubAgentDispatcher:
                 llm=LLMGateway(self.config),
                 tool_registry=self.tool_registry,
                 tool_executor=self.executor,
+                parent_model_selection=self.parent_model_selection,
             )
             runtime_kwargs = {
                 "trigger_event_id": trigger_event_id,
@@ -242,6 +250,21 @@ class SubAgentDispatcher:
                 else ""
             )
             blocked = completion_status == "blocked"
+            completion = raw.get("completion") or {}
+            # Only typed completion metadata crosses this boundary; feedback may
+            # contain provider prose. Role output stays in its existing envelope.
+            reason = str(completion.get("reason") or "")
+            reason = reason if len(reason) <= 100 and reason.isidentifier() else ""
+            policy_blocked = completion.get("status") == "blocked"
+            completion_detail = {
+                "status": (
+                    "blocked" if policy_blocked else "incomplete" if blocked
+                    else completion.get("status") or "complete"
+                ),
+                "reason": reason,
+                **{key: completion[key] for key in ("limit", "used")
+                   if type(completion.get(key)) is int and completion[key] >= 0},
+            }
             return SubAgentResult(
                 ok=not cancelled and not blocked,
                 subagent=name,
@@ -256,16 +279,17 @@ class SubAgentDispatcher:
                 steps=(raw.get("steps") or []),
                 audit=(raw.get("audit") or {}),
                 agent_id=str(raw.get("agent_id") or agent_id or ""),
+                completion=completion_detail,
                 error=(
                     _token_reason(cancel_token)
                     if cancelled
-                    else "subagent completion gate blocked"
+                    else reason or ("subagent completion gate blocked" if policy_blocked else "subagent incomplete")
                     if blocked
                     else None
                 ),
                 error_kind=(
                     "cancelled" if cancelled
-                    else "policy" if blocked
+                    else ("policy" if policy_blocked else "incomplete") if blocked
                     else None
                 ),
             )

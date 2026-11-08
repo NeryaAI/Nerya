@@ -124,7 +124,7 @@ def normalize_klines(venue: str, rows: list[Any]) -> list[dict[str, Any]]:
             })
         return out
 
-    if v in ("HYPERLIQUID", "HL"):
+    if v in ("HYPERLIQUID", "HL") and isinstance(rows[0], dict) and "t" in rows[0]:
         for r in rows:
             if isinstance(r, dict) and "t" in r:
                 out.append({
@@ -808,7 +808,7 @@ def _fetch_public_rest_klines(
     target = max(1, int(count or 60))
     if v == "BINANCE":
         return _fetch_binance_rest_pages(
-            "https://api.binance.com/api/v3/klines",
+            "https://data-api.binance.vision/api/v3/klines",
             market,
             interval=interval,
             count=target,
@@ -929,7 +929,9 @@ def _fetch_binance_rest_pages(
             "interval": interval,
             "startTime": cursor_ms,
             "endTime": end_ms,
-            "limit": min(page_limit, max(1, count - len(rows))),
+            # With no explicit start, exhaust the padded window before
+            # taking its tail: Binance selects the earliest startTime rows.
+            "limit": page_limit if start is None else min(page_limit, max(1, count - len(rows))),
         })
         batch = normalize_klines("BINANCE", _http_json(url))
         if not batch:
@@ -941,7 +943,11 @@ def _fetch_binance_rest_pages(
             break
         cursor_ms = next_cursor
         rows = _dedupe_sort_tail(rows, limit=count)
-        if len(rows) >= count or cursor_ms > end_ms:
+        if (
+            (start is not None and len(rows) >= count)
+            or (start is None and len(batch) < page_limit)
+            or cursor_ms > end_ms
+        ):
             break
     return _dedupe_sort_tail(rows, limit=count)
 
@@ -1073,6 +1079,17 @@ def _fetch_kraken_rest_pages(
     return _dedupe_sort_tail(rows, limit=count)
 
 
+def _ticker_number(value: Any) -> float | None:
+    """Keep absent/invalid provider metrics unknown, including non-finite values."""
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
+
+
 def _fetch_public_rest_ticker(venue: str, market: str) -> dict[str, Any]:
     v = _canonical_venue(venue)
     if v=='POLYMARKET':
@@ -1093,22 +1110,39 @@ def _fetch_public_rest_ticker(venue: str, market: str) -> dict[str, Any]:
             "ts_ms": int(t.ts_ms),
         }
     if v == "BINANCE":
-        doc = _http_json("https://api.binance.com/api/v3/ticker/price?" + urlencode({
+        doc = _http_json("https://data-api.binance.vision/api/v3/ticker/24hr?" + urlencode({
             "symbol": _compact_symbol(market),
         }))
-        return {"price": float(doc["price"])}
+        return {"price": float(doc["lastPrice"]),
+                "change": _ticker_number(doc.get("priceChange")),
+                "percentage": _ticker_number(doc.get("priceChangePercent"))}
     if v == "BINANCE_PERPETUAL":
-        doc = _http_json("https://fapi.binance.com/fapi/v1/ticker/price?" + urlencode({
+        doc = _http_json("https://fapi.binance.com/fapi/v1/ticker/24hr?" + urlencode({
             "symbol": _compact_symbol(market),
         }))
-        return {"price": float(doc["price"])}
+        return {"price": float(doc["lastPrice"]),
+                "change": _ticker_number(doc.get("priceChange")),
+                "percentage": _ticker_number(doc.get("priceChangePercent"))}
     if v == "OKX":
         doc = _http_json("https://www.okx.com/api/v5/market/ticker?" + urlencode({
             "instId": _hyphen_symbol(market),
         }))
         rows = doc.get("data") or []
         if rows:
-            return {"price": float(rows[0]["last"])}
+            row = rows[0]
+            last = _ticker_number(row.get("last"))
+            open24h = _ticker_number(row.get("open24h"))
+            # OKX's native rolling-24h open, not a sampled candle range.
+            change = last - open24h if last is not None and open24h is not None else None
+            timestamp = _ticker_number(row.get("ts"))
+            return {
+                "price": last,
+                "change": _ticker_number(change),
+                "percentage": _ticker_number(change / open24h * 100)
+                if change is not None and open24h != 0 else None,
+                "ts_ms": int(timestamp)
+                if timestamp is not None and timestamp > 0 and timestamp.is_integer() else None,
+            }
     if v == "BYBIT":
         doc = _http_json("https://api.bybit.com/v5/market/tickers?" + urlencode({
             "category": "spot",
@@ -1116,7 +1150,9 @@ def _fetch_public_rest_ticker(venue: str, market: str) -> dict[str, Any]:
         }))
         rows = ((doc.get("result") or {}).get("list") or [])
         if rows:
-            return {"price": float(rows[0]["lastPrice"])}
+            ratio = _ticker_number(rows[0].get("price24hPcnt"))
+            return {"price": float(rows[0]["lastPrice"]),
+                    "percentage": ratio * 100 if ratio is not None else None}
     if v == "KRAKEN":
         doc = _http_json("https://api.kraken.com/0/public/Ticker?" + urlencode({
             "pair": _kraken_pair(market),
@@ -1171,9 +1207,16 @@ def fetch_public_ticker(
                     "ask": snap.get("ask"),
                     "mid": snap.get("mid") or snap.get("price"),
                     "last": snap.get("last") or snap.get("price"),
+                    "change": _ticker_number(snap.get("change")),
+                    "percentage": _ticker_number(snap.get("percentage")),
                     "spread_bps": snap.get("spread_bps"),
                     "ts_ms": snap.get("ts_ms"),
-                    "age_s": max(0,time.time()-float(snap.get('ts_ms') or time.time()*1000)/1000) if venue=='POLYMARKET' else 0,
+                    "age_s": (
+                        max(0, time.time() - snap["ts_ms"] / 1000)
+                        if snap.get("ts_ms") is not None else None
+                    ) if venue == "OKX" else (
+                        max(0,time.time()-float(snap.get('ts_ms') or time.time()*1000)/1000) if venue=='POLYMARKET' else 0
+                    ),
                     "source": env.source,
                     "_envelope": env.as_dict(),
                 }

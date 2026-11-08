@@ -1,0 +1,6 @@
+{
+  "research_brief": {
+    "required_checks": ["source_coverage", "freshness", "report_readback"],
+    "required_artifacts": ["evidence", "report"]
+  }
+}

@@ -18,6 +18,207 @@ from nerya.llm.messages import MessagesResponse
 pytestmark = pytest.mark.smoke
 
 
+@pytest.mark.parametrize("crash_at", ["next_model", "next_dispatch", "unknown", "approval", "interaction", "persistence", "pending_receipt", "handled_error", "legacy_handled_error", "provider429"])
+def test_closed_batch_restart_recovery_never_replays_writes(tmp_path, monkeypatch, crash_at):
+    import os
+    from nerya.agent.command_runtime import CommandRuntime
+    from nerya.tools.types import ToolDescriptor, ToolResult, ToolError, ToolErrorKind, RiskLevel
+    from nerya.tools.permissions import PermissionMode
+
+    cfg = _config(tmp_path)
+    cfg.data.setdefault("runtime", {})["command_id"] = "batch-command"
+    if crash_at == "provider429":
+        cfg.data["agent"]["native"]["llm_retry_attempts"] = 1
+    sid = "batch-session"
+    writes = tmp_path / "effect.txt"
+    parent_pid = os.getpid()
+    phase = [0]
+    fail_resume = [crash_at == "provider429"]
+    handled_error = crash_at in ("handled_error", "legacy_handled_error")
+    read_attempts = [0]
+
+    def response(call_id, operation="first"):
+        return MessagesResponse(content=[{"type": "tool_use", "id": call_id,
+            "name": "fixture_write", "input": {"operation": operation}}], stop_reason="tool_use",
+            usage={"input_tokens": 10, "output_tokens": 2})
+
+    class Gateway:
+        def __init__(self, *args, **kwargs): pass
+        def effective_model_metadata(self, *args, **kwargs): return "fixture", "checkpoint-model", {}
+        def call_messages(self, **kwargs):
+            if os.getpid() == parent_pid:
+                if crash_at == "provider429":
+                    assert kwargs["model_provider"] == "healthy-provider"
+                    assert kwargs["model_id"] == "healthy-model"
+                    if fail_resume[0]:
+                        from nerya.core.errors import LLMError
+                        fail_resume[0] = False
+                        error = LLMError("fixture resumed provider rate limited (429)")
+                        error.status_code = 429
+                        raise error
+                # Ask for the exact mutation again: the restored ledger must
+                # answer it without invoking its handler.
+                phase[0] += 1
+                return response("repeat-write") if phase[0] == 1 else _text_response("recovered")
+            con = connect(cfg.paths.db)
+            try:
+                cp = AgentSessionRepository(con).peek_turn_checkpoint(sid)
+            finally:
+                con.close()
+            if writes.exists():
+                assert cp["claim_id"]
+                assert cp["checkpoint"]["total_tool_calls"] == 1 + handled_error
+                results = cp["checkpoint"]["tool_ledger"]["completed_tool_results"]
+                assert len(results) == 1 + handled_error
+                if handled_error:
+                    assert results[0]["name"] == "read_file"
+                    assert results[0]["error"]["kind"] == "not_found"
+                if crash_at == "next_dispatch":
+                    return response("second-dispatch", "second")
+                if crash_at == "provider429":
+                    from nerya.core.errors import LLMError
+                    error = LLMError("fixture provider rate limited (429)")
+                    error.status_code = 429
+                    raise error
+                os._exit(0)
+            if handled_error and not read_attempts[0]:
+                read_attempts[0] += 1
+                return MessagesResponse(content=[{"type": "tool_use", "id": "missing-read",
+                    "name": "read_file", "input": {"path": "missing-typo.txt"}}],
+                    stop_reason="tool_use", usage={"input_tokens": 10, "output_tokens": 2})
+            return response("first-write")
+
+    monkeypatch.setattr(kernel_module, "LLMGateway", Gateway)
+    original_run = kernel_module.WorkspaceNativeAgentLoop.run
+    def run_with_crash(loop, **kwargs):
+        save = loop.checkpoint_sink
+        def boundary(checkpoint):
+            if checkpoint is not None and handled_error:
+                assert checkpoint.resumable
+                if crash_at == "legacy_handled_error":
+                    from dataclasses import replace
+                    checkpoint = replace(checkpoint, resumable=False,
+                        resume_block_reason="batch_recovery_blocked")
+            try:
+                save(checkpoint)
+            except TurnCheckpointResumeError:
+                if crash_at == "persistence":
+                    os._exit(0)
+                raise
+            if checkpoint is not None and crash_at in ("unknown", "approval", "interaction", "pending_receipt"):
+                assert not checkpoint.resumable
+                assert checkpoint.tool_ledger["completed_tool_results"]
+                os._exit(0)
+        loop.checkpoint_sink = boundary
+        return original_run(loop, **kwargs)
+    monkeypatch.setattr(kernel_module.WorkspaceNativeAgentLoop, "run", run_with_crash)
+
+    def execute(config, request):
+        kernel = AgentKernel(config=config, skills=None, permission_mode=PermissionMode.AUTO,
+            model_provider=request.get("model_provider"), model_id=request.get("model_id"))
+        kernel._ensure_registry()
+        def write(call):
+            if writes.exists():
+                os._exit(0) if os.getpid() != parent_pid else pytest.fail("mutation replayed")
+            writes.write_text("one durable effect")
+            if crash_at == "persistence":
+                # Lose the claim after dispatch: persistence must stop the loop.
+                con = connect(config.paths.db)
+                con.execute("UPDATE agent_turn_checkpoints SET claim_id='other-owner' WHERE session_id=?", (sid,))
+                con.close()
+            if crash_at in ("unknown", "approval"):
+                return ToolResult.from_error(tool_use_id=call.id, name=call.name, error=ToolError(
+                    kind=ToolErrorKind.PERMISSION_PENDING if crash_at == "approval" else ToolErrorKind.EXECUTION_ERROR,
+                    message="unresolved", retryable=False,
+                    detail={"execution_state": "unknown"} if crash_at == "unknown" else {}))
+            result = ToolResult.from_text(tool_use_id=call.id, name=call.name, text="written")
+            if crash_at == "pending_receipt":
+                result = ToolResult.from_json(tool_use_id=call.id, name=call.name,
+                    data={"status": "submitted"}, semantic_success=True)
+            if crash_at == "interaction":
+                result.result_protocol = "user_interaction_pending"
+            return result
+        kernel._registry.register(ToolDescriptor(name="fixture_write", description="fixture mutation",
+            input_schema={"type": "object", "properties": {"operation": {"type": "string"}}}, handler=write,
+            risk=RiskLevel.WRITE, read_only=False))
+        return kernel.run_turn(trigger=_trigger("batch-event", "write once"), session_id=sid,
+            turn_id=request.get("turn_id"), resume_turn_id=request.get("resume_turn_id"),
+            continuation_feedback=request.get("continuation_feedback")).asdict()
+
+    manager = CommandRuntime(cfg, execute, epoch="batch-before")
+    manager.submit({"command_id": "batch-command", "session_id": sid,
+        "request": {"payload": {"text": "write once"}}}, start=False)
+    row = manager.store.claim(sid, "owner")
+    pid = os.fork()
+    if pid == 0:
+        try:
+            manager._run(row, "owner")
+            if crash_at == "provider429":
+                os._exit(0)
+            os._exit(3)
+        except BaseException:
+            import traceback
+            traceback.print_exc()
+            os._exit(4)
+    _, status = os.waitpid(pid, 0)
+    assert os.waitstatus_to_exitcode(status) == 0
+    assert writes.read_text() == "one durable effect"
+    with manager.store.transaction() as con:
+        con.execute("UPDATE agent_command_queues SET lease_until=0 WHERE session_id=?", (sid,))
+    fresh = CommandRuntime(cfg, execute, epoch="batch-after")
+    receipt = fresh.reconcile(sid, "batch-command")
+    if crash_at not in ("next_model", "provider429") and not handled_error:
+        assert receipt["command"]["state"] == "unconfirmed"
+        return
+    if crash_at == "provider429":
+        assert receipt["command"]["state"] == "failed"
+        assert receipt["command"]["error"]["status_code"] == 429
+        con = connect(cfg.paths.db)
+        try:
+            assert AgentSessionRepository(con).peek_turn_checkpoint(sid) is not None
+        finally:
+            con.close()
+        snapshot = fresh.store.snapshot(sid)
+        assert snapshot["queue"]["paused"]
+        assert snapshot["checkpoint"] == {"turn_id": row["turn_id"], "resumable": True, "resume_count": 0}
+    else:
+        assert receipt["reconciliation"]["source"] == "host_batch_checkpoint"
+        assert receipt["command"]["state"] == "interrupted"
+    con = connect(cfg.paths.db)
+    try:
+        cp = AgentSessionRepository(con).peek_turn_checkpoint(sid)
+    finally:
+        con.close()
+    assert cp["claim_id"] is None
+    assert cp["checkpoint"]["resumable"] is True
+    assert cp["checkpoint"]["resume_block_reason"] == ""
+    assert cp["checkpoint"]["iterations"] == 1 + handled_error
+    assert cp["checkpoint"]["usage"]["llm_calls"] == 1 + handled_error
+    resumed = fresh.submit({"command_id": "batch-resume", "session_id": sid, "command_type": "resume",
+        "request": {"resume_turn_id": row["turn_id"], "continuation_feedback": "continue safely",
+                    "payload": {}, **({"model_provider": "healthy-provider", "model_id": "healthy-model"}
+                                      if crash_at == "provider429" else {})}}, start=False)
+    resume_row = fresh.store.claim(sid, "resume-owner")
+    assert resume_row["command_id"] == resumed["command"]["command_id"]
+    fresh._run(resume_row, "resume-owner")
+    resumed = fresh.store.snapshot(sid, "batch-resume")["command"]
+    if crash_at == "provider429":
+        assert resumed["state"] == "failed"
+        assert resumed["error"]["status_code"] == 429
+        assert fresh.store.snapshot(sid)["checkpoint"]["resumable"]
+        retry = fresh.submit({"command_id": "batch-resume-retry", "session_id": sid, "command_type": "resume",
+            "request": {"resume_turn_id": row["turn_id"], "continuation_feedback": "continue safely",
+                        "payload": {}, "model_provider": "healthy-provider", "model_id": "healthy-model"}}, start=False)
+        retry_row = fresh.store.claim(sid, "retry-owner")
+        assert retry_row["command_id"] == retry["command"]["command_id"]
+        fresh._run(retry_row, "retry-owner")
+        resumed = fresh.store.snapshot(sid, "batch-resume-retry")["command"]
+    assert resumed["state"] == "succeeded"
+    assert resumed["result"]["final_text"] == "recovered"
+    assert phase[0] == 2
+    assert writes.read_text() == "one durable effect"
+
+
 def _config(tmp_path) -> Config:
     data = deepcopy(DEFAULT_CONFIG)
     data.setdefault("agent", {}).setdefault("native", {})[

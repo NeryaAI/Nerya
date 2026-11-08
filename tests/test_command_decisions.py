@@ -21,13 +21,18 @@ from nerya.core.paths import WorkspacePaths
 
 SID = "decision-session"
 
+def request_snapshot(request):
+    # The live request contains a runtime-owned CancelToken with thread locks;
+    # assertions inspect only its serializable admission fields.
+    return deepcopy({key:value for key,value in request.items() if key!="_task_cancel_token"})
+
 
 @pytest.fixture
 def manager(tmp_path, monkeypatch):
     config = Config(paths=WorkspacePaths(root=tmp_path), data=deepcopy(DEFAULT_CONFIG))
     calls = []
     def execute(config, request):
-        calls.append(deepcopy(request))
+        calls.append(request_snapshot(request))
         return {"stopped_reason": "end_turn", "final_text": "Fixture result"}
     rt = CommandRuntime(config, execute, epoch="decisions-test")
     rt.calls = calls
@@ -243,7 +248,7 @@ def test_revision_proposes_new_plan_and_only_its_accept_executes(manager):
     _, body = seed_plan(manager)
     proposed = []
     def execute(config, request):
-        manager.calls.append(deepcopy(request))
+        manager.calls.append(request_snapshot(request))
         if request["work_mode"] == "plan":
             proposed.append(create_interaction(config, sid=SID, tid=request["turn_id"], call_id="revised-plan",
                 kind="plan", payload={"title": "Revised plan", "steps": ["Read latest report only"]}))
@@ -267,7 +272,7 @@ def test_question_after_approval_continuation_uses_checkpoint_not_approval_again
     seed_approval(manager)
     questions = []
     def execute(config, request):
-        manager.calls.append(deepcopy(request))
+        manager.calls.append(request_snapshot(request))
         if len(manager.calls) == 1:
             questions.append(create_interaction(config, sid=SID, tid=request["turn_id"], call_id="after-approval",
                 kind="question", payload={"title": "Which report?"}))
@@ -283,8 +288,16 @@ def test_question_after_approval_continuation_uses_checkpoint_not_approval_again
         "_auth_actor_id": "operator", "action": "answer", "text": "Latest report"})
     wait_for(lambda: not manager._workers)
     assert len(manager.calls) == 2
-    assert manager.calls[1]["source"] == "user_chat"
+    # Question answers resume the checkpoint without replaying approval or
+    # projecting internal continuation feedback as a new user-chat message.
+    assert manager.calls[1]["source"] == "interaction_continue"
+    assert manager.calls[1]["kind"] == "user.message"
+    assert manager.calls[1]["payload"] == {"text": ""}
     assert manager.calls[1]["resume_turn_id"] == manager.calls[0]["turn_id"]
+    continuation = manager.store.snapshot(SID, "response_" + questions[0]["interaction_id"])["command"]
+    assert continuation["kind"] == "resume"
+    assert continuation["show_user"] is False
+    assert continuation["context"]["interaction_response"]["text"] == "Latest report"
     assert manager.store.snapshot(SID, "command-unrelated")["command"]["state"] == "queued"
 
 

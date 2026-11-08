@@ -27,6 +27,8 @@ from nerya.connectors.data_sources import (
     TushareConnector,
     _env_fallback_api_key,
 )
+from nerya.connectors.ccxt_adapter import CcxtConnector
+from nerya.core.errors import TradingError
 from nerya.connectors.yahoo import YahooFinanceConnector
 from nerya.core import yaml_io
 from nerya.core.config import Config, DEFAULT_CONFIG
@@ -192,6 +194,46 @@ def test_market_data_short_circuits_missing_data_source_credentials(tmp_path) ->
     assert data["should_retry"] is False
     assert data["credential_status"]["status"] == "missing"
     assert "api_key" in data["credential_status"]["required_fields"]
+
+
+def test_ccxt_klines_do_not_require_private_credentials(tmp_path, monkeypatch) -> None:
+    cfg_obj = _bare_config(tmp_path)
+    monkeypatch.setattr(
+        "nerya.tools.native.connectors.fetch_candles",
+        lambda *args, **kwargs: [],
+    )
+
+    result = market_data_handler(
+        ToolCall(
+            name="market_data",
+            arguments={
+                "action": "get_candles",
+                "venue": "hyperliquid_perpetual",
+                "market": "HYPERLIQUID_PERPETUAL:BTC/USDC:USDC",
+                "interval": "15m",
+                "count": 2,
+            },
+        ),
+        config_like=cfg_obj,
+    )
+
+    data = result.content[0].data
+    assert "credential_status" not in data
+    assert data["count"] == 0
+    private = CcxtConnector(exchange_id="hyperliquid", live=True)
+    with pytest.raises(TradingError, match="api credentials"):
+        private._check_live_and_keys()
+
+
+def test_hyperliquid_ccxt_candles_survive_normalization():
+    from nerya.data.candles import normalize_klines
+
+    expected = {"ts": 1792062000, "open": 100.0, "high": 102.0,
+                "low": 99.0, "close": 101.0, "volume": 5.0}
+    unified = [[1792062000000, 100, 102, 99, 101, 5]]
+    native = [{"t": 1792062000000, "o": 100, "h": 102, "l": 99, "c": 101, "v": 5}]
+    assert normalize_klines("HYPERLIQUID", unified) == [expected]
+    assert normalize_klines("HYPERLIQUID", native) == [expected]
 
 
 def test_connector_view_reports_missing_data_source_credentials(tmp_path) -> None:

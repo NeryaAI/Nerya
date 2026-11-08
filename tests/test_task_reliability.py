@@ -1,8 +1,10 @@
 """Regression cases from the 18780 multi-agent interruption incident. Offline only."""
 from contextlib import closing
 from concurrent.futures import ThreadPoolExecutor
+import json
 import sqlite3
 import ssl
+import urllib.error
 
 import pytest
 
@@ -125,12 +127,129 @@ def test_stream_retries_only_before_any_model_output(fragment):
     assert transport.calls==1
 
 
-def test_tls_failure_is_not_retried():
-    transport=Disconnect(error=ssl.SSLCertVerificationError("fixture invalid certificate"))
-    backend=OpenAIMessagesBackend(api_key="fixture",model="gpt-4o",transport=transport)
+_PRIVATE_TLS_DETAIL = "https://private.invalid/path?token=fixture-secret raw-provider-body " * 100
+_TLS_CASES = [
+    (ssl.SSLCertVerificationError, None, "cert_verify"),
+    (ssl.SSLEOFError, None, "eof"),
+    (ssl.SSLError, "SSLV3_ALERT_HANDSHAKE_FAILURE", "handshake"),
+    (ssl.SSLError, "CERTIFICATE_VERIFY_FAILED", "cert_verify"),
+    (ssl.SSLError, "UNEXPECTED_EOF_WHILE_READING", "eof"),
+    (ssl.SSLError, None, "unknown"),
+    (ssl.SSLError, _PRIVATE_TLS_DETAIL, "unknown"),
+]
+
+
+@pytest.mark.parametrize("error_type,reason,category", _TLS_CASES,
+    ids=["cert", "eof", "handshake", "cert-reason", "eof-reason", "unknown", "private-reason"])
+@pytest.mark.parametrize("wrapped", [False, True], ids=["direct", "url-error"])
+@pytest.mark.parametrize("fragment", [None, {"content": "partial"},
+    {"reasoning_content": "partial thought"},
+    {"tool_calls": [{"index": 0, "id": "partial-call",
+        "function": {"name": "read_status", "arguments": "{"}}]}],
+    ids=["before-output", "text", "thinking", "tool"])
+def test_tls_failure_preserves_safe_diagnostics_without_retry(error_type, reason, category, wrapped, fragment):
+    cause = error_type(ssl.SSL_ERROR_SSL, _PRIVATE_TLS_DETAIL)
+    if reason is not None:
+        cause.reason = reason
+    transport = Disconnect(fragment, urllib.error.URLError(cause) if wrapped else cause)
+    backend = OpenAIMessagesBackend(api_key="fixture-secret", model="gpt-4o",
+        transport=transport, provider_name="fixture-provider")
     with pytest.raises(LLMError) as caught:
-        backend(MessagesRequest(system="fixture",messages=[],stream=True))
-    assert caught.value.code=="model_stream_tls_error" and caught.value.retryable is False
+        backend(MessagesRequest(system="fixture", messages=[], stream=True))
+    error = caught.value
+    assert error.code == "model_stream_tls_error" and error.retryable is False
+    assert error.stream_output_committed is bool(fragment)
+    assert transport.calls == 1
+    assert getattr(error, "provider", None) == "fixture-provider"
+    assert getattr(error, "tls_error_class", None) == error_type.__name__
+    assert getattr(error, "tls_error_category", None) == category
+    assert error.__cause__ is transport.error
+    diagnostic = json.dumps({"message": str(error), **vars(error)})
+    assert len(diagnostic) < 500
+    assert not any(value in diagnostic for value in ("https://", "fixture-secret", "raw-provider-body"))
+
+
+@pytest.mark.parametrize("error_type,reason,category", _TLS_CASES[:3], ids=["cert", "eof", "handshake"])
+def test_command_persists_tls_diagnostics_without_private_details(tmp_path, error_type, reason, category):
+    cause = error_type(ssl.SSL_ERROR_SSL, _PRIVATE_TLS_DETAIL)
+    if reason is not None:
+        cause.reason = reason
+    transport = Disconnect(error=urllib.error.URLError(cause))
+    backend = OpenAIMessagesBackend(api_key="fixture-secret", model="gpt-4o",
+        transport=transport, provider_name="fixture-provider")
+
+    def execute(*_):
+        try:
+            return backend(MessagesRequest(system="fixture", messages=[], stream=True))
+        except LLMError as error:
+            # Preserve existing retry bookkeeping, including the real incident's label.
+            error.retry_exhausted = "attempt_budget"
+            raise
+
+    runtime = CommandRuntime(config(tmp_path), execute, epoch="tls-test")
+    runtime.submit(payload(), start=False)
+    runtime._run(runtime.store.claim("conversation-1", "worker"), "worker")
+    with closing(connect(runtime.config.paths.db)) as con:
+        row = con.execute("SELECT state, error_json FROM agent_commands WHERE command_id=?",
+            ("command-001",)).fetchone()
+    assert row["state"] == "failed"
+    assert json.loads(row["error_json"]) == {
+        "code": "model_stream_tls_error", "status_code": None, "type": "LLMError",
+        "retrying": False, "request_id": "", "stream_output_committed": False,
+        "retry_exhausted": "attempt_budget", "provider": "fixture-provider",
+        "tls_error_class": error_type.__name__, "tls_error_category": category,
+    }
+    assert transport.calls == 1
+
+
+def test_command_does_not_forward_unrecognized_tls_metadata(tmp_path):
+    def execute(*_):
+        error = LLMError(_PRIVATE_TLS_DETAIL)
+        error.code = "model_stream_tls_error"
+        error.stream_interrupted = True
+        error.tls_error_class = _PRIVATE_TLS_DETAIL
+        error.tls_error_category = _PRIVATE_TLS_DETAIL
+        error.raw_body = _PRIVATE_TLS_DETAIL
+        raise error
+
+    runtime = CommandRuntime(config(tmp_path), execute, epoch="tls-test")
+    runtime.submit(payload(), start=False)
+    runtime._run(runtime.store.claim("conversation-1", "worker"), "worker")
+    with closing(connect(runtime.config.paths.db)) as con:
+        raw = con.execute("SELECT error_json FROM agent_commands WHERE command_id=?",
+            ("command-001",)).fetchone()[0]
+    assert not {"tls_error_class", "tls_error_category", "raw_body"} & json.loads(raw).keys()
+    assert not any(value in raw for value in ("https://", "fixture-secret", "raw-provider-body"))
+
+
+@pytest.mark.parametrize("fragment", [None, {"content": "partial"},
+    {"reasoning_content": "partial thought"},
+    {"tool_calls": [{"index": 0, "id": "partial-call",
+        "function": {"name": "read_status", "arguments": "{"}}]}],
+    ids=["before-output", "text", "thinking", "tool"])
+def test_loop_never_retries_tls_or_replays_partial_output(fragment):
+    transport = Disconnect(fragment, ssl.SSLEOFError(_PRIVATE_TLS_DETAIL))
+    backend = OpenAIMessagesBackend(api_key="fixture", model="gpt-4o",
+        transport=transport, provider_name="fixture-provider")
+
+    class Gateway:
+        def call_messages(self, **kwargs):
+            return backend(MessagesRequest(system=kwargs["system"], messages=kwargs["messages"],
+                stream=True, on_event=kwargs.get("on_event")))
+
+    loop = _make_loop(Gateway(), config=LoopConfig(max_iterations=5,
+        llm_retry_base_delay=0, llm_retry_max_delay=0))
+    if fragment is None:
+        with pytest.raises(LLMError) as caught:
+            loop.run(system="fixture", user_message="Read status.")
+        assert caught.value.retryable is False
+        assert caught.value.provider == "fixture-provider"
+        assert caught.value.tls_error_category == "eof"
+    else:
+        result = loop.run(system="fixture", user_message="Read status.")
+        assert result.aborted and result.abort_reason == "stream_interrupted"
+        assert result.tool_calls == 0 and result.extra_llm_attempts == 0
+    assert transport.calls == 1
 
 
 def test_pre_output_recovery_keeps_completed_tool_once():
@@ -159,4 +278,4 @@ def test_partial_stream_is_not_replayed_as_a_new_tool():
     result=_make_loop(Gateway(),config=LoopConfig(max_iterations=5)).run(system="fixture",user_message="Read status.")
     assert result.aborted and result.abort_reason=="stream_interrupted"
     assert result.tool_calls==0 and transport.calls==1
-    assert "模型流式响应中断" in result.final_text
+    assert "model response was interrupted" in result.final_text

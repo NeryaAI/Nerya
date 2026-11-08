@@ -119,6 +119,11 @@ def test_draft_scaffolds_draft_proposal(tmp_path):
     steps = " ".join(data["next_steps"]).lower()
     assert "edit_file" in steps or "write_file" in steps
     assert "strategy_submit_proposal" in steps
+    assert set(data["file_paths"]) == {
+        f"{paths_map['strategy_root']}/{name}" for name in data["files"]
+    }
+    assert all(path in steps for path in data["file_paths"])
+    assert "read every path" in steps or "read every exact returned" in steps
 
 
 def test_validate_normalizes_bybit_perpetual_manifest_market(tmp_path):

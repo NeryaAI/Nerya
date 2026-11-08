@@ -191,6 +191,7 @@ def routes():
                 default_tier=(payload or {}).get("default_tier"),
                 intent_tier=(payload or {}).get("intent_tier"),
                 providers=(payload or {}).get("providers"),
+                remove_providers=(payload or {}).get("remove_providers"),
                 tiers=(payload or {}).get("tiers"),
                 vault_passphrase=(payload or {}).get("vault_passphrase"),
                 explicit_overrides=(payload or {}).get("explicit_overrides") is True,

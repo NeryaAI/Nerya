@@ -1,11 +1,34 @@
 """Funds tools enter the producer-owned financial gate; no grant approval tool."""
 from ..registry import make_native_descriptor
 from ..types import ToolResult,ToolError,ToolErrorKind,RiskLevel,PermissionScope
-from ...financial.contracts import FinancialError,context_from_config
+from ...financial.contracts import FinancialError,KINDS,context_from_config
 from ...financial.gateway import FinancialGateway
 
 
 _PAPER_DISCOVERY_SCOPES = frozenset({"execute:strategy", "trade:paper"})
+
+
+def _lending_pool_identity(pool):
+    """Map reviewed catalog identity to the existing chain-qualified asset grammar."""
+    import re
+    from ...connectors.chains import ChainRegistry
+    from ...core.errors import TradingError
+
+    if pool.get("project") != "aave-v3":
+        return None
+    asset = pool.get("symbol")
+    if not isinstance(asset, str) or not re.fullmatch(r"[A-Za-z0-9_.]+", asset):
+        return None
+    chain = pool.get("chain")
+    if not isinstance(chain, str):
+        return None
+    try:
+        chain = ChainRegistry().get(chain).name
+    except TradingError:
+        return None
+    return {"market": f"AAVE_V3:{chain}-{asset}", "protocol": "aave_v3",
+            "component_id": "builtin:aave", "chain": chain, "asset": asset,
+            "pool_id": pool.get("pool_id")}
 
 
 def _component_discovery_mode(tool) -> str | None:
@@ -31,47 +54,80 @@ def _paper_component_contract(result, tool):
     args = tool.arguments or {}
     protocol = str(args.get("protocol") or "").strip().lower()
     market = str(args.get("market") or "").strip()
+    kind = str(args.get("kind") or "").strip()
+    requested = {key: args[key] for key in ("protocol", "market", "kind") if args.get(key)}
     result.update({
         "inventory_scope": "paper_backtest",
         "financial_execution_allowed": False,
+        "historical_data_verified": False,
+        "requested": requested,
+        "next_required_action": {
+            "tool": "Skill",
+            "arguments": {"skill": "backtest", "file": "references/replay-capabilities.md"},
+            "requested": dict(requested),
+            "preserve_requested_scope": True,
+            "allow_proxy_substitution": False,
+            "hint": (
+                "Inspect the replay contract and an advertised read-only historical source for the exact requested "
+                "protocol/market and original user window. Component matching is execution metadata, not historical "
+                "OHLC or replay coverage; a current quote and an unsupported symbol enumerator establish neither. "
+                "If unavailable, retain the disabled candidate where feasible and report the exact missing "
+                "source, observed coverage and replay capability. Do not substitute a venue/token, invent an "
+                "adapter, waive evidence or grant permissions. A limitation is not authorization."
+            ),
+        },
         "capability_note": (
             "This is read-only component metadata for paper/backtest routing. "
-            "It grants no funds scope, approval, signer or live execution."
+            "It grants no funds scope, approval, signer or live execution. "
+            "Installed actions do not establish historical data or replay coverage."
         ),
     })
-    if not protocol:
-        return result
+    components = [row for row in result.get("components", []) if row.get("available")]
+    if protocol:
+        # Only aliases supported by the existing financial adapters. Jupiter
+        # swaps use TradingFunds, not a component named builtin:jupiter.
+        component_name = protocol.replace("-", "_")
+        component_id = "builtin:" + {
+            "jupiter": "trading", "jupiter_v2": "trading",
+            "uniswap_v3": "uniswap", "uniswap_v4": "uniswap",
+            "aave_v3": "aave", "pancakeswap_v3": "pancakeswap",
+        }.get(component_name, component_name)
+        components = [row for row in components if row.get("id") == component_id]
+        if components:
+            component = components[0]
+            result["matched_component"] = {"id": component["id"], "revision": component["revision"]}
 
-    component_id = "builtin:" + protocol.replace("-", "_")
-    component = next((row for row in result.get("components", []) if row.get("id") == component_id), None)
-    if component is None:
-        result["capability_gap"] = {
-            "code": "paper_replay_component_unavailable",
-            "status": "blocked",
-            "retryable": False,
-            "requested": {"protocol": protocol, **({"market": market} if market else {})},
-            "available_actions": [],
-            "missing_actions": ["swap"],
-            "reason": "No installed component advertises the requested protocol.",
-            "next_required_action": "stage a reviewed protocol replay component or retain the blocked receipt",
+    actions = sorted({str(action) for row in components for action in row.get("actions", [])})
+    if protocol == 'uniswap_v3' and components:
+        result['pool_discovery'] = {
+            'status': 'unresolved', 'canonical_pool_identity': None,
+            'pair_is_pool_identity': False, 'historical_data_verified': False,
+            'next_required_action': {'tool': 'data_api', 'arguments': {
+                'op': 'schema', 'provider': 'uniswap', 'action': 'pool_discover'}},
+            'skill': 'strategy_author', 'file': 'references/mainstream-strategies.md',
+            'message': 'Component inventory does not resolve a pool. Inspect uniswap.pool_discover '
+                'for bounded Ethereum chain 1 current pool identity using exact catalog symbols '
+                'or token addresses. It is not an ETH/WETH alias or historical coverage proof. '
+                'Keep multiple fee-tier candidates explicit. uniswap.pool_history separately requires '
+                'a verified pool_address and requested window. Other chains remain unresolved by '
+                'this source; retain exact scope. ETH/WETH mapping requires explicit admitted task instructions.',
         }
-        return result
-
-    actions = sorted(str(action) for action in component.get("actions", []))
-    if not ({"trade", "swap"} & set(actions)):
+    if (protocol and not components) or (kind and kind not in actions):
         result["capability_gap"] = {
             "code": "paper_replay_component_unavailable",
             "status": "blocked",
             "retryable": False,
-            "requested": {"protocol": protocol, **({"market": market} if market else {})},
+            "requested": {key: value for key, value in (("protocol", protocol), ("market", market), ("kind", kind)) if value},
             "available_actions": actions,
-            "missing_actions": ["swap"],
+            "missing_actions": [kind] if kind else [],
             "reason": (
-                f"{component_id} exposes the listed protocol actions only; it does not "
-                "provide a paper/backtest swap execution surface."
+                "No available installed component advertises the requested protocol."
+                if protocol and not components else
+                f"The available components in this inventory scope do not advertise the requested action {kind}."
             ),
-            "next_required_action": "stage a reviewed protocol replay component or retain the blocked receipt",
+            "next_required_action": "stage a reviewed component for the requested capability or retain the blocked receipt",
         }
+    return result
 
 
 def register_financial_tools(registry,deps,*,replace=False):
@@ -118,6 +174,10 @@ def register_financial_tools(registry,deps,*,replace=False):
                 "mode": {"type": "string", "enum": ["paper", "backtest", "live"]},
                 "protocol": {"type": "string"},
                 "market": {"type": "string"},
+                "kind": {
+                    "type": "string", "enum": sorted(KINDS),
+                    "description": "Optional financial request kind to check against advertised actions in paper/backtest mode. With protocol, checks that component; otherwise checks available inventory. Omission inventories all actions.",
+                },
             }
         if action=="execute":fields["quote_hash"]={"type":"string"}
         if action in {'refresh','discard'}:fields['expected_revision']={'type':'integer'}
@@ -125,7 +185,7 @@ def register_financial_tools(registry,deps,*,replace=False):
         if action=='prepare':fields['parent_action_id']={'type':'string'}
         descriptors.append(make_native_descriptor(name="financial_"+action,
             description={"readiness":"Read local dependencies and builtin execution prerequisites. Discover workspace components through financial_components; absence here does not establish missing provider support. Does not resolve secrets, call providers, enable trading or certify live-money execution.",
-                         "components":"Read available workspace trading components, immutable revisions, actions and parameter schemas. For paper/backtest pass mode=paper or mode=backtest plus the requested protocol/market; this is a bounded read-only inventory and never grants funds or approval. A declaration is not live verification.",
+                         "components":"Discover builtin and workspace financial execution capabilities, including Jupiter swaps, independently of connector_list and wallet data_api catalogs. Read financial_ops for protocol routing. Returns immutable revisions, actions and parameter schemas. For paper/backtest pass mode=paper or mode=backtest plus the requested protocol/market without funds access. Installed actions establish neither configured wallets, historical data/replay coverage nor live verification; no funds or approval are granted.",
                          "account_state":"Read actual protocol account state, positions, collateral, debt and collection health through an available component. No order or signature.",
                          "prepare":"Prepare a fixed financial action and quote. Read financial_ops Skill first. No funds are sent.",
                          "execute":"Execute a prepared action within a finite approved policy. Missing authorization pauses for an operator; never auto-retry uncertainty.",

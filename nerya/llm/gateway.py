@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import uuid
 from dataclasses import dataclass, replace
@@ -385,6 +386,60 @@ class LLMGateway:
                         safe_items.append(item)
                 out[key] = safe_items
         return out
+
+    def _record_messages_diagnostic(
+        self, request: MessagesRequest, response: MessagesResponse,
+    ) -> None:
+        """Bounded shape evidence only; never persist bodies or tool arguments."""
+        def label(value: Any) -> str:
+            if not isinstance(value, str):
+                return ""
+            # Redact before truncation so cutting a token cannot evade detection.
+            safe = redact_display_dict(value)
+            if safe != value:
+                return "[redacted]"
+            if not re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.:-]*", value):
+                return "[withheld]"
+            return value[:128]
+
+        try:
+            correlation = self._safe_context_correlation(request.metadata)
+            record: dict[str, Any] = {"kind": "llm.messages_diagnostic"}
+            for key in ("session_id", "turn_id", "iteration"):
+                value = correlation.get(key)
+                if isinstance(value, str):
+                    record[key] = label(value)
+                elif isinstance(value, int) and abs(value) <= 2**63 - 1:
+                    record[key] = value
+
+            choice = request.tool_choice
+            choice_type = choice.get("type") if isinstance(choice, dict) else None
+            choice_type = choice_type.strip().lower() if isinstance(choice_type, str) else "auto"
+            choice_type = {"any": "required", "function": "tool"}.get(choice_type, choice_type)
+            if choice_type not in {"auto", "none", "required", "tool"}:
+                choice_type = "unknown"
+            safe_choice = {"type": choice_type}
+            if choice_type == "tool" and isinstance(choice, dict):
+                function = choice.get("function")
+                name = choice.get("name")
+                if name is None and isinstance(function, dict):
+                    name = function.get("name")
+                safe_choice["name"] = label(name)
+
+            tool_uses = response.tool_uses()
+            record.update({
+                "tools_count": len(request.tools),
+                "tool_names": [label(tool.get("name")) if isinstance(tool, dict) else ""
+                               for tool in request.tools[:32]],
+                "tool_choice": safe_choice,
+                "stop_reason": label(response.stop_reason),
+                "response_tools_count": len(tool_uses),
+                "response_tool_names": [label(tool.get("name")) for tool in tool_uses[:32]],
+            })
+            jsonl.append(self.usage.journal_path, redact_display_dict(record))
+        except Exception:
+            # Observability must not fail or retry a completed model call.
+            pass
 
     @staticmethod
     def _context_error_payload(error: BaseException) -> dict[str, Any]:
@@ -1038,6 +1093,7 @@ class LLMGateway:
             )
         except Exception:
             pass
+        self._record_messages_diagnostic(route_request, response)
         if context_full:
             self._record_context_full(
                 call_id=context_call_id,
@@ -1072,9 +1128,9 @@ class LLMGateway:
         provider = str(provider_override or "").strip().lower()
         model = str(model_override or "").strip()
 
-        # A model selected within this tier is a preference, so retain the
-        # tier's remaining routes with their own credentials and policy.
-        # Unlisted custom selections still use the pinned path below.
+        # Partial selections prefer a matching route while retaining fallback.
+        # A concrete provider/model pair pins that route; unlisted custom
+        # selections use the pinned path below.
         if provider or model:
             routes = [self._apply_provider_profile(route, provider_profiles)
                       for route in configured_routes(base_cfg)]
@@ -1096,6 +1152,8 @@ class LLMGateway:
                         remaining.pop(index)
                 else:
                     remaining.pop(index)
+                if provider and model:
+                    remaining = []
                 connection = {key: selected[key] for key in (
                     "provider", "model", "models", "base_url", "provider_key_ref", "provider_key_env", "kind",
                 ) if key in selected}
@@ -1154,6 +1212,10 @@ class LLMGateway:
             cfg = dict(provider_cfg or {key: base_cfg[key] for key in (
                 "allowed_tasks", "allowed_classes", "max_tokens", "temperature",
             ) if key in base_cfg})
+            # A selected model supplies transport/inference settings, not
+            # another tier's authority to admit tasks.
+            for key in ("allowed_tasks", "allowed_classes"):
+                cfg[key] = list(base_cfg.get(key) or [])
             if not provider_cfg and connection_cfg:
                 for key in ("base_url", "provider_key_ref", "provider_key_env", "kind"):
                     value = (provider_profiles.get(provider) or {}).get(key, connection_cfg.get(key))

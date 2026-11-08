@@ -78,8 +78,11 @@ def test_manual_rename_during_title_generation_is_not_replaced(tmp_path, monkeyp
     assert _title(instance)["title_source"] == "operator"
 
 
-def test_transient_title_error_has_fallback_and_one_retry(tmp_path, monkeypatch):
+def test_transient_title_error_keeps_original_fallback_across_followup(tmp_path, monkeypatch):
     instance = _kernel(tmp_path)
+    state = instance._sessions.load('chat-1')
+    state.turn_ids = []
+    instance._sessions.save(state)
     calls = []
 
     class Gateway:
@@ -93,15 +96,19 @@ def test_transient_title_error_has_fallback_and_one_retry(tmp_path, monkeypatch)
             return SimpleNamespace(parsed={"title": "ETH 网格策略复盘"})
 
     monkeypatch.setattr(kernel_module, "LLMGateway", Gateway)
-    _generate(instance)
+    instance._maybe_auto_title_session(session_id='chat-1', strategy_id=None,
+        user_text='帮我优化 ETH 网格交易策略', final_text='已准备策略', turn_id='turn-1')
     assert _title(instance)["title_source"] == "fallback"
     assert _title(instance)["title_generation_attempts"] == 1
 
-    instance._sessions.append_turn("chat-1", "turn-2")
-    _generate(instance)
-    assert _title(instance)["title_source"] == "light"
-    assert _title(instance)["title"] == "ETH 网格策略复盘"
+    instance._sessions.append_turn('chat-1', 'turn-1')
+    # Kernel titles the next result before appending that current turn.
+    instance._maybe_auto_title_session(session_id='chat-1', strategy_id=None,
+        user_text='继续原任务。', final_text='继续处理', turn_id='turn-2')
+    assert _title(instance)["title_source"] == "fallback"
+    assert _title(instance)["title"] == "帮我优化 ETH 网格交易策略"
 
-    instance._sessions.append_turn("chat-1", "turn-3")
-    _generate(instance)
-    assert len(calls) == 2
+    instance._sessions.append_turn('chat-1', 'turn-2')
+    instance._maybe_auto_title_session(session_id='chat-1', strategy_id=None,
+        user_text='继续。', final_text='继续处理', turn_id='turn-3')
+    assert len(calls) == 1

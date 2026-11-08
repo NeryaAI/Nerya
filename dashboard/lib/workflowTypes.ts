@@ -21,10 +21,12 @@ export type WorkflowMetadata = {
 };
 export type WorkflowView = {
   ok: boolean; error?: string; strategy_id: string; revision: string;
+  recovery?: { file: "strategy.yml"; content: string; diagnostic: string };
   strategy: WorkflowGraph; evolution: WorkflowGraph; manifest: Record<string, unknown>;
   metadata: WorkflowMetadata; legacy: boolean; can_edit: boolean;
   agent_defaults?: { max_iterations?: number; max_tool_calls?: number; max_wall_seconds?: number; max_parallel?: number; tier?: string };
-  source: { proposal_id: string | null; state: string; omitted_files: string[] };
+  source: { proposal_id: string | null; state: string; omitted_files: string[]; file_count?: number };
+  validation_receipt?: { status: "current" | "stale" | "missing" | "unavailable"; report: import("./strategyTypes").StrategyValidationReport | null };
 };
 export type WorkflowSummary = {
   key: string; strategy_id: string; proposal_id: string | null; title: string;
@@ -35,6 +37,7 @@ export type WorkflowChange = { node_id: string; config?: unknown; content?: stri
 export type WorkflowAddition = { kind: "script" | "agent" | "account" | "source"; name: string; content?: string; config?: unknown };
 export type WorkflowProposalRequest = {
   strategy_id: string; proposal_id?: string | null; base_revision: string;
+  manifest_source?: string;
   changes?: WorkflowChange[]; additions?: WorkflowAddition[]; metadata?: WorkflowMetadata;
 };
 export type WorkflowSaveResult = {

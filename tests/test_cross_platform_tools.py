@@ -235,6 +235,13 @@ def test_default_shell_quoted_python_command(workspace):
     assert "shell-ok" in result.text()
 
 
+def test_failed_shell_result_has_structured_error_for_agent_recovery(workspace):
+    result = run_shell_handler(ToolCall(name="run_shell", arguments={"command": "exit 7"}), root=workspace)
+    assert result.is_error and result.semantic_success is False
+    assert result.error is not None and result.error.kind.value == "execution_error"
+    assert result.error.detail["exit_code"] == 7
+
+
 def test_quoted_shell_paths_are_not_split_at_metacharacters(workspace):
     path = workspace / "R & D; research" / "input.txt"
     command = f'cat "{path}" | head'

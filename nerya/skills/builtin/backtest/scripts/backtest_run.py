@@ -13,6 +13,7 @@ from typing import Any
 from .....core import yaml_io
 from .....core.config import load_config as load_workspace_config
 from .....core.errors import TradingError
+from .....tools.native.paths import to_workspace_relative
 from .....data.candles import canonical_venue
 from .....evolution.patch_proposal import list_proposals
 from .....strategies.package import StrategyPackage, load_package, load_package_from_dir
@@ -126,6 +127,7 @@ def run_strategy_backtest(
     settings: dict[str, Any] | None = None,
     progress=None,
     cancel_token=None,
+    runtime_config=None,
 ) -> dict[str, Any]:
     from .run_state import RunTracker
     tracker = RunTracker(progress=progress, cancel_token=cancel_token)
@@ -133,7 +135,7 @@ def run_strategy_backtest(
         return _run_strategy_backtest(strategy_id=strategy_id, proposal_id=proposal_id,
             package_dir=package_dir, preset=preset, config_path=config_path,
             workspace=workspace, allow_mock=allow_mock, preflight_only=preflight_only,
-            data_mode=data_mode, settings=settings, tracker=tracker)
+            data_mode=data_mode, settings=settings, tracker=tracker, runtime_config=runtime_config)
     except BaseException as exc:
         tracker.fail(exc)
         raise
@@ -141,7 +143,7 @@ def run_strategy_backtest(
 
 def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
                            config_path, workspace, allow_mock, preflight_only,
-                           data_mode, settings, tracker) -> dict[str, Any]:
+                           data_mode, settings, tracker, runtime_config=None) -> dict[str, Any]:
     from .preflight import inspect_package, BacktestPreflightError
     from .history_data import resolve_window, store_root
     from .run_state import atomic_json
@@ -187,6 +189,9 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     if data_mode is not None:
         cfg.data_mode = data_mode
     cfg.validate()
+    if cfg.agent_replay:
+        from .authorized_replay import authorized_policy
+        authorized_policy(config_obj)
     if cfg.evaluation_mode == "observation" and package.manifest.policy.allow_direct_order is not False:
         raise TradingError("Observation evaluation requires policy.allow_direct_order: false")
     # 内联参数与文件配置同等权威，不能被旧的周期探测/短窗口默认值覆盖。
@@ -238,7 +243,8 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
         destination = snapshot_root / rel
         destination.parent.mkdir(parents=True, exist_ok=True)
         destination.write_text(content, encoding="utf-8")
-    if not allow_mock:
+    pool_price_requested = bool(package.manifest.extras.get('params', {}).get('price_simulation'))
+    if not allow_mock and not pool_price_requested:
         unsupported_markets = _unsupported_explicit_historical_markets(
             cfg.markets,
             config_obj=config_obj,
@@ -248,7 +254,10 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
             raise NoHistoricalDataError(
                 f"unsupported historical data venue for {markets}; "
                 "configure a provider/data source before running a standard "
-                "OHLCV backtest"
+                "OHLCV backtest",
+                reason='historical_provider_unsupported', retryable=False,
+                receipt={'markets': unsupported_markets, 'timeframes': list(cfg.timeframes),
+                         'start': cfg._window_start, 'end': cfg._window_end},
             )
     cfg._requested_timeframes = list(cfg.timeframes)
     estimated_bars = sum((cfg._window_end - cfg._window_start) // _tf_seconds(tf) + cfg.warmup_bars
@@ -258,17 +267,19 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     tracker.phase("preparing_data")
     requested_tf = cfg.tf
     requested_timeframes = list(cfg.timeframes)
-    timeframe_candles_by_market, attempted_timeframes, missing_timeframes = (
-        _load_candles_with_timeframe_fallback(
-            cfg,
-            now=now,
-            cache_root=cache_root,
-            allow_mock=allow_mock,
-            config_obj=config_obj,
-            progress=tracker.data_progress,
-            check_cancel=tracker.check_cancel,
+    from .pool_price_inputs import prepare_pool_prices, bind_pool_price_evidence
+    pool_prices = prepare_pool_prices(runtime_config or config_obj, package, cfg, out_dir, cancel_token=tracker.cancel_token)
+    if pool_prices is not None:
+        timeframe_candles_by_market = pool_prices['series']
+        attempted_timeframes, missing_timeframes = list(cfg.timeframes), []
+    else:
+        timeframe_candles_by_market, attempted_timeframes, missing_timeframes = (
+            _load_candles_with_timeframe_fallback(
+                cfg, now=now, cache_root=cache_root, allow_mock=allow_mock,
+                config_obj=config_obj, progress=tracker.data_progress,
+                check_cancel=tracker.check_cancel,
+            )
         )
-    )
     tracker.phase("validating_data")
     data_manifest = _validate_replay_data(cfg, timeframe_candles_by_market, allow_mock=allow_mock)
     atomic_json(out_dir / "data_manifest.json", data_manifest)
@@ -292,25 +303,52 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     provenance["data_manifest"] = str((out_dir / "data_manifest.json").relative_to(config_obj.paths.root))
     tracker.phase("replaying")
     from .process_replay import execute_replay
-    result = execute_replay(
-        snapshot_root,
-        cfg,
+    replay_kwargs = dict(
         candles_by_market=candles_by_market,
         timeframe_candles_by_market=timeframe_candles_by_market,
-        artefacts_dir=out_dir,
-        strategy_config=package.manifest.asdict(),
+        artefacts_dir=out_dir, strategy_config=package.manifest.asdict(),
         check_cancel=tracker.check_cancel,
-        progress=tracker.update,
     )
+    decision_proof = None
+    if cfg.agent_replay:
+        from .authorized_replay import execute_authorized_replay
+        result, decision_proof = execute_authorized_replay(config_obj, snapshot_root, cfg,
+            cancel_token=tracker.cancel_token, **replay_kwargs)
+    else:
+        result = execute_replay(
+        snapshot_root,
+        cfg,
+        **replay_kwargs,
+        progress=tracker.update,
+        )
     tracker.phase("reporting")
     metrics = assemble_metrics(result)
+    if decision_proof is not None:
+        metrics["decision_replay"] = decision_proof
+        metrics["performance_evidence"] = False
+        metrics["replay"].update(agent_execution="current_model_retrospective_replay",
+            scope="current_model_retrospective_replay", decision_count=decision_proof["decision_count"])
+        metrics["flags"].append("current_model_retrospective_not_contemporaneous")
     # Closed-trade pairing annotates realized PnL. Persist only after that
     # calculation so CSV details and the reported metrics share one result.
     csvs = write_csv_artifacts(result, out_dir)
     end_files, end_omitted = _read_files(package.root)
     provenance["source_changed_during_run"] = bool(end_omitted) or source_revision(end_files) != provenance["source_revision"]
     metrics["provenance"] = provenance
+    if pool_prices is not None:
+        bind_pool_price_evidence(metrics, provenance, pool_prices)
+    if decision_proof is not None:
+        provenance["decision_tape"] = {key:decision_proof[key] for key in ("label","binding","tape_sha256","decision_count","decision_receipts_verified")}
+        if (decision_proof.get("decision_receipts_verified") is True
+                and decision_proof.get("model_decisions_verified") is True):
+            provenance["scope"] = (
+                "Historical replay with verified current-model Agent answers; "
+                "no contemporaneous decisions, provider model-version attestation, "
+                "live fills or out-of-sample claim."
+            )
     temporal_warning_codes = {
+        "lookahead_negative_shift", "lookahead_backward_fill", "lookahead_centered_window",
+        "lookahead_forward_asof", "lookahead_backward_interpolation",
         "lookahead_dynamic_shift", "lookahead_dynamic_center", "lookahead_dynamic_asof",
         "time_alignment_resample", "nondeterministic_wall_clock",
         "nondeterministic_randomness", "external_strategy_data_read",
@@ -321,7 +359,7 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     ]
     metrics["bias_checks"] = {
         "version": 1,
-        "static_temporal_scan": "passed",
+        "static_temporal_scan": "warnings" if temporal_warnings else "passed",
         "static_warnings": temporal_warnings,
         "historical_prefix_only": True,
         "closed_bar_context": True,
@@ -474,7 +512,7 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
     return {
         "ok": True,
         "run_path": str(out_dir),
-        "run_receipt": str(out_dir / "run.json"),
+        "run_receipt": to_workspace_relative(out_dir / "run.json", config_obj.paths.root),
         "preflight": preflight,
         "data_manifest": data_manifest,
         "requested_window_complete": data_manifest["requested_window_complete"],
@@ -485,6 +523,8 @@ def _run_strategy_backtest(*, strategy_id, proposal_id, package_dir, preset,
         "engine": "native",
         "execution_mode": metrics.get("execution_mode"),
         "performance_evidence": metrics.get("performance_evidence"),
+        "accounting_currency": metrics.get("accounting_currency"),
+        "decision_replay": metrics.get("decision_replay"),
         "bias_checks": metrics["bias_checks"],
         "research_checks": metrics["research_checks"],
         "equity_preview": ([{"time": ts, "value": value} for ts, value in
@@ -643,7 +683,7 @@ def _apply_coverage_gate(metrics: dict[str, Any], cfg: Any) -> None:
         metrics["coverage_message"] = (
             "All requested closed candles and warmup rows are present in the verified local datasets."
             if complete else
-            "Explicit partial-window research: required historical candles are missing. This is NOT a complete requested-window backtest; see data_manifest.json for each dataset's gaps."
+            "Partial-window research: required historical candles are missing. This is NOT a complete requested-window backtest; see data_manifest.json for each dataset's gaps."
         )
         if not complete:
             metrics["flags"] = list(dict.fromkeys([*metrics.get("flags", []), "incomplete_requested_window"]))
@@ -872,11 +912,17 @@ def _load_target_package(
     proposal_id: str | None,
     package_dir: str | Path | None = None,
 ) -> StrategyPackage:
+    from .....strategies.execution_contract import require_implemented_candidate
+
+    def checked(package):
+        require_implemented_candidate(package)
+        return package
+
     if package_dir:
         path = Path(package_dir).expanduser()
         if not path.is_absolute():
             path = paths.root / path
-        return load_package_from_dir(path)
+        return checked(load_package_from_dir(path))
     if proposal_id:
         for proposal in list_proposals(paths):
             if proposal.id != proposal_id:
@@ -891,9 +937,9 @@ def _load_target_package(
                 raise TradingError(
                     f"proposal {proposal_id!r} has no strategy package"
                 )
-            return load_package_from_dir(candidates[0])
+            return checked(load_package_from_dir(candidates[0]))
         raise TradingError(f"unknown proposal: {proposal_id!r}")
-    return load_package(paths, str(strategy_id or ""))
+    return checked(load_package(paths, str(strategy_id or "")))
 
 
 _ALWAYS_SUPPORTED_EXPLICIT_VENUES = {
@@ -1092,7 +1138,7 @@ def _load_candles_with_timeframe_fallback(
     usable_timeframes = [tf for tf in common_timeframes if timeframe_has_usable_rows(tf)]
     selected_tf = (
         cfg.tf
-        if cfg.tf in usable_timeframes
+        if not cfg.allow_timeframe_fallback or cfg.tf in usable_timeframes
         else (usable_timeframes[0] if usable_timeframes else common_timeframes[0])
     )
     original_primary = cfg.tf
@@ -1114,9 +1160,8 @@ def _validate_replay_data(cfg: Any, series: dict[str, dict[str, list]], *, allow
     total = 0
     complete = True
     requested = getattr(cfg, "_requested_timeframes", cfg.timeframes)
-    # A fallback is explicit and separately recorded. Required auxiliary frames
-    # remain required; the original primary is not silently relabelled.
-    frames = _unique([cfg.tf, *requested]) if not cfg.allow_timeframe_fallback else list(cfg.timeframes)
+    # Keep missing requested frames visible even when a fallback can execute.
+    frames = _unique([cfg.tf, *requested])
     for market in cfg.markets:
         for tf in frames:
             rows = series.get(market, {}).get(tf, [])
@@ -1138,18 +1183,15 @@ def _validate_replay_data(cfg: Any, series: dict[str, dict[str, list]], *, allow
             datasets.append(info)
             total += len(rows)
             if not rows:
-                blockers.append({"code": "missing_timeframe", "message": f"{market} {tf}: required historical series is missing"})
+                (blockers if tf == cfg.tf else warnings).append({"code": "missing_timeframe", "message": f"{market} {tf}: required historical series is missing"})
             elif len(rows) <= cfg.warmup_bars:
-                blockers.append({"code": "warmup_insufficient", "message": f"{market} {tf}: {len(rows)} bars cannot satisfy {cfg.warmup_bars} warmup bars"})
+                (blockers if tf == cfg.tf else warnings).append({"code": "warmup_insufficient", "message": f"{market} {tf}: {len(rows)} bars cannot satisfy {cfg.warmup_bars} warmup bars"})
             if sample and not allow_mock and market.split(":", 1)[0].upper() not in {"MOCK", "PAPER"}:
                 blockers.append({"code": "sample_in_history", "message": f"{market} {tf}: sample candles cannot prove historical performance"})
             if not info["complete"] or sample:
                 complete = False
                 note = {"code": "incomplete_history", "message": f"{market} {tf}: {info['missing_bars']} of {info['expected_bars']} required closed candles missing; retained local rows can be reused"}
-                if cfg.coverage_policy == "strict" and not sample and not allow_mock:
-                    blockers.append(note)
-                else:
-                    warnings.append(note)
+                warnings.append(note)
     if total > cfg.max_bars:
         blockers.append({"code": "input_budget_exceeded", "message": f"{total} rows exceeds max_bars={cfg.max_bars}"})
     return {"version": 1, "ok": not blockers, "phase": "validating_data", "blockers": blockers,
@@ -1169,13 +1211,15 @@ def _discover_strategy_timeframes(strategy_root: Path) -> list[str]:
     # Workflow cards are runtime configuration, not merely labels. Prefer their
     # ordered timeframes before legacy source-literal discovery.
     manifest = yaml_io.load(strategy_root / "strategy.yml", default={}) or {}
+    declared = manifest.get("timeframe") if isinstance(manifest, dict) else None
+    out = [str(declared).strip()] if isinstance(declared, str) and declared.strip() else []
     sources = manifest.get("data_sources", []) if isinstance(manifest, dict) else []
     if isinstance(sources, dict):
         sources = list(sources.values())
     from nerya.strategies.source_config import dimensions
-    out = [frame for source in sources if isinstance(source, dict)
+    out.extend(frame for source in sources if isinstance(source, dict)
            and source.get("capability", "candles") in {"candles", "features"}
-           for frame in dimensions(source, "timeframes", "timeframe", [])]
+           for frame in dimensions(source, "timeframes", "timeframe", []))
     main_path = strategy_root / "main.py"
     if not main_path.exists():
         return _unique(out)

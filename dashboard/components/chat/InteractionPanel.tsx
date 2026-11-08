@@ -46,8 +46,8 @@ function InteractionCard({item,onResolved}:{item:Interaction;onResolved:()=>void
     const value={...draft,answers:{...draft.answers,[question.id]:next}};
     setDraft(value);writeEditDraft(key,value);
     if(advance){
-      if(index===questions.length-1)void respond("answer",value);
-      else {const moved={...value,index:index+1};setDraft(moved);writeEditDraft(key,moved);}
+      // Selecting the last option is still editing, not consent to submit.
+      if(index<questions.length-1){const moved={...value,index:index+1};setDraft(moved);writeEditDraft(key,moved);}
     }
   }
   function continueAnswer(){if(structured&&index<questions.length-1)change({index:index+1});else void respond(item.kind==="plan"?"accept":"answer");}
@@ -61,7 +61,7 @@ function InteractionCard({item,onResolved}:{item:Interaction;onResolved:()=>void
     <button type="button" className="flex min-h-11 w-full items-center justify-between gap-3 text-left" onClick={()=>setExpanded(!expanded)} aria-expanded={expanded}>
       <strong id={item.interaction_id}>{item.payload.title}</strong><span className="text-xs text-[color:var(--text-muted)]">{item.kind==="plan"?(i18nCopy(zh, "copy.components_chat_InteractionPanel.003")):(i18nCopy(zh, "copy.components_chat_InteractionPanel.004"))}</span>
     </button>
-    {expanded&&<form onSubmit={e=>{e.preventDefault();continueAnswer();}} className="space-y-3">
+    {expanded&&<form onKeyDownCapture={e=>{if(e.key==="Enter"&&(e.nativeEvent.isComposing||e.keyCode===229))e.preventDefault();}} onSubmit={e=>{e.preventDefault();continueAnswer();}} className="space-y-3">
       {item.payload.message&&<p className="whitespace-pre-wrap text-sm">{item.payload.message}</p>}
       {item.payload.steps&&<ol className="list-decimal space-y-1 pl-5 text-sm">{item.payload.steps.map((step,i)=><li key={i}>{step}</li>)}</ol>}
       {item.payload.deliverables?.length ? <p className="text-sm">{i18nCopy(zh, "copy.components_chat_InteractionPanel.005")}{item.payload.deliverables.join(" · ")}</p>:null}

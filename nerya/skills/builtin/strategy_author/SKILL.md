@@ -1,355 +1,148 @@
 ---
 name: strategy_author
-description: "Create, edit, debug and validate Nerya script, script-gated Agent and event Agent strategies. Use the main conversation; finish the requested historical replay without activating trading."
-version: 0.19.0
+description: "Create, edit and repair Nerya script, script-gated Agent and scheduled/event Agent strategies, including CEX, on-chain, LP and DeFi candidates. Save an editable proposal; validate as needed and load backtest only for requested historical research."
+version: 0.22.0
 license: MIT
 author: Nerya
 ---
 
 # Strategy Author
 
-For CEX, on-chain Meme, prediction-market and LP/DeFi execution, read
-`references/mainstream-strategies.md` after financial_readiness. Preserve the
-requested chain and venue; select templates by their supported inputs and
-execution contract. The tested
-templates under `templates/` support deterministic exits and durable LP steps;
-they do not activate trading or replace the requested strategy thesis.
+## Create the candidate first
 
-For a plain paper CEX EMA/crossover, load
-`references/mainstream-strategies.md` and author the strategy's own `main.py`;
-there is no `templates/mainstream/` asset subtree. Do not guess a path such as
-`templates/mainstream/ema_cross.py.j2`. If the request explicitly adds an Agent
-confirmation step, load `references/trend_follow_subagent.md` instead.
+A creation request is complete with a saved, editable strategy proposal and an
+honest account of its behavior, assumptions and unfinished bindings. It does not
+require tests, backtests, reports, a tuning plan or complete pool history.
+This file owns that completion boundary; detailed references supply interfaces
+and optional methods, not additional mandatory stages.
 
-Create and verify the user's strategy in this conversation. Preserve the requested
-rules, markets, timeframe, history period and risk limits. Never promote, activate
-schedules or place account orders unless separately requested. Historical simulated
-orders are not account orders; a no-live-order request does not forbid backtesting.
+1. Preserve the user's strategy thesis, markets, timeframe, risk limits and
+   execution intent. Choose reasonable reversible implementation defaults and
+   explain them. Research only what helps implement the candidate. Missing
+   accounts, credentials, pool identity or historical data can remain explicit
+   pending bindings; they do not prevent saving a draft. Ask only when a choice
+   materially changes the user's goal, cost or authority. Do not repeatedly ask
+   permission to continue ordinary authoring.
+2. For a script-driven Agent, read `references/trend_follow_subagent.md`
+   **before the first draft call** to choose synchronous script-owned
+   confirmation or Agent-executor dispatch. For synchronous confirmation, use
+   the reference's canonical scaffold fields and reuse its returned files.
+   Use `strategy_draft_proposal` to save new work, or continue the current
+   proposal for edits and repairs. Use its actual ID and returned paths, with
+   only advertised tool fields. Finish the requested logic in that candidate;
+   distinguish an incomplete scaffold from an implemented strategy. Leave
+   unresolved resources clearly unbound rather than inventing accounts, pools,
+   provider IDs or SDK calls.
+3. Choose a suitable template, adapt existing code or implement the strategy
+   yourself. Templates are examples, not required package shapes. Include
+   dependencies the chosen implementation actually imports. Read only the
+   references and files needed for the current decision or edit; no whole-package
+   reading pass, per-script explanation format or checklist is required.
+4. Save useful changes before optional verification. Create/draft defaults to
+   `validate:false`; explicit `validate:true` requests diagnostics. Default to
+   no test execution. Use `strategy_validate` or targeted checks to investigate a
+   concrete uncertainty or satisfy an explicit request. Preserve diagnostics,
+   repair the same candidate as appropriate, and report failed, missing or stale
+   checks honestly; independent `strategy_validate` still reports real failures.
+   Validation success is not a prerequisite for saving,
+   delivering a candidate or submitting it for review.
+5. Deliver the saved candidate and explain its rules, chosen defaults, pending
+   bindings and actual verification status. Creation alone needs no further
+   action. When submission is requested, use `strategy_submit_proposal` on the
+   same candidate and report its actual state. Submission performs static
+   diagnostics without smoke tests or test execution; failures do not prevent
+   `pending_review`. Submission is not activation.
+   Add tuning or a review workflow only when requested or needed by the chosen
+   design, with its schedule inactive.
 
-A ban on submission means authored draft only: do not submit or promote it.
-A ban on running/promotion/trading does not ban implementation or explicitly
-requested isolated tests. “No orders” is a runtime restriction, NOT a request for
-an empty scaffold. Honor a separate explicit no-test instruction. Keep requested
-deliverables pending until actual receipts exist.
+## Permissions and recovery
 
-## Default path — finish work, not a tour of every reference
+Keep all authored changes in the proposal lane; never overwrite an active
+strategy. Preserve explicit no-submit/no-test restrictions, existing account and
+risk limits, and separately authorized approval, promotion, activation and trading
+operations. Creating or submitting a proposal grants none of those permissions.
+Keep new trading and review schedules disabled.
 
-For factor-based strategies or explicit research reuse, load `factor_library`,
-search once for relevant definitions and export the selected exact versions.
-Include the returned factors.json in the strategy bundle and calculate from
-closed candles using nerya.sdk.factors.calculate_factor. Do not substitute a
-similar factor for user-specified rules, inherit validation across markets, or
-resolve latest during replay. Ordinary strategies need no empty factor file.
+Use the installed SDK and approved execution paths. Any chosen validation,
+test or replay must retain its execution sandbox and approval boundaries.
+Resolve pending approvals and unknown side effects through the original
+operation's recovery path before retrying; a continuation or fresh authorization
+does not confirm an earlier uncertain write or model call.
 
-1. **Resolve scope once.** For a named protocol or financial component, load
-   financial_ops, then call financial_components with
-   `mode="paper"`/`"backtest"` and the requested protocol/market when the
-   candidate is not live-authorized. This inspects installed component IDs,
-   revisions, actions and parameter schemas through a bounded read-only route;
-   it does not grant funds permissions. financial_readiness covers
-   builtin configuration prerequisites; its omissions do not establish missing
-   workspace support. Use the selected component's documented contract before
-   market discovery. For unspecified markets, discover the missing identifiers.
-   Reuse supplied markets and candidate IDs. For a requested
-   crypto market-cap ranking use `market_data(action="ranked_universe", venue="binance",
-   count=N, rank_by="market_cap", quote="USDT")`; keep its observed date and tradable
-   exclusions. Do not launch additional ranking searches after a successful result.
-   A connector row with `credential_status.status="missing"` and
-   `configured=false` means the live/public transport is not configured; it
-   does not erase an installed connector or create a paper replay component.
-   When `venue_mapping_complete:true`, use `market_ids` directly: do not call
-   `list_symbols`, web search/fetch, or another ranking source to revalidate them.
-   For a clearly fresh creation request with no candidate ID, do not grep/list the
-   workspace or recall memory just to hunt for an older strategy with the same name.
-   Check current candidates before following an ID recalled from old history.
-   Do not read guessed test/source paths. A fresh creation does not need an
-   existing strategy tour; resolve installed capability through its Skill.
-   For a missing path, use returned file lists rather than repeat guesses.
-   Record the requested chain/network, venue-qualified market, timeframe, history
-   window and execution restrictions in the candidate. Complete scope resolution
-   when these match the selected component and data source; retain an explicit
-   `capability_gap` when the requested action is not advertised. Read the
-   recovery procedure in references/replay-capabilities.md for missing history
-   or unsupported inputs. A blocked, non-retryable `capability_gap` stops
-   proposal submission and replay for that candidate; report the exact missing
-   action instead of switching venues or inventing a proxy.
-2. **Implement the strategy.** For non-candle inputs or a new workspace provider,
-   first load `references/replay-capabilities.md` to choose an evidence path from
-   actual supported inputs. For a protocol/financial component, load
-   financial_ops and the installed component contract before drafting; generic
-   exchange templates do not establish that component's execution support.
-   Settle its actual rules, parameters, inputs and
-   execution tests first; then author its separate review plan in step 3. When the
-   request is sufficiently specified, prefer saving the completed bundle in one
-   `strategy_draft_proposal(create_tuning=true, files={"main.py":..., "strategy.yml":..., "strategy.md":..., "subagents/strategy_tuner.agent.md":..., "tests/test_contract.py":...})`
-   call (use only fields present in the tool schema).
-   The tool saves and validates that actual bundle. Keep the returned ID; a successful
-   inline validation needs no duplicate read/edit/validate cycle. For an existing
-   candidate or intentionally incomplete scaffold, use `read_file` then
-   `edit_file` / `write_file` on the exact returned paths. A scaffold is not an
-   implemented named strategy. Do not silently replace AlphaTrend or another named
-   algorithm with a generic moving-average template. If named-algorithm semantics are
-   genuinely needed, use at most one authoritative search plus one fetch, then stop
-   researching once the definition is sufficient. Use an existing paper account;
-   call `account_list` at most once per turn and reuse that result. Never repeat it
-   merely to reconfirm the same selected account. Choose one schedule form (cron OR
-   interval), disabled. Pure script execution means `execution_mode:script`,
-   `agent_task.enabled:false`, and no model calls in trading ticks; its separate
-   review plan does not turn the trading script into an Agent strategy.
-3. **Build the strategy-specific review plan.** Load
-   `Skill(skill="strategy_author", file="templates/review-plan.md")` after settling
-   the strategy, and read `references/review-plan.md` for evidence and validation
-   requirements. Adapt the plan to THIS strategy rather than copying stock prose.
-   Use valid objective IDs: risk_adjusted_return, drawdown, win_rate, slippage,
-   execution_quality, return, sharpe or sortino. Strategy-specific criteria such
-   as signal correctness belong in review_plan prose, not invented enum values.
-   Record the review plan under `tuning.review_plan`; it does not create a trading
-   step or start an independent job.
-   Save `strategy.yml::tuning` and its actual `subagents/strategy_tuner.agent.md`
-   together in the SAME candidate; do not create a second trading strategy or a
-   separate task. Supply these files in step 2's complete bundle, or edit the exact
-   existing proposal paths. The separate review workflow is **review scheduler →
-   evidence script → review Agent (Proposer)**. Include independent timing/timezone,
-   lookback, evidence sufficiency, strategy-specific checks, permitted changes and
-   validation/hold conditions. Keep `tuning.schedule.enabled:false` as well as the
-   trading schedule disabled. Normal creation uses `tuning.enabled:true` to define
-   the review capability, not to start it. An explicit no-AI/no-review requirement
-   covering the whole strategy uses `create_tuning:false`, `tuning.enabled:false`
-   and a documented opt-out instead; never silently widen an existing opt-out.
-4. **Verify the saved version.** If the saved bundle was not already validated by
-   the generation receipt, run `strategy_validate` after the final edit,
-   then `strategy_submit_proposal` for the SAME candidate. A normal
-   creation request includes verification, not activation. Honor explicit draft-only
-   or no-test restrictions. Do not repeatedly validate unchanged files.
-5. **Run the actual replay once.** Use the evidence path established in step 2;
-   candle history alone cannot replay protocol snapshots or financial actions.
-   An authored custom replay uses a supported package entrypoint, not a guessed
-   tool or a stand-alone test labelled as a backtest.
-   Load `Skill(skill="backtest")` when its contract
-   is not already present. `strategy_backtest` owns preflight, reusable local history,
-   coverage checks, isolated replay and reports. If the candidate already declares
-   `strategy.yml.backtest`, call `strategy_backtest` directly with its `proposal_id`;
-   the tool reads those defaults itself. Do NOT inspect/cat/read the candidate merely
-   to rediscover its replay settings. For a candidate without replay defaults, pass
-   the intended user-requested `settings` directly, e.g.
-   `{"window_days":365,"tf":"1h","warmup_bars":100}`.
-   Use this field only if present in the actual tool schema; older runtimes and
-   advanced existing settings use `config_path`. Do NOT orchestrate extra preflight,
-   inspect, download and local-replay calls unless preparation fails or the user
-   specifically requested download-only/offline operation. Keep strict coverage;
-   never shorten the year, change timeframe or remove stops to get a green result.
-6. **Inspect the receipt and finish.** Include the separate review plan and its
-   disabled schedule in the handoff; a plan is not a completed review. Report actual
-   dates, requested dates, markets,
-   coverage, execution counts and research verdict. The tool automatically supplies
-   the strategy/backtest card. Do not publish duplicate market/research charts merely
-   to make a backtest card appear. A poor return is not a tool failure or permission
-   to run an unrequested optimization loop. Repair a concrete error in the SAME
-   candidate; do not retry unchanged input or recreate the strategy. If those fixes
-   changed strategy behavior, update the review plan in the same candidate before
-   final validation. Completion includes the saved review plan (or explicit opt-out),
-   its independent schedule and disabled/active state, not a promise to add it later.
+On continuation, reuse the confirmed candidate and inspect only the saved state
+needed for the next action. If its identity is missing, use
+`evolve_proposals(scope="task")` and the returned ownership/recovery evidence;
+an unrelated same-name proposal is not a substitute. For stale-file or revision
+errors, reread the named file/state and correct the same operation.
+Retry only after a relevant input or known precondition changes.
 
-No housekeeping, deleted-test cleanup, environment probes or unrelated Git work is
-part of this path. Existing loaded references remain usable: reread only when a
-missing section, changed file, or actual error requires it. When passing `file`,
-use `Skill(skill=..., file=...)`, not guessed host paths or tool names.
-Reference paging uses offset>=0 and limit 1..400; omit paging fields normally
-and continue from returned next_offset only when another section is needed.
+## Requested backtests and research
 
-For a requested fixed order size, make `policy.max_single_order_usd` consistent
-with `params.sizing.fixed_usd`; do not retain a scaffold's smaller hard-coded cap.
-Persist `schedule: {type: cron, cron: '0 */4 * * *', enabled: false}` for a disabled
-4h schedule (or the actual requested schedule). Root `schedule_enabled` is not
-a runtime setting. Explicit daily risk limits remain authoritative and must not
-be relaxed to improve a result. If no daily limit was requested, use 0 (uncapped
-at this strategy layer, not a bypass of account-level limits), not a guessed cap.
+Load `Skill(skill="backtest")` when the user explicitly requests a backtest,
+historical replay or comparison. Follow that Skill's autonomous period selection
+and partial-result workflow. Preserve explicit dates, assets, strategy settings
+and risk rules; explain chosen periods and gaps. Missing history or incomplete LP
+states limit research claims, not candidate delivery.
 
-## Default sizing and participation
+A script-Agent strategy must retain an actual Agent decision path when requested.
+Authoring that path does not require running the model. For requested historical
+model execution, use the backtest Skill's existing authorization and sandbox
+path. Separate branch fixtures, historical dispatch, model decisions, simulated
+fills and account activity in the evidence.
 
-For NEW trading strategies with no explicit sizing request, use **percentage of
-current account NAV**, not a fixed 50/100/1000 USD order. Persist
-`params.sizing: {method: pct_nav, pct_nav: 0.90}` for one position slot and pass
-`ctx.config.params["sizing"]` unchanged to `open_position`. `0.90` means 90%,
-NOT 0.9% and NOT 90. With K simultaneous slots, allocate `0.90 / K` per slot;
-normally K = min(3, number of markets), and bind `policy.max_open_positions` and
-`backtest.max_open_trades` to the same K. A ranked winner-only strategy uses K=1.
-This is a 90% deployment budget with 10% headroom, not a promise to stay invested
-or permission to use the same 90% on every asset. NAV is not free cash: existing
-positions, other strategies, reservations, fees and account limits still apply.
+## Delivery evidence
 
-Never inherit a template's 100 USD single-order or 1000 USD daily cap. When the
-user supplied neither, set those NEW strategy-layer dollar caps to 0; do not
-change existing strategy/account limits. Use `backtest.stake_amount.mode: unlimited`
-to respect SDK sizing (it does NOT mean unlimited funds or leverage). Explicit
-fixed sizes, lower risk budgets, observation-only rules and existing strategy
-settings take precedence. Do not rescale an existing strategy without a request.
+The strategy-authoring minimum is `source_binding` plus `candidate`.
+`strategy_contract`, behavioral tests, replay, coverage and report checks are
+optional diagnostics with their actual statuses. A creation-only delivery should
+not add them as required stages. Use the existing contract key and tool schema;
+for example:
 
-For an open-ended creation request, favor an **active, capital-efficient** design:
-one meaningful entry signal, only necessary independent filters, a documented
-exit and a re-entry rule. Avoid stacking arbitrary RSI/volume/trend/confidence
-vetoes or tiny fixed take-profits that leave a trend strategy mostly in cash.
-Keep named/user-specified algorithms intact. More exposure is not more alpha;
-do not force trades, remove stops, add leverage or martingale, or tune until a
-curve looks good. A normal creation still runs one verification replay.
-
-For multi-asset allocation, Agent order fields, explicit risk budgets, weak
-participation or an almost-flat curve, load `references/position-sizing.md`.
-The final receipt review must distinguish no signals, rejected orders, small
-notional, missing Agent execution and genuinely flat market returns.
-
-## SDK essentials for finite script strategies
-
-This section is the installed SDK contract for ordinary script authoring. Do not
-use shell, Python inspection, repository globbing or installation paths to rediscover
-these signatures. The application source directory is not the user workspace.
-Read another reference only for a genuinely missing capability, not to confirm
-the calls already documented here. Write operator-facing progress in the user's language.
-
-A model already awakened to decide whether AI should run is NOT a script gate.
-
-Use `from nerya.strategies import StrategyContext, StrategyResult, StrategyAgentTask`.
-For AlphaTrend use the SDK's tested pure function instead of inventing the
-indicator again: `from nerya.strategies.indicators import alphatrend` and
-`signal = alphatrend(candles, period=14, coefficient=1.0, offset=2)` (use requested
-parameter values). `signal['alpha']` and `signal['lagged']` are aligned arrays;
-`signal['buy'][-1]` / `signal['sell'][-1]` are crosses against the SAME line delayed
-by two candles, NOT upper/lower price channels. ATR smoothing defaults to SMA of
-true range; MFI is preferred and missing volume uses RSI. A spot strategy is
-long/flat unless margin/short selling is explicitly requested. On a sell signal
-close an existing long, never silently create a leveraged short position.
-
-For a standard long/flat indicator strategy, use the shared finite execution
-component. Do not handwrite timestamps, state compatibility branches, duplicate
-MFI/RSI formulas, multi-market routing or crossover math that the SDK already owns:
-
-```python
-from nerya.strategies.indicators import alphatrend
-from nerya.strategies.signal_runner import run_signal_strategy
-
-def run(ctx):
-    return run_signal_strategy(ctx, alphatrend)
+```json
+{"skill_id":"strategy_author","workflow_id":"strategy_authoring",
+ "requested_scope":{"summary":"Create the requested strategy; unresolved account/pool bindings remain pending"},
+ "stages":[{"id":"author","state":"in_progress"},
+   {"id":"deliver","required_checks":["source_binding"],"required_artifacts":["candidate"]}]}
 ```
 
-Set the user's values in strategy.yml: `timeframe`, `markets`, `policy`, and
-`params.indicator` (e.g. `{period:14, coefficient:1.0, offset:2}`), `params.lookback`,
-`params.sizing`, `params.protection`, `params.confidence`. The component reads those
-parameters unchanged and handles closed candles, market routing, dedupe, settled
-positions and SDK entry/exit. AlphaTrend's MFI/RSI already selects the recurrence;
-do NOT add another MFI>50 entry filter or redefine MFI unless explicitly requested.
-This is reusable SDK execution, not an optimizer or an Agent Loop. Keep the normal
-version-1 annotation comments on the small main.py and include tests of the saved
-parameters, library signal invocation and entry/exit behavior.
+When using delivery tools, register the actual producer-returned candidate as
+`{"artifact_id":"candidate","ref":"<source_binding.artifact_id>","revision":"<source_binding.revision>"}`.
+Use the latest `delivery_revision` as `expected_revision` for updates/finalization.
+Producers own their checks; omit model-authored `checks` from `delivery_update`.
+Reconcile current state on a revision conflict instead of rerunning producers for
+bookkeeping. Inspect the actual finalizer result before claiming workflow
+completion; source binding proves the saved version, not behavior or profitability.
+The installed `references/delivery-contract.json` supplies the contract IDs.
 
-SDK candles use `ts` (seconds) and explicit `ts_ms`, `timestamp_ms`, `open_time_ms`
-aliases (milliseconds); `close_time_ms` is the close boundary. Never replace an
-unknown timestamp with 0 and then use it as a dedupe key. `ctx.state.get/set` and
-mapping access are equivalent, scoped state operations in runtime and replay.
-The configured universe is `ctx.config.markets`; a candle callback is routed by
-`ctx.trigger.get("market")`, NEVER by `ctx.config.markets[0]`. A scheduled callback
-without a market may iterate all markets. Deduplicate CLOSED candles separately by
-market/timeframe using `ctx.state`. No full-universe loop per single-market event.
+Bind verification claims to actual receipts and source revisions. A later edit
+can stale earlier evidence. Report tests/replay as not run when absent; a saved
+script, `ok:true` envelope or `pending_review` state proves neither execution nor
+returns. Preserve partial/failed diagnostics without turning them into authoring
+gates. If work stops, say what was saved, what remains unresolved and the next
+concrete action.
 
-Read `ctx.market.candles(market, timeframe=..., limit=...)`; candle rows are mappings.
-Filter timestamps by the injected `ctx.clock.now_ms()`, preserve units and use only
-completed candles. Return a real error for a failed data/state reader, not no-signal.
-Positions are `ctx.portfolio.positions(market)`; use settled quantity/entry prices,
-not an order submission receipt. `open_position(market=...,side="long",sizing={...},
-confidence=...,reasoning_ref=...)` submits independently of `run()`'s return value.
-An `ok` result or `open_long` label is not a fill. Keep SDK failures and rejections.
-`ctx.result.error(message=..., kind="data_error")` is valid; `error(reason=...)` is not.
+## Load references by need
 
-Expose tunable parameters in strategy.yml and actually read them. Explain the saved
-parameters through the shared SDK: `ctx.config.params`, `ctx.config.timeframe`,
-and `ctx.config.get(...)` work identically in runtime and replay; the older
-`ctx.config.extras` mapping remains available. Do not catch AttributeError and
-silently replace authored parameters with defaults. Review scheduling must remain
-disabled until activation is requested; generating a review plan is part of creation,
-not permission to optimize a losing backtest now. A loss is a valid research result.
-Persist protection state until the settled position is actually flat, not merely
-when a close request is submitted. Use entry/prior high-water state for historical
-stops, never `price <= price - distance`, and never relabel a generic EMA as a named indicator.
-Standard percentage/price stop-loss and take-profit rules, percentage trailing
-stops and time limits can be passed unchanged to `open_position(protection=...)`;
-the native replay has a recorded historical execution model for these rules.
+Use `Skill(skill="strategy_author", file="<relative path>")` for the relevant
+section; reuse already loaded material.
 
-### Concrete call shapes (examples, not strategy signals or parameter defaults)
+- SDK calls, errors and signal handling: `references/script-sdk.md`.
+- Script/Agent routing, schedules and canvas: `references/workflows.md`.
+- Authoring edge cases and evidence: `references/authoring-contract.md`.
+- Market/protocol implementation options: `references/mainstream-strategies.md`;
+  use `financial_ops` for installed financial component contracts as needed.
+- LP sampled studies or rate-policy implementations:
+  `references/lp-sampled-research.md` or `references/rate-policy.md`.
+- Position sizing: `references/position-sizing.md`; preserve explicit sizing and
+  existing limits, using percentage-of-NAV defaults for new unspecified sizing.
+- Actual persistent listeners: `references/continuous.md`; finite event Agents
+  remain ordinary routed invocations.
+- Requested tuning/review: `references/review-plan.md` and
+  `references/review.md`; requested bounded optimization: `quant-strategy-loop`.
 
-```python
-params = ctx.config.params                  # exact strategy.yml params
-timeframe = ctx.config.timeframe            # exact strategy.yml timeframe
-market = ctx.trigger.get("market")          # routed candle event
-markets = (market,) if market else ctx.config.markets  # timer: all configured markets
-bars = ctx.market.candles(market, timeframe=timeframe, limit=200)
-position = ctx.portfolio.position(market)   # None, or settled size/avg_price
-indicators = ctx.market.features(market, timeframe=timeframe, lookback=200)
-entry = ctx.trading.open_position(
-    market=market, side="long", sizing=ctx.config.params["sizing"],
-    protection={"stop_loss": {"type": "pct", "value": 0.02},
-                "take_profit": {"type": "pct", "value": 0.05}},
-    confidence=0.8, reasoning_ref="the actual entry signal",
-)
-exit_receipt = ctx.trading.close_position(
-    market=market, side="long", confidence=0.8, reasoning_ref="the actual exit signal")
-```
-
-Only call the entry/exit example in the corresponding actual signal branch.
-No entry/exit is implied by loading this Skill. Use the user's values, not example
-values. Named indicator calculations can be local pure-Python functions in main.py;
-no provider imports, source inspection or installed indicator library is required.
-
-Explain the saved
-logic with concise `@nerya.version`, `title`, `description`, `logic`, `rationale`,
-`scope`, `input`, `output`, `risk`, `validation` and `step` comments in main.py.
-Comments describe actual behavior, not unsupported claims. Minimal tests exercise
-entry, hold, exit and duplicate paths, not only import or permissive assertions.
-`@nerya.version 1` is the annotation protocol version, NOT an edit counter. Do not
-increment it when revising a strategy. Read every existing generated file before
-overwriting it (including strategy.md and tests), or provide complete files in the
-initial generation call to avoid a redundant scaffold/read/rewrite cycle.
-
-Minimal complete annotation syntax for the SDK-delegating main.py (change prose
-to describe actual configuration; `execute` is the stable step ID, not a number):
-
-```python
-# @nerya.version 1
-# @nerya.title Script signal strategy
-# @nerya.description Execute the configured indicator through the shared SDK.
-# @nerya.logic Evaluate closed candles, then submit the configured entry or exit.
-# @nerya.rationale Reuse tested signal and execution components without optimizing parameters.
-# @nerya.scope Configured markets and timeframe only; no account configuration changes.
-# @nerya.input Historical or live closed candles, declared parameters and settled positions.
-# @nerya.output Trade submission receipts or explicit hold/error outcomes.
-# @nerya.risk Historical OHLC assumptions do not guarantee live execution or profitability.
-# @nerya.validation Verify this saved source and its requested historical window.
-# @nerya.step execute | Execute strategy | Route closed candles through the shared SDK.
-```
-
-## Load only the reference matching this strategy
-
-- Creation/edit completion: `templates/review-plan.md` for the separately authored
-  strategy review plan. Every review invocation uses `references/review.md` to
-  adapt its checks to that version and run's evidence without changing the strategy
-  or future schedule automatically.
-- Script-gated/scheduled/finite event Agent: `references/workflows.md` and the
-  relevant `references/script-control.md` section. A Python gate runs BEFORE AI;
-  skipped branches do not call a model. Native Agent replay checks dispatch/inputs,
-  not historical model trading performance (`agent_execution:not_run`).
-- Actual persistent/WebSocket listener: `references/continuous.md`; do not place an
-  infinite listener in a cron tick. Finite candle events are not continuous mode.
-- Detailed SDK, protection, exotic instruments: `references/specialized-contracts.md`.
-  Never delete live `protection` without an explicitly implemented historical exit
-  model. Bar-close exits are not equivalent to exchange intrabar stop execution.
-- Detailed source/review annotations: `references/explanations.md`; only when the
-  compact annotation contract above is insufficient.
-- Advanced verification: `references/verification.md`; data-only/offline requests:
-  `Skill(skill="backtest", file="references/history-data.md")`.
-- Other edge cases: `references/authoring-contract.md`. It is not a mandatory read.
-- Requested research charts (not duplicate backtest cards):
-  `Skill(skill="research", file="references/visual-deliverables.md")`.
-
-An observer declares `evaluation.mode:observation`, real input sources and
-`policy.allow_direct_order:false`. `allowed_tools:[]` means no tools, not market-only
-tools. Keep the Agent role editable. Requested input `outputs` must already be
-published, not the future model answer. Keep historical observations separate from
-current analysis, and fees/percentages/source limitations visible in the final answer.
+Use closed candles, the injected clock, settled positions and persistent dedupe
+where the strategy needs them. Preserve financial action identity and protection;
+a missing protocol binding is not permission to substitute a spot trade.
+Pure script ticks make no model calls; a requested script gate runs before the
+Agent. Explain strategy logic in the user's language without imposing a mandatory
+annotation block on every script.

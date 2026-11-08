@@ -68,16 +68,29 @@ export function diffLines(source: string): DiffLine[] {
 export type InteractionReceipt = { title: string; action: string; rows: { id: string; question: string; answers: string[] }[]; note: string };
 const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && !!item.trim()) : [];
 
+/** Recover only the human title from a persisted continuation feedback leak. */
+export function interactionTitle(text: string): string | null {
+  const prefix = "[completion gate continuation]\n";
+  const visible = text.startsWith(prefix) ? text.slice(prefix.length) : text;
+  if (!visible.startsWith("User response to ")) return null;
+  const boundary = visible.indexOf(": {", "User response to ".length);
+  if (boundary < 0) return null;
+  const title = visible.slice("User response to ".length, boundary).trim();
+  return title || null;
+}
+
 /** Exact legacy feedback prefix only. User prose and malformed payloads are left untouched. */
 export function interactionReceipt(text: string): InteractionReceipt | null {
-  if (!text.startsWith("User response to ")) return null;
-  const boundary = text.indexOf(": {");
+  const continuationPrefix = "[completion gate continuation]\n";
+  const visible = text.startsWith(continuationPrefix) ? text.slice(continuationPrefix.length) : text;
+  if (!visible.startsWith("User response to ")) return null;
+  const boundary = visible.indexOf(": {");
   if (boundary < 0) return null;
-  const parsed = readJsonPrefix(text, boundary + 2);
+  const parsed = readJsonPrefix(visible, boundary + 2);
   if (!parsed) return null;
   const response = object(parsed.value);
   if (!["answer", "accept", "revise", "reject"].includes(String(response.action))) return null;
-  const remainder = text.slice(parsed.end).trimStart();
+  const remainder = visible.slice(parsed.end).trimStart();
   const questions = remainder.startsWith("Questions:") ? readJsonPrefix(remainder, "Questions:".length) : null;
   // 只隐藏已知续跑协议，不能因一个相似前缀吞掉普通用户文字或损坏的问题记录。
   if (remainder && (!questions || !Array.isArray(questions.value))) return null;
@@ -90,8 +103,8 @@ export function interactionReceipt(text: string): InteractionReceipt | null {
     const answer = object(answers[id]), question = definitions.find(row => row.id === id);
     return { id, question: String(question?.question || id), answers: [...strings(answer.selected), ...(typeof answer.text === "string" && answer.text.trim() ? [answer.text] : [])] };
   });
-  if (!rows.length && Array.isArray(response.selected)) rows.push({ id: "selected", question: text.slice(17, boundary), answers: strings(response.selected) });
-  return { title: text.slice("User response to ".length, boundary), action: String(response.action), rows, note: typeof response.text === "string" ? response.text : "" };
+  if (!rows.length && Array.isArray(response.selected)) rows.push({ id: "selected", question: visible.slice(17, boundary), answers: strings(response.selected) });
+  return { title: interactionTitle(text) || visible.slice("User response to ".length, boundary), action: String(response.action), rows, note: typeof response.text === "string" ? response.text : "" };
 }
 
 export function reasoningPreview(text: string): string {

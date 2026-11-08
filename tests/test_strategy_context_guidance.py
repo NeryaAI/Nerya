@@ -208,10 +208,13 @@ def test_strategy_draft_and_submit_descriptions_describe_the_lane(tmp_path) -> N
     assert "next_steps" in draft_desc
     assert "return this scaffold result and stop" in draft_desc
     assert "does NOT enter the pending-review queue" in draft_desc
-    assert "pass complete main.py, strategy.yml, strategy.md and tests in files" in draft_desc
-    assert "Successful inline validation needs no redundant read/edit/validate calls" in draft_desc
-    assert "editing the staged files with read_file + edit_file / write_file" in draft_desc
-    assert "run strategy_validate" in draft_desc
+    assert "For multi-file new work, scaffold once without files" in draft_desc
+    assert "A complete inline files bundle is allowed only when naturally small" in draft_desc
+    assert "successful inline validation needs no redundant read/edit/validate calls" in draft_desc
+    assert "read the exact returned proposal_paths" in draft_desc
+    assert "one file per bounded edit_file / write_file call" in draft_desc
+    assert "run strategy_validate on the finished package with the same proposal_id" in draft_desc
+    assert "For fully specified new work, pass complete" not in draft_desc
     assert "finish with strategy_submit_proposal" in draft_desc
     assert "Skill" in draft_desc
     # SDK contract reminders survive on the scaffold tool.

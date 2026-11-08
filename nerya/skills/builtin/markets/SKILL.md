@@ -5,6 +5,17 @@ description: "Use for current or historical market data, order books, symbol met
 version: 0.1.0
 license: MIT
 author: Nerya
+metadata:
+  nerya:
+    script_policy:
+      read_only:
+        - get_quote.py
+        - get_candles.py
+        - get_book.py
+        - list_symbols.py
+        - ranked_universe.py
+        - onchain_history.py
+        - wallet_balances.py
 ---
 <!-- nerya-skill-frontmatter-end -->
 

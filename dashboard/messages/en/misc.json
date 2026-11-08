@@ -7,6 +7,8 @@
     "needsPermission": "This tool call needs operator permission.",
     "approved": "Permission approved",
     "rejected": "Permission rejected",
+    "expired": "Permission request expired",
+    "cancelled": "Permission request cancelled",
     "request": "Permission request",
     "batchApproval": "{count} tool calls require approval. Approve or reject individually below.",
     "tradeApprovalTitle": "Confirm trade order",

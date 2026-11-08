@@ -190,6 +190,8 @@ class ExchangeProviderSpec:
     # data-source-only paper accounts.
     credential_fields: tuple[CredentialField, ...] = ()
     revision: str = "builtin"
+    venue_family: str = ""
+    route_instrument: str = ""
 
     def matches(self, venue: str) -> bool:
         v = (venue or "").lower()
@@ -208,6 +210,7 @@ class ExchangeProviderSpec:
             "links": dict(self.links),
             "description": self.description, "supports": dict(self.supports),
             "instrument_types": list(self.instrument_types),
+            "venue_family": self.venue_family, "route_instrument": self.route_instrument,
             "credential_fields": [f.to_dict() for f in self.credential_fields],
             "revision": self.revision,
         }
@@ -656,6 +659,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     ))
     reg.register(ExchangeProviderSpec(
         id="binance", label="Binance Spot (ccxt)", kind="cex",
+        venue_family="binance", route_instrument="spot",
         runtime="python_ccxt",
         # F7: "binanceusdm"/"binancecoinm" used to sit here, and since
         # this spec registers before the perpetual ones, first-match
@@ -705,6 +709,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     ))
     reg.register(ExchangeProviderSpec(
         id="hyperliquid", label="Hyperliquid (ccxt)", kind="cex",
+        venue_family="hyperliquid",
         runtime="python_ccxt",
         aliases=("hl",), factory=_hyperliquid,
         install_hint="pip install ccxt",
@@ -965,6 +970,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
 
     def _perp_spec(
         venue_id: str, label: str, ccxt_id: str, *,
+        venue_family: str = "",
         default_type: str | None = None,
         with_passphrase: bool = False,
         docs_url: str = "",
@@ -989,6 +995,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
 
         return ExchangeProviderSpec(
             id=venue_id, label=label, kind="cex", runtime="python_ccxt",
+            venue_family=venue_family, route_instrument="perpetual",
             aliases=aliases, factory=factory,
             install_hint="pip install ccxt",
             install_command="pip install ccxt",
@@ -1003,6 +1010,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
 
     reg.register(_perp_spec(
         "binance_perpetual", "Binance USD-M Perpetual",
+        venue_family="binance",
         ccxt_id="binanceusdm",
         aliases=("binance_perp", "binanceusdm"),
         docs_url="https://developers.binance.com/docs/derivatives/usds-margined-futures/general-info",
@@ -1010,6 +1018,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     ))
     reg.register(_perp_spec(
         "binance_coinm_perpetual", "Binance COIN-M Perpetual",
+        venue_family="binance",
         ccxt_id="binancecoinm",
         # "binancecoinm" moved here from the spot binance spec (F7).
         aliases=("binance_coinm", "binancecoinm"),
@@ -1060,6 +1069,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     ))
     reg.register(_perp_spec(
         "hyperliquid_perpetual", "Hyperliquid Perpetual",
+        venue_family="hyperliquid",
         ccxt_id="hyperliquid",
         aliases=("hyperliquid_perp", "hl_perp"),
         docs_url="https://hyperliquid.gitbook.io/hyperliquid-docs/for-developers/api",

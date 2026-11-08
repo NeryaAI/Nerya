@@ -101,8 +101,11 @@ use it.
 IF the user asks to change Nerya itself:
 LOAD `references/nerya-core-change-guide.md`.
 
-IF the change adds an exchange, data source, wallet, dashboard widget,
-or workspace extension:
+IF the request composes a dashboard panel, page or existing widget:
+LOAD `references/native-panels.md` and use the native proposal workflow.
+
+IF the change adds an exchange, data source, wallet, workspace extension,
+or a missing widget renderer capability:
 LOAD `references/extending-nerya.md`.
 
 IF custom dynamic chart code is needed:

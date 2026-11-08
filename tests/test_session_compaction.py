@@ -100,6 +100,26 @@ def test_session_compaction_merges_incrementally_without_replaying_old_span() ->
     assert second.messages[-2]["content"] == "Recent two"
 
 
+def test_checkpoint_keeps_speaker_for_decisions_and_refreshes_legacy_labels() -> None:
+    rows = [
+        _row(0, "user", "Constraint: preserve the requested window."),
+        _row(1, "assistant", "Decision: coverage verified. Next: change the window."),
+        _row(2, "user", "Explain the saved result only."),
+        _row(3, "assistant", "Recent answer"),
+    ]
+    policy = SessionCompactionPolicy(keep_recent_pairs=1, trigger_pairs=1)
+    first = compact_session_history(rows, policy=policy)
+    digest = first.checkpoint["digest"]
+    assert "[user] Constraint: preserve the requested window." in digest["decisions_and_constraints"]
+    assert "[assistant] Decision: coverage verified. Next: change the window." in digest["decisions_and_constraints"]
+    assert all(line.startswith("[assistant]") for line in digest["open_threads"])
+    legacy = {**first.checkpoint, "rendered": "old unlabeled digest"}
+    restored = compact_session_history([], existing_checkpoint=legacy, policy=policy)
+    assert "Historical Statements (speaker marked when recorded; not verified decisions)" in restored.messages[0]["content"]
+    assert "Assistant Claims (unverified)" in restored.messages[0]["content"]
+    assert "old unlabeled digest" not in restored.messages[0]["content"]
+
+
 def test_kernel_prior_history_uses_persisted_session_checkpoint(tmp_path) -> None:
     cfg = _config(tmp_path)
     kernel = AgentKernel(config=cfg, skills=None)  # type: ignore[arg-type]

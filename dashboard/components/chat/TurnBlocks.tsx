@@ -1,6 +1,6 @@
 "use client";
 
-import { useTranslations } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
 
 import { Fragment, ReactNode, useEffect, useMemo, useRef, useState } from "react";
 import type {
@@ -38,6 +38,7 @@ import {
 import { ChartBlock as NativeChartBlock } from "./ChartBlock";
 import { portfolioSnapshot } from "../../lib/portfolioSnapshot";
 import { PortfolioSnapshot } from "../finance/PortfolioSnapshot";
+import { toolFailureSummary } from "../../lib/toolFailureSummary";
 import {
   CustomizationProposalCard,
   customizationFromToolResult,
@@ -744,7 +745,8 @@ function mergeApprovalEventsIntoBlocks(
 }
 
 function toolCallId(block: NativeBlock): string {
-  return String(block.call_id || block.tool_use_id || block.id || "");
+  const call = String(block.call_id || block.tool_use_id || block.id || "");
+  return call ? `${String(block.attempt || 1)}:${call}` : "";
 }
 
 function hasToolResultOutput(block: NativeBlock): boolean {
@@ -2419,6 +2421,7 @@ function NativeToolResultBlock({
   suppressProposalIds?: Set<string>;
   stream?: boolean;
 }) {
+  const zh = useLocale().startsWith("zh");
   // All callers share the same card router; only initial expansion differs.
   if (isTodoWrite(block)) {
     return <TodoChecklistCard todos={todosFromBlock(block)} />;
@@ -2441,6 +2444,7 @@ function NativeToolResultBlock({
   const snapshot = portfolioSnapshot(block);
   if (snapshot) return <div className="min-w-0 py-2"><PortfolioSnapshot accounts={snapshot} /><RawDetails><JsonPanel label="raw result" value={block} /></RawDetails></div>;
   const ok = block.ok !== false && !block.error;
+  const failureSummary = ok ? "" : toolFailureSummary(block, zh);
   const action = (block.action as string | undefined) || "tool";
   const customization = ok
     ? customizationFromToolResult(block.result ?? block, action)
@@ -2484,8 +2488,10 @@ function NativeToolResultBlock({
       badge={badges}
     >
       <div className="space-y-2">
-        {block.error ? (
-          <div className="text-xs text-danger">{String(block.error)}</div>
+        {!ok ? (
+          <div role="status" data-testid="native-tool-failure-summary" className="whitespace-pre-wrap text-xs text-danger">
+            {failureSummary}
+          </div>
         ) : null}
         {strategyProposal ? (
           <StrategyProposalApprovalCard
@@ -2494,11 +2500,11 @@ function NativeToolResultBlock({
             approveNote="approved from chat tool result"
           />
         ) : null}
-        <OutputPanel
+        {ok ? <OutputPanel
           label="output"
-          value={block.error ? String(block.error) : (block.result ?? block)}
+          value={block.result ?? block}
           stream={stream}
-        />
+        /> : null}
         <RawDetails>
           <JsonPanel label="payload" value={block.payload} />
           <JsonPanel label="raw result" value={block.result ?? block} />
@@ -3753,6 +3759,8 @@ export function NativeBlocksTrack({
   pendingApprovals,
   onApprovalAction,
   resolvingApprovalIds,
+  dockApprovalId,
+  approvalStoppedReason,
   suppressTopProposalHoist = false,
   suppressAgentResultCallIds,
   hoistTeamTraces = false,
@@ -3765,6 +3773,8 @@ export function NativeBlocksTrack({
   pendingApprovals?: Map<string, ApprovalCard>;
   onApprovalAction?: (callbackData: string) => void;
   resolvingApprovalIds?: Set<string>;
+  dockApprovalId?: string;
+  approvalStoppedReason?: string;
   // When true, don't render the proposal card at the top of the track —
   // the duplicates inside collapsed tool results are still suppressed, but the
   // prominent approve/add card is rendered at the bottom of the bubble instead
@@ -3796,15 +3806,16 @@ export function NativeBlocksTrack({
   // block). That block stays expanded while we're streaming so the
   // operator sees what the model is doing right now.
   let pendingIdx = -1;
+  const resultCalls = new Set(displayEnvelopes.filter(env => blockKind(env) === "tool_result").map(env => toolCallId(unwrapBlock(env))).filter(Boolean));
   if (live) {
     const openCalls = new Map<string, number>();
     displayEnvelopes.forEach((env, i) => {
       const block = env.block ?? (env as unknown as NativeBlock);
       const k = (block.kind || env.kind || "").toString();
       if (k === "tool_use") {
-        openCalls.set(String(block.call_id || ""), i);
+        if (!resultCalls.has(toolCallId(block))) openCalls.set(toolCallId(block) || "anonymous:"+i, i);
       } else if (k === "tool_result") {
-        openCalls.delete(String(block.call_id || ""));
+        openCalls.delete(toolCallId(block));
       }
     });
     if (openCalls.size > 0) {
@@ -3853,20 +3864,7 @@ export function NativeBlocksTrack({
         />
       );
     if (kind === "tool_use") {
-      // pending = no matching tool_result later in the envelope list
-      let hasResult = false;
-      for (let j = i + 1; j < displayEnvelopes.length; j += 1) {
-        const next =
-          displayEnvelopes[j].block ??
-          (displayEnvelopes[j] as unknown as NativeBlock);
-        if (
-          (next.kind || displayEnvelopes[j].kind) === "tool_result" &&
-          String(next.call_id || "") === String(block.call_id || "")
-        ) {
-          hasResult = true;
-          break;
-        }
-      }
+      const hasResult = Boolean(toolCallId(block)) && resultCalls.has(toolCallId(block));
       // For high-traffic friendly renderers (todo_write / Skill /
       // file ops / shell / web) the result envelope already shows
       // the same enriched card — hide the tool_use once the result
@@ -3931,6 +3929,8 @@ export function NativeBlocksTrack({
           card={id ? pendingApprovals?.get(id) : undefined}
           onAction={onApprovalAction}
           busy={id ? resolvingApprovalIds?.has(id) ?? false : false}
+          readOnly={Boolean(id && id === dockApprovalId)}
+          stoppedReason={approvalStoppedReason}
         />
       );
     }

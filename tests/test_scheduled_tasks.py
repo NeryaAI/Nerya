@@ -68,6 +68,12 @@ def test_schedule_entry_roundtrips_script_and_gateway_delivery(tmp_path):
     assert loaded.delivery_targets == [{"kind": "gateway", "platform": "telegram"}]
 
 
+def test_market_schedule_kind_roundtrips(tmp_path):
+    paths = WorkspacePaths(tmp_path)
+    save_schedules(paths, [ScheduleEntry(id="market_watch", kind="market.watch", every_seconds=60, session_kind="market")])
+    assert load_schedules(paths)[0].session_kind == "market"
+
+
 def test_cron_executes_approved_script_schedule_without_strategy(tmp_path):
     cfg = _config(tmp_path)
     _write_approved_script(cfg.paths, "blockchain_digest")

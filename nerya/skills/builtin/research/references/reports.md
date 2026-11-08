@@ -19,5 +19,13 @@ Use the operator's requested output language; synthesize team findings rather
 than pasting member JSON. Never claim a file was created until its path and
 successful tool result exist.
 
+When collection cannot continue, give a short outcome: what was obtained, the
+specific missing observation or access prerequisite, which saved result remains
+usable, and one supported next action. Keep raw tool payloads, stack traces and
+repeated error lists in evidence details, not the final answer. An unconfirmed
+operation stays unconfirmed and is reconciled before any retry. Preserve the
+requested source and window; recommend the integration/access needed for them
+rather than presenting a different window as completion.
+
 Detailed legacy templates remain accessible at
 `Skill(skill="research_report", file="references/full-playbook.md")`.

@@ -1,0 +1,169 @@
+[
+  {
+    "tool": "delivery_start",
+    "call_id": "call_0db44a1fba684f15a9b2637b",
+    "arguments": {
+      "skill_id": "strategy_author",
+      "workflow_id": "strategy_authoring",
+      "requested_scope": {
+        "markets": [
+          "BINANCE:BTC/USDT"
+        ],
+        "timeframe": "1h",
+        "strategy_type": "ema_crossover",
+        "backtest_window_days": 30,
+        "live_trading": false,
+        "scheduled_tasks": false
+      },
+      "stages": [
+        {
+          "id": "scope",
+          "status": "in_progress"
+        },
+        {
+          "id": "author",
+          "status": "pending"
+        },
+        {
+          "id": "validate",
+          "status": "pending"
+        },
+        {
+          "id": "replay",
+          "status": "pending"
+        },
+        {
+          "id": "receipt",
+          "status": "pending"
+        },
+        {
+          "id": "deliver",
+          "status": "pending"
+        }
+      ]
+    }
+  },
+  {
+    "tool": "delivery_update",
+    "call_id": "call_6a609a1523f846919abcbe17",
+    "arguments": {
+      "expected_revision": 1,
+      "stages": [
+        {
+          "id": "scope",
+          "status": "completed"
+        },
+        {
+          "id": "author",
+          "status": "in_progress"
+        },
+        {
+          "id": "validate",
+          "status": "pending"
+        },
+        {
+          "id": "replay",
+          "status": "pending"
+        },
+        {
+          "id": "receipt",
+          "status": "pending"
+        },
+        {
+          "id": "deliver",
+          "status": "pending"
+        }
+      ],
+      "checks": [
+        {
+          "id": "account_selection",
+          "ok": true,
+          "value": "binance_top10_paper paper CEX account selected for BINANCE:BTC/USDT; live_trading_enabled=false"
+        }
+      ],
+      "limitations": [
+        "No live trading or account-order execution requested",
+        "No scheduled tasks will be created"
+      ]
+    }
+  },
+  {
+    "tool": "delivery_update",
+    "call_id": "call_426e7ccf06844b8c8002e435",
+    "arguments": {
+      "expected_revision": 2,
+      "artifacts": [
+        {
+          "type": "strategy_package",
+          "ref": "evolution/proposals/prp_11c7d132330d/after/strategies/btc_ema_cross_1h",
+          "description": "Strategy source bundle for btc_ema_cross_1h"
+        },
+        {
+          "type": "strategy_backtest_report",
+          "ref": "evolution/proposals/prp_11c7d132330d/after/strategies/btc_ema_cross_1h/backtests/20261021_172222/report.md",
+          "description": "Completed 30-day 1h backtest report"
+        },
+        {
+          "type": "backtest_receipt",
+          "ref": "evolution/proposals/prp_11c7d132330d/after/strategies/btc_ema_cross_1h/backtests/20261021_172222/run.json",
+          "description": "Backtest execution receipt"
+        }
+      ],
+      "checks": [
+        {
+          "id": "account_selection",
+          "ok": true,
+          "value": "binance_top10_paper paper CEX account selected for BINANCE:BTC/USDT; live_trading_enabled=false"
+        },
+        {
+          "id": "strategy_validation",
+          "ok": true,
+          "value": "Inline strategy package validation passed; proposal submitted as pending_review"
+        },
+        {
+          "id": "backtest_completed",
+          "ok": true,
+          "value": "strategy_backtest completed with coverage_ok=true, performance_evidence=true, 720 decision bars, 9 closed trades"
+        }
+      ],
+      "stages": [
+        {
+          "id": "scope",
+          "status": "completed"
+        },
+        {
+          "id": "author",
+          "status": "completed"
+        },
+        {
+          "id": "validate",
+          "status": "completed"
+        },
+        {
+          "id": "replay",
+          "status": "completed"
+        },
+        {
+          "id": "receipt",
+          "status": "completed"
+        },
+        {
+          "id": "deliver",
+          "status": "completed"
+        }
+      ],
+      "limitations": [
+        "No live trading or account-order execution requested",
+        "No scheduled tasks will be created",
+        "Backtest result is negative; not a recommendation to trade"
+      ]
+    }
+  },
+  {
+    "tool": "delivery_finalize",
+    "call_id": "call_86b9344c58f5444586665bbc",
+    "arguments": {
+      "expected_revision": 3
+    }
+  }
+]

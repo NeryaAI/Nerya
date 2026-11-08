@@ -31,6 +31,7 @@ class DataApiContext:
     """Runtime context passed to read-only data action handlers."""
 
     config_like: Any | None = None
+    cancel_token: Any | None = None
 
     @property
     def config_data(self) -> dict[str, Any]:
@@ -81,6 +82,11 @@ class DataActionSpec:
     tags: tuple[str, ...] = ()
     output_kind: str = "json"
     docs_url: str = ""
+    # Audited, public, credential-free input preparation outside the sandbox.
+    replay_input: bool = False
+    # Terms used by the catalog to route a natural-language request to this
+    # action without requiring an exact substring match.
+    search_terms: tuple[str, ...] = ()
 
     def preview(self) -> dict[str, Any]:
         out = {
@@ -93,6 +99,10 @@ class DataActionSpec:
         }
         if self.docs_url:
             out["docs_url"] = self.docs_url
+        if self.replay_input:
+            out["replay_input"] = True
+        if self.search_terms:
+            out["search_terms"] = list(self.search_terms)
         return out
 
 

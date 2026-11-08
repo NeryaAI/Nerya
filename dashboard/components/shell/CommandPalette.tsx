@@ -170,7 +170,7 @@ function CommandPalette() {
   const destinations = useMemo<PaletteItem[]>(() => {
     const rows: { href: string; label: string; icon: IconComp; keywords?: string }[] = [
       { href: "/", label: tNav("home"), icon: OverviewIcon, keywords: "home start build compose" },
-      { href: "/chat", label: tNav("newChat"), icon: ComposeIcon, keywords: "chat agent ask" },
+      { href: "/chat?conversation=task", label: tNav("newChat"), icon: ComposeIcon, keywords: "chat agent ask" },
       { href: "/dashboard", label: tNav("overview"), icon: OverviewIcon, keywords: "dashboard home" },
       { href: "/portfolio", label: tNav("trading"), icon: PortfolioIcon, keywords: "trading portfolio positions orders accounts" },
       { href: "/strategies", label: tNav("strategies"), icon: StrategiesIcon, keywords: "strategy lab backtest" },
@@ -223,7 +223,7 @@ function CommandPalette() {
         icon: ComposeIcon,
         onSelect: () => {
           setComposeDraft(trimmed);
-          go("/chat");
+          go("/chat?conversation=task&draft=" + crypto.randomUUID());
         },
       },
       {

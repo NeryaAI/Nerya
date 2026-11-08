@@ -9,6 +9,24 @@ def configuration_issues(manifest):
     params = extras.get("params") or {}
     if not isinstance(params, dict):
         return [("invalid_strategy_params", "params must be a mapping")]
+    if "price_simulation" in params:
+        simulation = params["price_simulation"]
+        if not isinstance(simulation, dict) or set(simulation) != {"dataset_id"}:
+            issues.append(("invalid_price_simulation",
+                "params.price_simulation requires only dataset_id"))
+    indicator = params.get("indicator")
+    if isinstance(indicator, dict) and {"fast_period", "slow_period"} <= indicator.keys():
+        periods = [indicator[name] for name in ("fast_period", "slow_period")]
+        if any(type(period) is not int or period < 1 for period in periods):
+            issues.append(("invalid_ema_periods",
+                "params.indicator.fast_period and slow_period must be positive integers"))
+        else:
+            lookback = params.get("lookback")
+            required = max(periods) + 1
+            if type(lookback) is not int or lookback < required:
+                issues.append(("insufficient_closed_history_lookback",
+                    f"EMA crossover needs lookback >= {required}: one prior and one current closed point "
+                    f"are required after the slow-period SMA seed; forming candles do not count"))
     sizing = params.get("sizing", {})
     if "sizing" in params:
         from ..core.errors import IntentValidationError

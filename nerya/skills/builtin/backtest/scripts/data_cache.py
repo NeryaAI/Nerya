@@ -21,6 +21,13 @@ from .....data.history_store import HistoryStore, HistoryDataError, normalize_ro
 class NoHistoricalDataError(RuntimeError):
     """Raised when the candle source returns no usable rows."""
 
+    def __init__(self, message: str, *, reason: str = 'no_historical_data',
+                 retryable: bool | None = None, receipt: dict[str, Any] | None = None):
+        super().__init__(message)
+        self.reason = reason
+        self.retryable = retryable
+        self.receipt = receipt
+
 
 _BINANCE_VISION_REQUEST_TIMEOUT_SECONDS = 3.0
 _BINANCE_VISION_TOTAL_TIMEOUT_SECONDS = 20.0
@@ -87,9 +94,9 @@ def get_candles(
         config_like=config_like, offline=offline, progress=progress,
         check_cancel=check_cancel, timeout_seconds=timeout_seconds)
     if not rows:
-        error = NoHistoricalDataError(f"no historical candles for {market} {tf}; download status={receipt['status']}")
-        error.receipt = receipt
-        raise error
+        raise NoHistoricalDataError(
+            f"no historical candles for {market} {tf}; download status={receipt['status']}",
+            reason='backtest_data_incomplete', retryable=True, receipt=receipt)
     return HistoricalRows(rows, receipt)
 
 

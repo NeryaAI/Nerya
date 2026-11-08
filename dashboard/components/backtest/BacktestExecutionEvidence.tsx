@@ -25,7 +25,7 @@ export function BacktestExecutionEvidence({ replay, legacyBenchmark = false }: {
     })}</dl>
     <p className="text-[color:var(--text-muted)] leading-6">{i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.008")}{typeof replay.forced_closes === "number" ? ` ${i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.009")}: ${replay.forced_closes}` : ""}</p>
     {typeof replay.protective_closes === "number" && replay.protective_closes > 0 && <p className="text-[color:var(--text-muted)] leading-6" data-execution-metric="protective_closes">{i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.010")}: {replay.protective_closes.toLocaleString(locale)} · {i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.011")}</p>}
-    {replay.order_attempts === 0 && <p role="status" className="text-warn">{i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.012")}</p>}
+    {replay.order_attempts === 0 && replay.execution_evidence_version === undefined && <p role="status" className="text-warn">{i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.012")}</p>}
     {replay.order_accounting_ok === false && <p role="alert" className="text-danger">{i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.013")}</p>}
     {!!reasons.length && <details><summary className="cursor-pointer py-2">{i18nCopy(zh, "copy.components_backtest_BacktestExecutionEvidence.014")}</summary><dl className="space-y-2">{reasons.map(([key, count]) => <div key={key} className="flex justify-between gap-4"><dt title={key}>{labels[key] ? i18nCopy(zh, labels[key]) : key.replaceAll("_", " ")}</dt><dd className="tabular-nums">{String(count)}</dd></div>)}</dl></details>}
   </section>;

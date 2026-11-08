@@ -1,0 +1,22 @@
+"""Save as scripts/custom_replay.py only for explicit fixed-range research.
+
+Runs actual saved main through the public research facade. Model balances are
+quote-token units; no live orders, USD returns or complete tick-path evidence.
+"""
+from nerya.strategies.research import replay_sampled_lp, write_json, write_csv, write_text
+
+result = replay_sampled_lp()
+curve = [{'ts':row['timestamp'], 'equity':row['modeled_value_token1']} for row in result['modeled_curve']]
+decisions = [{'ts':row['timestamp'], 'block_number':row['block_number'],
+    'action':row['lp_decision']['action'], 'reason':row['lp_decision']['reason']} for row in result['decisions']]
+write_csv('equity.csv', curve, fields=['ts','equity'])
+write_csv('trades.csv', [], fields=['ts','side','size','price'])
+write_csv('decisions.csv', decisions, fields=['ts','block_number','action','reason'])
+write_json('result.json', {**result, 'accounting_currency':'token1:' + result['quote_token'],
+    'equity_curve':curve, 'trades':[]})
+newline = chr(10)
+write_text('report.md', '# Sampled fixed-range LP research' + newline + newline
+    + 'Actual saved strategy decisions: ' + str(len(decisions)) + newline
+    + 'Modeled actions: ' + str(result['actions_modeled']) + newline + newline
+    + 'Quote token: ' + result['quote_token'] + newline + newline
+    + 'Limitations: ' + ', '.join(result['limitations']) + newline)

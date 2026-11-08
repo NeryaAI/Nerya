@@ -4,13 +4,14 @@ import { copy as i18nCopy } from "../../lib/i18n";
 import { ChoiceSelect } from "../ChoiceSelect";
 
 import { useEffect, useId, useRef, useState, type ReactNode } from "react";
-import { useLocale } from "next-intl";
+import { useLocale, useTranslations } from "next-intl";
+import { deliveryEvidence } from "../../lib/deliveryEvidence";
 import * as Popover from "@radix-ui/react-popover";
 import type { ChatResult } from "../../lib/chatResults";
 import { DeliveryEvidence } from "./DeliveryEvidence";
-import { Markdown } from "./Markdown";
+import { Markdown, openWorkspaceFileLink } from "./Markdown";
 import { CopyButton } from "./tool-cards/atoms";
-import { ChevronLeftIcon, ChevronRightIcon, FileIcon, MessagesIcon, PanelLeftIcon, SaveIcon } from "../icons";
+import { ChevronLeftIcon, ChevronRightIcon, FileIcon, MessagesIcon, PanelLeftIcon, SaveIcon, ShieldCheckIcon } from "../icons";
 import styles from "./ChatReading.module.css";
 
 export type ResultFocusRequest = { id: string; count: number };
@@ -23,6 +24,7 @@ export function ChatResultsPanel({ results, focusRequest, onReveal, selectedId, 
   selectedId?: string; hidePicker?: boolean; navigation?: ReactNode;
 }) {
   const zh = useLocale().startsWith("zh");
+  const ta = useTranslations("assistants");
   const prefix = useId().replace(/:/g, "");
   const exportDescriptionId = prefix + "-export-description";
   const [chosen, setChosen] = useState("");
@@ -74,6 +76,9 @@ export function ChatResultsPanel({ results, focusRequest, onReveal, selectedId, 
   </div>;
   const revealLabel = result.agentId ? (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.004")) : (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.005"));
   const hasHeading = /^\s{0,3}#{1,6}\s/.test(result.text.trimStart());
+  const evidence = deliveryEvidence(result);
+  const showEvidence = view === "evidence" || !result.taskSessionId || result.delivery
+    || evidence.checks.length > 0 || evidence.files.length > 0 || evidence.risks.length > 0 || evidence.unverified.length > 0;
   return <div className={styles.reader} data-testid="canvas-results">
     <div className={styles.toolbar} data-testid="result-toolbar">
       {navigation || (!hidePicker ? <div data-preview-picker>
@@ -87,6 +92,8 @@ export function ChatResultsPanel({ results, focusRequest, onReveal, selectedId, 
         <div className="flex" role="group" aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.009")}>
           <button type="button" aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.010")} title={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.011")} aria-pressed={view === "preview"} onClick={() => setView("preview")}><FileIcon size={14} /></button>
           <button type="button" aria-label="Markdown" title="Markdown" aria-pressed={view === "markdown"} onClick={() => setView("markdown")}>MD</button>
+          <button type="button" data-testid="result-evidence-tab" aria-label={i18nCopy(zh, "copy.deliveryEvidence.title")} title={i18nCopy(zh, "copy.deliveryEvidence.title")}
+            aria-pressed={view === "evidence"} onClick={() => setView("evidence")}><ShieldCheckIcon size={15}/></button>
         </div>
         <Popover.Root open={outlineOpen} onOpenChange={setOutlineOpen}>
           <Popover.Trigger asChild><button type="button" aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.012")} title={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.013")} disabled={!headings.length && !sources.length}><PanelLeftIcon size={14} /></button></Popover.Trigger>
@@ -101,14 +108,14 @@ export function ChatResultsPanel({ results, focusRequest, onReveal, selectedId, 
         {onReveal ? <button type="button" onClick={() => onReveal(result.id)} aria-label={revealLabel} title={revealLabel}><MessagesIcon size={14} /></button> : null}
       </div>
     </div>
-    <p id={exportDescriptionId} className="px-4 py-2 text-xs text-[color:var(--text-muted)]">{i18nCopy(zh, "copy.components_chat_ChatResultsPanel.027")}</p>
+    <p id={exportDescriptionId} className="sr-only">{i18nCopy(zh, "copy.components_chat_ChatResultsPanel.027")}</p>
     {exportError ? <p role="alert" className="px-4 py-2 text-xs text-danger">{exportError}</p> : null}
-    <div ref={scrollRef} hidden={view !== "preview"} role="region" aria-label={i18nCopy(zh, "copy.components_chat_ChatResultsPanel.021")} className={view === "preview" ? styles.body : "hidden"}>
+    <div ref={scrollRef} hidden={view === "markdown"} role="region" aria-label={i18nCopy(zh, view === "evidence" ? "copy.deliveryEvidence.title" : "copy.components_chat_ChatResultsPanel.021")} className={view !== "markdown" ? styles.body : "hidden"}>
       <article className={styles.article} data-result-id={result.id}>
-        {!hasHeading ? <h2 className={styles.title}>{result.title}</h2> : null}
-        <DeliveryEvidence result={result} onOpenFile={onOpenFile} onReveal={onReveal?()=>onReveal(result.id):undefined} />
-        <div ref={bodyRef} data-testid="canvas-result-body"><Markdown>{result.text}</Markdown></div>
-        <footer className={styles.provenance}>{result.agentId ? (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.022", { value0: result.attempt })) : (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.023"))}</footer>
+        {!hasHeading && view === "preview" ? <h2 className={styles.title}>{result.title}</h2> : null}
+        {showEvidence && <DeliveryEvidence key={`${result.id}:${view}`} result={result} expanded={view === "evidence"} onOpenFile={onOpenFile} onReveal={onReveal?()=>onReveal(result.id):undefined} />}
+        <div ref={bodyRef} hidden={view === "evidence"} data-testid="canvas-result-body" onClick={event => openWorkspaceFileLink(event, onOpenFile)}><Markdown>{result.text}</Markdown></div>
+        <footer className={styles.provenance}>{result.taskSessionId ? <a className="underline" href={"/chat/"+encodeURIComponent(result.taskSessionId)}>{ta("openTaskConversation")}</a> : result.agentId ? (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.022", { value0: result.attempt })) : (i18nCopy(zh, "copy.components_chat_ChatResultsPanel.023"))}</footer>
       </article>
     </div>
     <div hidden={view !== "markdown"} role="region" aria-label="Markdown" className={view === "markdown" ? "min-h-0 flex-1 p-4" : "hidden"}>

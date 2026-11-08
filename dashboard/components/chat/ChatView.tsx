@@ -2,7 +2,7 @@
 import { useCallback } from "react";
 import { Icon as NeryaGlyph } from "../icons";
 import { copy as i18nCopy } from "../../lib/i18n";
-import { projectAssistantTaskMessage } from "../../lib/assistantTaskDelivery";
+import { assistantDeliveryFields, projectAssistantTaskMessage } from "../../lib/assistantTaskDelivery";
 
 import { StrategyWorkflowPanel } from "../workflows/StrategyWorkflowPanel";
 import { BacktestChart } from "../backtest/BacktestChart";
@@ -16,6 +16,7 @@ import { assistantsApi, type AssistantProfile } from "../../lib/assistants";
 import { WorkspaceTerminal } from "./WorkspaceTerminal";
 import { useStrategyReports } from "./useStrategyReports";
 import { resolveMessageApproval } from "../../lib/approvalResolution";
+import { interactionTitle } from "../../lib/toolOutputPresentation";
 
 import { Suspense, useEffect, useMemo, useRef, useState } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
@@ -54,7 +55,7 @@ import {
 import { AssistantBubble, UserBubble } from "./ChatMessage";
 import { AssistantReplyBubble } from "./AssistantReplyBubble";
 import { ExternalCallMessage } from "./ExternalCallMessage";
-import { PendingToolApprovalDialog } from "./PendingToolApprovalDialog";
+import { ApprovalRequestCard } from "./ApprovalRequestCard";
 import { ExternalSessionTimeline } from "./ExternalSessionTimeline";
 import { requestConversationReveal } from "./timelineReveal";
 import { composerDelivery } from "../../lib/composerDelivery";
@@ -82,12 +83,15 @@ import { HistoryDeleteDialog } from "./ChatHistoryActions";
 import { historyPending, historyRevision, HISTORY_CHANGED_EVENT } from "../../lib/historyClient";
 import { AgentTaskBar, AgentWorkPanel } from "./AgentWorkspace";
 import { ChatTaskHeader } from "./ChatTaskHeader";
+import { composerSettings } from "../../lib/modelProjection";
+import { GoalStatus } from "./GoalStatus";
 import { collectChatResults, type ChatResult } from "../../lib/chatResults";
 import { childResult } from "../../lib/agentConversation";
 import styles from "./ChatWorkbench.module.css";
 import { useAgentWork } from "./useAgentWork";
 import { collectThreadItems, WorkspaceResource, workspaceFileItem } from "./WorkspaceResourcePreview";
 import { ChatResultsPanel } from "./ChatResultsPanel";
+import { openWorkspaceFileLink } from "./Markdown";
 import { collectResearchVisuals, type ResearchInstrument } from "../../lib/researchVisuals";
 import type { ChartBlockShape } from "../../lib/chartBlock";
 import { ResearchVisualContext, ResearchInstrumentContext } from "./ResearchVisualContext";
@@ -158,12 +162,17 @@ function isoFromMs(ts: number | undefined): string | undefined {
 }
 
 function sessionTitle(session: AgentSession, sid: string): string {
-  const title =
+  const rawTitle =
     typeof session.meta?.title === "string"
       ? session.meta.title
       : String(session.meta?.title || "");
+  const title = interactionTitle(rawTitle) || rawTitle;
   // Persisted titles remain complete; CSS owns visual truncation.
   return title.trim() || `Session ${sid.slice(0, 8)}`;
+}
+
+function isPlaceholderTitle(title: unknown, sid: string): boolean {
+  return typeof title !== "string" || !title.trim() || title === `Session ${sid.slice(0, 8)}`;
 }
 
 function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
@@ -175,7 +184,7 @@ function threadFromSessionMetadata(session: AgentSession): ChatThread | null {
   if (cached) {
     return {
       ...cached,
-      title: cached.title || sessionTitle(session, sid),
+      title: !isPlaceholderTitle(session.meta?.title, sid) ? sessionTitle(session, sid) : cached.title,
       created_ts: created || cached.created_ts,
       updated_ts: Math.max(updated, cached.updated_ts),
       source: session.source ?? cached.source,
@@ -298,13 +307,14 @@ function approvalState(value: unknown): string {
     record.state ||
       record.resolved_state ||
       nested.state ||
+      record.status ||
       "",
   ).toLowerCase();
 }
 
 function isApprovalResolved(value: unknown): boolean {
   const state = approvalState(value);
-  return state === "approved" || state === "rejected";
+  return ["approved", "rejected", "expired", "cancelled"].includes(state);
 }
 
 function approvalIdFromRecord(value: unknown): string {
@@ -369,6 +379,7 @@ function pendingApprovalIdsForThread(
 
   for (const [id, card] of pendingApprovals) {
     if (cardSessionId(card) !== thread.id) continue;
+    if (isApprovalResolved(card)) { resolved.add(id); continue; }
     requested.add(id);
     pendingRecordIds.add(id);
   }
@@ -402,10 +413,14 @@ function AssistantScopedChatView({ sessionId }: { sessionId?: string }) {
     return () => { active = false; };
   }, [sessionId, isTask, assistantId, router, query]);
   if (!sessionId && !isTask) return <p role={homeError ? "alert" : "status"} className="p-6 text-sm text-[color:var(--text-muted)]">{homeError || "…"}</p>;
-  return <WorkspaceChatView key={(workspace || "unresolved") + ":" + (sessionId || assistantId)} sessionId={sessionId} preferredAssistantId={assistantId}/>;
+  return <WorkspaceChatView key={(workspace || "unresolved") + ":" + (sessionId || assistantId + ":" + query?.toString())} sessionId={sessionId} preferredAssistantId={assistantId}/>;
 }
 
 function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: string; preferredAssistantId: string }) {
+  // A task/new-chat route has no backend session until its first send. Keep a
+  // stable in-memory thread so every render path sees a complete ChatThread;
+  // the first admitted command promotes this identity into durable state.
+  const freshThreadRef = useRef<ChatThread | null>(null);
   const [focusedTaskRun, setFocusedTaskRun] = useState<string | null>(null);
   useEffect(() => { setFocusedTaskRun(new URLSearchParams(window.location.search).get("run")); }, [sessionId]);
   const [assistantIdentity, setAssistantIdentity] = useState<AssistantProfile | null>(null);
@@ -427,7 +442,10 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
       const row = await clientApi.sessionGet(sessionId!);
       if (!("session_id" in row)) return;
       const imported = await buildImportedThread(sessionId!, {...row, title: sessionTitle(row, sessionId!)});
-      if (active && imported) setThreads(previous => upsertThread(previous, mergeAuthoritativeThread(previous.find(thread => thread.id === sessionId), imported)));
+      if (active && imported) {
+        setThreads(previous => upsertThread(previous, mergeAuthoritativeThread(previous.find(thread => thread.id === sessionId), imported)));
+        (event as CustomEvent).detail?.acknowledge?.();
+      }
     }
     const refresh = (event: Event) => { void refreshResult(event).catch(() => {}); };
     window.addEventListener("nerya:assistant-result", refresh);
@@ -458,6 +476,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     DEFAULT_CHAT_RUN_SETTINGS,
   );
   useEffect(()=>{if(draft.settings)setSettings(draft.settings);},[draft.settings]);
+  const nextRunSettings = composerSettings(settings, assistantIdentity, draft.settings);
   const [modelOptions, setModelOptions] = useState<ChatModelOption[]>([]);
   const [pendingApprovals, setPendingApprovals] = useState<Map<string, ApprovalCard>>(
     () => new Map(),
@@ -599,11 +618,10 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
           ? record.created_at
           : Date.now() / 1000,
       approval_id: id,
-      session_id:
-        typeof record.session_id === "string" ? record.session_id : undefined,
+      session_id: cardSessionId(card) || undefined,
       strategy_id:
         typeof record.strategy_id === "string" ? record.strategy_id : undefined,
-      turn_id: typeof record.turn_id === "string" ? record.turn_id : undefined,
+      turn_id: String(record.turn_id || card.prompt?.metadata?.turn_id || "") || undefined,
       call_id: String(
         record.tool_use_id ||
           tool.call_id ||
@@ -632,26 +650,23 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         const messages = thread.messages.map((m) => ({ ...m }));
         for (const [id, card] of next) {
           const record = card.record ?? {};
-          const sessionId = String(record.session_id || "");
-          if (sessionId && sessionId !== thread.id) continue;
-          const turnId = String(record.turn_id || "");
-          let targetIdx = -1;
-          if (turnId) {
-            targetIdx = messages.findIndex(
-              (m) =>
-                m.role === "assistant" &&
-                (m.turn?.turn_id === turnId ||
-                  m.backend_message_id === `${turnId}:assistant`),
-            );
-          }
-          if (targetIdx < 0) {
-            for (let i = messages.length - 1; i >= 0; i -= 1) {
-              if (messages[i].role === "assistant") {
-                targetIdx = i;
-                break;
-              }
-            }
-          }
+          const sessionId = cardSessionId(card);
+          const turnId = String(record.turn_id || card.prompt?.metadata?.turn_id || "");
+          const targetIdx = sessionId === thread.id && turnId ? messages.findIndex(
+            (m) => m.role === "assistant" && (m.turn?.turn_id
+              ? m.turn.turn_id === turnId
+              : m.backend_message_id === `${turnId}:assistant`),
+          ) : -1;
+          // Repair prior last-message fallback injections, including cached ones.
+          // Missing owners remain recoverable in the dock, never in another turn.
+          messages.forEach((message, index) => {
+            if (index === targetIdx || message.role !== "assistant" || !message.live_events?.length) return;
+            const events = message.live_events.filter(event =>
+              event.kind !== "approval.request" || String(event.approval_id || "") !== id);
+            if (events.length === message.live_events.length) return;
+            messages[index] = { ...message, live_events: events };
+            changed = true;
+          });
           if (targetIdx < 0) continue;
           const target = messages[targetIdx];
           if (target.role !== "assistant") continue;
@@ -751,6 +766,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
           edited_at: typeof m.meta?.edited_at === "number" ? m.meta.edited_at : undefined,
           attachments: Array.isArray(m.meta?.attachments) ? m.meta.attachments as ChatAttachment[] : undefined,
           external_request: m.meta?.external_request as UserMessage['external_request'],
+          task_message: m.meta?.task_message as UserMessage['task_message'],
           backend_message_id: m.message_id,
         });
       } else {
@@ -782,7 +798,8 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         msgs.push({
           id: m.message_id || uuid(),
           role: "assistant",
-          command_id: typeof turn.command_id === 'string' ? turn.command_id : undefined,
+          command_id: typeof m.meta?.source_command_id === 'string' ? m.meta.source_command_id
+            : typeof turn.command_id === 'string' ? turn.command_id : undefined,
           command_revision: typeof m.meta?.command_revision === 'number' ? m.meta.command_revision : undefined,
           execution_status: typeof m.meta?.execution_status === 'string' ? m.meta.execution_status : undefined,
           assistant_task: typeof m.meta?.assistant_task_id === "string" && typeof m.meta?.task_session_id === "string" ? {
@@ -790,6 +807,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
             title: typeof m.meta.task_title === "string" ? m.meta.task_title : "",
             state: typeof m.meta.execution_status === "string" ? m.meta.execution_status : "",
             legacy: m.meta.source !== "assistant_task_result",
+            ...assistantDeliveryFields(m.meta),
           } : undefined,
           error: typeof m.meta?.error === 'string' ? m.meta.error : typeof turn.error === 'string' ? turn.error : undefined,
           ts,
@@ -799,7 +817,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         });
       }
     }
-    const savedTitle = t.title?.trim() || sessionMeta.title?.trim();
+    const savedTitle = [t.title, sessionMeta.title].find(title => !isPlaceholderTitle(title, sid))?.trim();
     const thread: ChatThread = {
       id: sid,
       source: t.source || sessionMeta.source,
@@ -856,13 +874,11 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         if (!sid) continue;
         if (deletedSessionIdsRef.current.has(sid)) continue;
         const existing = localById.get(sid);
-        if (threadHasUnpersistedMessages(existing)) continue;
-        // Skip locally-grown threads (i.e. created in this browser) —
-        // they may be richer than the journal-reconstructed transcript
-        // (e.g. carry live_events, blocks, errors). Only import
-        // sessions that are entirely new, or refresh ones we
-        // previously imported.
-        if (existing && !existing.imported) continue;
+        if (existing && (threadHasUnpersistedMessages(existing) || !existing.imported)) {
+          // Session metadata owns the title even while local messages own the transcript.
+          if (!isPlaceholderTitle(s.meta?.title, sid)) refreshed.push({ ...existing, title: sessionTitle(s, sid) });
+          continue;
+        }
         const metaThread = threadFromSessionMetadata(s);
         if (metaThread) refreshed.push(metaThread);
       }
@@ -871,15 +887,18 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         const byId = new Map(prev.map((t) => [t.id, t]));
         for (const t of refreshed) {
           const current = byId.get(t.id);
+          // List metadata is not a transcript. In particular, a successfully
+          // loaded empty home must stay resolved when a late list/focus refresh
+          // arrives; otherwise the hero composer unmounts with no fetch to retry.
           if (
             current &&
-            current.messages.length > 0 &&
-            current.updated_ts >= t.updated_ts &&
-            (current.transcript_loaded || !t.transcript_loaded)
+            (threadHasUnpersistedMessages(current) || !current.imported ||
+              (current.transcript_loaded || current.messages.length > 0) &&
+              (!t.transcript_loaded || (current.transcript_loaded && current.updated_ts >= t.updated_ts)))
           ) {
             byId.set(t.id, {
               ...current,
-              title: current.title || t.title,
+              title: isPlaceholderTitle(t.title, t.id) ? current.title : t.title,
               message_count: Math.max(
                 current.message_count ?? 0,
                 t.message_count ?? 0,
@@ -928,22 +947,43 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
 
 
 
-  const active = useMemo(
+  const transcript = useMemo(
     () => {
+      if (!sessionId) {
+        if (!freshThreadRef.current) {
+          freshThreadRef.current = newThread();
+        }
+        return freshThreadRef.current;
+      }
       const thread = projectExternalThread(sessionId ? threads.find((t) => t.id === sessionId) || null : null);
       return thread ? { ...thread, messages: thread.messages.map(message => message.role === "assistant" ? projectAssistantTaskMessage(message) : message) } : null;
     },
     [threads, sessionId],
   );
-  const externalView = isExternalSource(active?.source) || /^ext_(mcp|tunnel)_[0-9a-f]{32}$/.test(sessionId || '');
+  const externalView = isExternalSource(transcript?.source) || /^ext_(mcp|tunnel)_[0-9a-f]{32}$/.test(sessionId || '');
   const workbench = useWorkbench(sessionId);
   const commandEngine = useConversationCommands(hydrated && !externalView ? sessionId : undefined, (command, events) => {
     setThreads(previous => {
-      const existing = previous.find(thread => thread.id === command.session_id)
+      const current = previous.find(thread => thread.id === command.session_id);
+      // Host continuations are not user requests. Wait for session hydration;
+      // the durable snapshot is reapplied below once the thread is available.
+      if (!current && (command.kind !== "send" || command.show_user === false)) return previous;
+      const existing = current
         || { ...newThread(command.input), id: command.session_id };
-      return upsertThread(previous, projectCommand(existing, command, events));
+      const titled = command.kind === "send" && command.show_user !== false &&
+        isPlaceholderTitle(existing.title, command.session_id)
+        ? { ...existing, title: deriveTitle(command.input) } : existing;
+      return upsertThread(previous, projectCommand(titled, command, events));
     });
   });
+  // Transcript hydration can finish after the observer has drained a terminal
+  // command. Reapply the current persisted snapshot on either input changing,
+  // using the same identity/revision rules as live projection. No second cache.
+  const active = useMemo(() => {
+    if (!transcript || externalView) return transcript;
+    return [...commandEngine.commands].sort((a, b) => a.created_at - b.created_at)
+      .reduce((thread, command) => projectCommand(thread, command), transcript);
+  }, [transcript, externalView, commandEngine.commands]);
   useEffect(()=>{
     if(!pendingAutoSend||workbench.connection!=="online")return;
     const next=pendingAutoSend;setPendingAutoSend(null);
@@ -1074,22 +1114,13 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     [active, pendingApprovals],
   );
   const activeApprovalKey = activeApprovalIds.join("|");
-  const [dismissedNativeApprovals, setDismissedNativeApprovals] = useState<{session: string; ids: string[]}>({session:"",ids:[]});
-  const dismissedApprovalIds = dismissedNativeApprovals.session === active?.id ? dismissedNativeApprovals.ids : [];
   const nativeApprovalId = activeApprovalIds.find(id => {
     const card = pendingApprovals.get(id);
-    if (!card || dismissedApprovalIds.includes(id) || externalView) return false;
+    if (!card || externalView) return false;
     const kind = String(card.record?.kind || "");
     return kind === "tool_permission" || kind === "tool_permission_batch";
   }) || "";
   const nativeApprovalCard = pendingApprovals.get(nativeApprovalId);
-  const dismissNativeApproval = (id: string) => {
-    if (!id) return;
-    setDismissedNativeApprovals(current => ({
-      session: active?.id || "",
-      ids: [...new Set([...(current.session === active?.id ? current.ids : []), id])].slice(-40),
-    }));
-  };
   const isAssistantConversation = !active?.strategy_id && !externalView && (
     assistantConversation.sessionId === sessionId && assistantConversation.kind
       ? assistantConversation.kind === "assistant"
@@ -1119,7 +1150,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
   );
   const agentWork = useAgentWork(active);
   const zh = useLocale().startsWith("zh");
-  const results = useMemo(() => collectChatResults(active), [active]);
+  const results = useMemo(() => collectChatResults(active, commandEngine.commands), [active, commandEngine.commands]);
   const { layoutRef, width: canvasWidth, compact, changeWidth, separatorProps } = useCanvasLayout(hydrated);
 
   const browserOperations = useMemo(() => {
@@ -1473,16 +1504,17 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     runOnly?:boolean; settings?: ChatRunSettings;
   } = {}) {
     const clean = text.trim(), outgoing = options.attachments ?? [];
-    const sentDraft = draft.capture(), runSettings = options.settings || settings;
+    const sentDraft = draft.capture(), runSettings = options.settings || nextRunSettings;
     const submitWorkspace = getWorkspaceIdentity(), submitGeneration = workspaceGeneration();
-    if (workbench.connection !== "online") return;
+    if (workbench.connection !== "online" || (sessionId && commandEngine.connection !== "online")) return;
     if (commandEngine.pending.length) { toast({ tone:'warn',message:commandErrorText('delivery_unconfirmed',zh) }); return; }
     if ((!clean && !outgoing.length) || turnInFlightRef.current || history.pending || history.edit) return;
     const approvalContinue = options.source === "approval_continue" || options.kind === "approval.continue";
     if (awaitingApproval && !approvalContinue) return;
     if (workbench.view?.pending_interactions.length) return;
     if (active && historyPending(active.id)) return;
-    const thread = active || createThread(clean || outgoing[0]?.name || "Conversation", sessionId);
+    const thread = !sessionId ? createThread(clean || outgoing[0]?.name || "Conversation", active?.id)
+      : active || createThread(clean || outgoing[0]?.name || "Conversation", sessionId);
     const sid = thread.id, originRoute = sessionId;
     const commandKind = options.commandKind || (options.resumeTurnId ? "resume" : "send");
     const body: Record<string, unknown> = {
@@ -1505,7 +1537,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     turnInFlightRef.current = true; setSubmitting(true);
     let keepRoute = false;
     // This cache is navigation scaffolding only, never evidence of admission.
-    if (!active) saveThreads(upsertThread(loadThreads(), thread));
+    if (!active || !sessionId) saveThreads(upsertThread(loadThreads(), thread));
     try {
       let command: ConversationCommand;
       try {
@@ -1613,7 +1645,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
   if (!hydrated) {
     return (
       <div className="flex h-full min-h-0 flex-col">
-        <ChatTaskHeader thread={null} agents={[]} results={[]} sending={false} approvalCount={0} loading showTabs={false}
+        <ChatTaskHeader thread={null} agents={[]} results={[]} loading showTabs={false}
           tab="conversation" canvasVisible={false} onSelect={selectWorkspace} onToggleCanvas={openDock} onOpenResult={openResult} />
         <div className="flex min-h-0 flex-1 items-center justify-center text-sm text-ink-500">{t("loadingChat")}</div>
       </div>
@@ -1648,11 +1680,11 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
   // home route (no sessionId) or a fresh pending-first-message thread
   // reaches it now.
   const showHero =
-    conversationEmpty && !externalView && !showMissing && !showLoadFailure && !showLoading && !workbench.view?.pending_interactions.length && !draft.recovery.length && !draft.storageError;
+    conversationEmpty && !externalView && !showMissing && !showLoadFailure && !showLoading && !awaitingApproval && !workbench.view?.pending_interactions.length && !draft.recovery.length && !draft.storageError;
 
   function currentDelivery() {
     return composerDelivery({commands:commandEngine.commands,queue:commandEngine.data?.queue,
-      connection:sessionId ? commandEngine.connection : workbench.connection,
+      connection:workbench.connection !== "online" ? workbench.connection : sessionId ? commandEngine.connection : workbench.connection,
       pendingCount:commandEngine.pending.length,awaitingInput:Boolean(workbench.view?.pending_interactions.length),awaitingApproval});
   }
   const delivery = currentDelivery();
@@ -1670,11 +1702,16 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     queued: !externalView && delivery.mode === "queue",
     locked: externalView ? !active : !delivery.canSubmit || history.pending || Boolean(history.edit),
     external: externalView,
-    placeholder: isAssistantConversation ? tAssistants("messageAssistant", {name: assistantIdentity?.name || "Nerya"}) : externalView ? i18nCopy(zh, "copy.components_chat_ChatView.032") : delivery.mode === 'queue' ? i18nCopy(zh, "copy.components_chat_ChatView.033") : i18nCopy(zh, "copy.components_chat_ChatView.034"),
-    lockMessage: awaitingApproval ? t("approvalPaused") : workbench.view?.pending_interactions.length ? (i18nCopy(zh, "copy.components_chat_ChatView.035")) : history.edit ? th("editLabel") : workbench.connection==="connecting" ? (i18nCopy(zh, "copy.components_chat_ChatView.036")) : (i18nCopy(zh, "copy.components_chat_ChatView.037")),
-    settings,
+    placeholder: !sessionId ? t("inputPlaceholder") : isAssistantConversation ? tAssistants("messageAssistant", {name: assistantIdentity?.name || "Nerya"}) : externalView ? i18nCopy(zh, "copy.components_chat_ChatView.032") : delivery.mode === 'queue' ? i18nCopy(zh, "copy.components_chat_ChatView.033") : i18nCopy(zh, "copy.components_chat_ChatView.034"),
+    lockMessage: history.edit || history.pending ? th("editLabel")
+      : delivery.reason === "execution_unconfirmed" || delivery.reason === "delivery_unconfirmed" ? commandErrorText(delivery.reason, zh)
+      : delivery.reason === "awaiting_approval" ? t("approvalPaused")
+      : delivery.reason === "awaiting_input" ? i18nCopy(zh, "copy.components_chat_ChatView.035")
+      : (workbench.connection !== "online" ? workbench.connection : sessionId ? commandEngine.connection : workbench.connection) === "connecting" ? i18nCopy(zh, "copy.components_chat_ChatView.036")
+      : delivery.reason === "connection_unavailable" ? i18nCopy(zh, "copy.components_chat_ChatView.037") : undefined,
+    settings: nextRunSettings,
     assistant: isAssistantConversation,
-    contextControl:externalView?undefined:<ComposerContextSummary thread={active} settings={settings}/>,
+    contextControl:externalView?undefined:<ComposerContextSummary thread={active} settings={nextRunSettings}/>,
     onSettingsChange: (next:ChatRunSettings)=>{setSettings(next);draft.setSettings(next);},
     modelOptions,
     attachments: externalView ? [] : attachments,
@@ -1690,15 +1727,11 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
     } }}>
     {forkTarget?.sessionId === active?.id && forkTarget && <ForkMessageDialog key={forkTarget.sessionId+forkTarget.message.id} sessionId={forkTarget.sessionId} message={forkTarget.message}
       onClose={() => setForkTarget(null)} onCreated={id => { setForkTarget(null); router.push(`/chat/${id}`); }} />}
-    {nativeApprovalCard && nativeApprovalId && <PendingToolApprovalDialog key={`${active?.id}:${nativeApprovalId}`}
-      approvalId={nativeApprovalId} card={nativeApprovalCard}
-      busy={resolvingApprovalIds.has(nativeApprovalId)}
-      onDismiss={() => dismissNativeApproval(nativeApprovalId)}
-      onAction={async callbackData => { if (await resolveApproval(callbackData)) dismissNativeApproval(nativeApprovalId); }} />}
     <ResearchVisualContext.Provider value={openResearchVisual}>
     <ResearchInstrumentContext.Provider value={openResearchInstrument}>
     <StrategyDetailContext.Provider value={{ open: openStrategyDetail, active: canvasVisible ? taskDock.selected : '' }}>
-    <div className={`${styles.workbench} flex h-full min-h-0 min-w-0 flex-col`} data-testid="chat-workbench" data-conversation-kind={isAssistantConversation ? "assistant" : "task"}>
+    <div className={`${styles.workbench} flex h-full min-h-0 min-w-0 flex-col`} data-testid="chat-workbench" data-conversation-kind={isAssistantConversation ? "assistant" : "task"}
+      onClick={event => openWorkspaceFileLink(event, path => { taskDock.select(("file:" + path) as TaskDockTab); focusDock("file:" + path); })}>
       {!active?.strategy_id && !externalView && <AssistantChatHeader sessionId={active?.id || sessionId} preferredId={preferredAssistantId} onIdentity={onAssistantIdentity}
         onToggleReports={isAssistantConversation ? () => { setRequestedReport(null); if (canvasVisible && taskDock.selected === "reports") closeCanvas(); else selectWorkspace("reports", true); } : undefined}
         reportsOpen={canvasVisible && taskDock.selected === "reports"} tasks={assistantTasks}
@@ -1706,13 +1739,15 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         onOpenReports={() => { setRequestedReport(null); selectWorkspace("reports", true); }}
         onOpenResult={commandId => { setRequestedReport({commandId}); selectWorkspace("reports", true); }} />}
       {!isAssistantConversation && <RuntimeNotice workbench={workbench} />}
-      {!isAssistantConversation && <ChatTaskHeader diagnostics={<><RuntimeNotice workbench={workbench} diagnostics/><TaskProvenance thread={active}/></>} workStatus={taskStatus(active,commandEngine.commands,workbench.view)} connection={workbench.connection} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]} sending={sending}
-        approvalCount={activeApprovalIds.length} loading={showLoading} showTabs tab={taskDock.selected || ''}
+      {!isAssistantConversation && <ChatTaskHeader diagnostics={<><RuntimeNotice workbench={workbench} diagnostics/><TaskProvenance thread={active}/></>} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]}
+        loading={showLoading} showTabs tab={taskDock.selected || ''}
         workspaceAvailable canvasVisible={canvasVisible} onSelect={(tab) => selectWorkspace(tab, true)}
         onToggleBrowser={openBrowserDock}
         onToggleCanvas={() => { if (canvasVisible) closeCanvas(); else openDock(); }} onOpenResult={openResult}
         onToggleReports={reportTabs.length ? ()=>{setRequestedReport(null);if(canvasVisible && taskDock.selected === "reports") closeCanvas(); else selectWorkspace("reports",true);} : undefined}/>}
 
+      {commandEngine.goal && <GoalStatus key={JSON.stringify([workspaceGeneration(), sessionId, commandEngine.goal.goal_id])}
+        goal={commandEngine.goal} connection={commandEngine.connection} onControl={commandEngine.controlGoal} />}
       {commandEngine.data?.branch_of && <div className="shrink-0 border-b border-[color:var(--line)] px-5 py-2 text-xs text-[color:var(--text-muted)]" data-testid="branch-origin">
         {i18nCopy(zh, "copy.components_chat_ChatView.038")}
         <a className="ml-2 underline" href={`/chat/${encodeURIComponent(commandEngine.data.branch_of.session_id)}?message=${encodeURIComponent(commandEngine.data.branch_of.message_id)}`}>{i18nCopy(zh, "copy.components_chat_ChatView.039")}</a>
@@ -1726,7 +1761,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
           <ConversationSourceIcon source={active?.source} size={16} />{i18nCopy(zh, "copy.components_chat_ChatView.040")}
         </button>
       </div>}
-      <div ref={layoutRef} className="flex min-h-0 min-w-0 flex-1" data-testid="workspace-split" data-compact={compact ? "true" : "false"}>
+      <div ref={layoutRef} className={`flex min-h-0 min-w-0 flex-1 ${compact ? "flex-col" : "flex-row"}`} data-testid="workspace-split" data-compact={compact ? "true" : "false"}>
       <div hidden={hideSource} className={!hideSource ? "flex min-h-0 min-w-0 flex-1 flex-col" : "hidden"} data-testid="workspace-source">
       <section id="chat-workspace-panel-conversation" aria-label={i18nCopy(zh, "copy.components_chat_ChatView.011")} className="flex min-h-0 flex-1 flex-col min-w-0">
         {showHero ? (
@@ -1806,7 +1841,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
                 <div className="h-full flex items-center justify-center text-ink-500 text-sm">
                   {t("loadingConversation")}
                 </div>
-              ) : (
+              ) : active ? (
                 <div ref={transcriptRef} className={styles.conversation} data-testid="conversation-content">
                   {isExternalSource(active?.source) ? <ExternalSessionTimeline session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} traces={active!.messages.flatMap(m => m.role === "assistant" && m.turn?.external_call ? [m.turn.external_call] : [])} userMessages={active!.messages.filter((m): m is UserMessage => m.role === 'user')} pendingApprovals={pendingApprovals} onApprovalAction={resolveApproval} resolvingApprovalIds={resolvingApprovalIds} /> : <ConversationTimeline publicOnly={isAssistantConversation} messages={active!.messages} session={active!.id} scrollRef={scrollRef} hasMore={historyMore} loadingOlder={loadingOlder} onOlder={()=>void loadOlderHistory()} renderMessage={(m,mi)=>
                     m.role === "user" ? (
@@ -1827,7 +1862,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
                         actionsDisabled={sending || awaitingApproval || history.pending || externalView}
                       />
                     ) : isAssistantConversation ? (
-                      <AssistantReplyBubble key={m.id} message={m}
+                      <AssistantReplyBubble key={m.id} message={m} tasks={assistantTasks.rows}
                         onContinue={!sending && commandEngine.data?.checkpoint?.turn_id === m.turn?.turn_id && commandEngine.data?.checkpoint?.resumable && m.execution_status !== "unconfirmed" ? () => continueCheckpoint(m.turn!.turn_id!) : undefined}
                         onRetry={m.error && !m.loading && m.execution_status !== "unconfirmed" && active!.messages[mi - 1]?.role === "user" ? () => void retryFailedTurn(m.id) : undefined} />
                     ) : m.turn?.external_call ? (
@@ -1842,6 +1877,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
                         pendingApprovals={pendingApprovals}
                         onApprovalAction={resolveApproval}
                         resolvingApprovalIds={resolvingApprovalIds}
+                        dockApprovalId={nativeApprovalCard ? nativeApprovalId : undefined}
                         onContinue={!externalView && !sending && commandEngine.data?.checkpoint?.turn_id===m.turn?.turn_id && commandEngine.data?.checkpoint?.resumable && m.execution_status!=="unconfirmed" ? ()=>continueCheckpoint(m.turn!.turn_id!) : undefined}
                         onRetry={
                           m.error && !m.loading && m.execution_status !== "unconfirmed" && active!.messages[mi - 1]?.role === "user"
@@ -1852,7 +1888,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
                     )
                   }/>}
                 </div>
-              )}
+              ) : null}
             </div>
             {readingHistory ? <button type="button" className={styles.jump} data-testid="jump-to-latest" onClick={jumpToLatest}>{i18nCopy(zh, "copy.components_chat_ChatView.012")}<span aria-hidden>↓</span></button> : null}
             </div>
@@ -1871,11 +1907,19 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
             ) : null}
             {draft.recovery.length>0&&<div className="mx-auto flex w-full max-w-[800px] flex-wrap items-center gap-2 px-4 text-xs" role="status"><span>{i18nCopy(zh, "copy.components_chat_ChatView.041")}</span>{draft.recovery.slice(0,3).map(row=><button type="button" key={row.key} className="min-h-11 underline" onClick={()=>draft.restore(row)}>{i18nCopy(zh, "copy.components_chat_ChatView.042")}{row.draft.text.slice(0,40)||row.draft.attachments[0]?.name}</button>)}<button type="button" className="min-h-11" onClick={draft.dismissRecovery}>{i18nCopy(zh, "copy.components_chat_ChatView.043")}</button></div>}
             {draft.storageError&&<p role="status" className="mx-auto max-w-[800px] px-4 text-xs text-warn">{i18nCopy(zh, "copy.components_chat_ChatView.044")}</p>}
-            {workbench.view?.pending_interactions.length ? <InteractionPanel items={workbench.view.pending_interactions} onResolved={()=>{workbench.refresh();commandEngine.refresh();}} /> : null}
+            {nativeApprovalCard || workbench.view?.pending_interactions.length ? <div data-testid="conversation-interaction-dock" className="max-h-[50vh] shrink-0 overflow-y-auto py-2">
+              {nativeApprovalCard && <div className="mx-auto w-full max-w-[860px] px-4"><ApprovalRequestCard
+                key={`${active?.id}:${nativeApprovalId}`}
+                event={{kind:"approval_request", approval_id:nativeApprovalId, state:"pending", prompt:nativeApprovalCard.prompt, record:nativeApprovalCard.record}}
+                card={nativeApprovalCard} busy={resolvingApprovalIds.has(nativeApprovalId)}
+                onAction={async callbackData => { await resolveApproval(callbackData); }}
+              /></div>}
+              {workbench.view?.pending_interactions.length ? <InteractionPanel items={workbench.view.pending_interactions} onResolved={()=>{workbench.refresh();commandEngine.refresh();}} /> : null}
+            </div> : null}
             {!externalView && (!isAssistantConversation || commandEngine.pending.length > 0 || commandEngine.commands.some(command => command.state === "unconfirmed") || commandEngine.connection === "offline" || commandEngine.data?.checkpoint?.resumable || commandEngine.data?.queue.pause_reason === "operator" || Boolean(commandEngine.data?.queue.paused && commandEngine.commands.some(command => command.state === "queued"))) && <ConversationControls key={sessionId || 'new'} engine={commandEngine} onContinue={continueCheckpoint} onReuse={text => setInput(value => value ? value+"\n"+text : text)} />}
-            {!externalView && <ChatInput {...composerProps} variant="docked" taskHeader={!isAssistantConversation && agentWork.rows.length ? (
+            {!externalView && <div hidden={Boolean(awaitingApproval || workbench.view?.pending_interactions.length)}><ChatInput {...composerProps} variant="docked" taskHeader={!isAssistantConversation && agentWork.rows.length ? (
               <AgentTaskBar source={agentWork} open={canvasVisible && taskDock.selected === 'agents'} onOpen={() => selectWorkspace("agents", true)} />
-            ) : undefined} />}
+            ) : undefined} /></div>}
           </>
         )}
       </section>
@@ -1887,7 +1931,7 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
           event.preventDefault(); changeWidth(event.key === "Home" ? 38 : event.key === "End" ? 62 : canvasWidth + (event.key === "ArrowLeft" ? 2 : -2));
         }} className="w-1 shrink-0 touch-none cursor-col-resize bg-[color:var(--line)] hover:bg-brand-400/50 focus-visible:bg-brand-400 focus-visible:outline-none" /> : null}
       {<section id="task-workspace" role="complementary" aria-label={i18nCopy(zh, "copy.components_chat_ChatView.014")}
-        hidden={!canvasVisible} className={canvasVisible ? "flex min-h-0 min-w-0 flex-col bg-[color:var(--card)]" : "hidden"}
+        hidden={!canvasVisible} className={canvasVisible ? `flex min-h-0 min-w-0 flex-col bg-[color:var(--card)] ${compact || fullCanvas ? "flex-1" : ""}` : "hidden"}
         style={canvasVisible ? { width: fullCanvas || compact ? "100%" : `${canvasWidth}%`, flexShrink: 0 } : undefined}
         onKeyDown={(event) => {
           if (event.key === "Escape" && !event.defaultPrevented && !(event.target instanceof HTMLElement && event.target.closest("select, textarea, input, [role='dialog'], [role='menu']"))) {
@@ -1908,7 +1952,9 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
           {toolTabs.map(tab => <button type="button" key={tab.id} onClick={() => selectWorkspace(tab.id, true)} className="flex min-h-11 w-full items-center gap-3 rounded-lg bg-[color:var(--panel-bg)] px-4 text-left text-sm hover:bg-[color:var(--line)] focus-visible:ring-2"><NeryaGlyph name={tab.id === 'files' ? 'folder' : tab.id === 'browser' ? 'globe' : 'terminal'} size={18} className="text-[color:var(--text-muted)]" />{tab.label}</button>)}
         </div></div>}
         {taskDock.tabs.includes('reports') && <section id="task-dock-panel-reports" role="tabpanel" aria-labelledby="task-dock-tab-reports" hidden={taskDock.selected !== 'reports'} className={taskDock.selected === 'reports' ? 'min-h-0 flex-1' : 'hidden'}>
-          {taskDock.selected === 'reports' && <AssistantResults assistantId={assistantIdentity?.id || preferredAssistantId} requestedResult={requestedReport} onOpenFile={path=>{taskDock.select(("file:"+path) as TaskDockTab);focusDock("file:"+path);}}/>}
+          {taskDock.selected === 'reports' && (isAssistantConversation
+            ? <AssistantResults assistantId={assistantIdentity?.id || preferredAssistantId} requestedResult={requestedReport} onOpenFile={path=>{taskDock.select(("file:"+path) as TaskDockTab);focusDock("file:"+path);}}/>
+            : <ChatResultsPanel key={researchSession} results={allResults} onReveal={revealResult} onOpenFile={path=>{taskDock.select(("file:"+path) as TaskDockTab);focusDock("file:"+path);}}/>)}
         </section>}
         {taskDock.tabs.includes('strategy') && strategyId && <section id="task-dock-panel-strategy" role="tabpanel" aria-labelledby="task-dock-tab-strategy" hidden={taskDock.selected !== 'strategy'} className={taskDock.selected === 'strategy' ? 'min-h-0 flex-1 overflow-auto' : 'hidden'}>
           {strategyReports.error && <div role="alert" className="flex items-center justify-between gap-2 px-4 py-2 text-xs text-warn"><span>{i18nCopy(zh, "copy.components_chat_ChatView.015")}</span><button type="button" onClick={strategyReports.retry} className="underline">{i18nCopy(zh, "copy.components_chat_ChatView.016")}</button></div>}

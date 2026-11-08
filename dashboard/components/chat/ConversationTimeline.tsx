@@ -5,8 +5,7 @@ import { memo, useEffect, useLayoutEffect, useMemo, useRef, useState, type React
 import { useLocale } from "next-intl";
 import { ConversationFind } from "./ConversationFind";
 import type { ChatMessage } from "../../lib/chat";
-import { liveEventsToBlocks } from "../../lib/chat";
-import { finalReplyText, publicReplyText } from "../../lib/chatResults";
+import { conversationFindEntries } from "../../lib/conversationFindEntries";
 import { useTimelineReveal } from "./timelineReveal";
 
 type Unit={id:string;messages:ChatMessage[];live:boolean};
@@ -84,8 +83,7 @@ export const ConversationTimeline=memo(function ConversationTimeline({messages,s
   const {forced,reveal,cancel}=useTimelineReveal({session,scopeRef,scrollRef,hasMore,loadingOlder,onOlder,
     resolveUnit:id=>units.find(unit=>unit.id===id||unit.messages.some(m=>m.id===id||m.backend_message_id===id))?.id});
   useReadingAnchor(session,scopeRef,scrollRef,units.length,reveal);
-  const findEntries=useMemo(()=>messages.map(message=>({id:message.backend_message_id||message.id,text:message.role==="user"?message.text:
-    publicOnly ? finalReplyText(message) : publicReplyText(message,message.loading?liveEventsToBlocks(message.live_events||message.turn?.activity_events||[]):message.turn?.blocks||[])})),[messages,publicOnly]);
+  const findEntries=useMemo(()=>conversationFindEntries(messages,publicOnly),[messages,publicOnly]);
   return <div key={session} ref={scopeRef} data-timeline-session={session}>
     <ConversationFind key={session} session={session} entries={findEntries} scrollRef={scrollRef} onCancelReveal={cancel} onReveal={(id,match,signal)=>reveal({session,id,match,focus:false},signal)} hasMore={hasMore} onOlder={onOlder} loadingOlder={loadingOlder}/>
     {hasMore&&<div className="flex justify-center pb-4"><button type="button" className="min-h-9 px-3 text-xs text-[color:var(--text-muted)] hover:text-[color:var(--text-base)]" disabled={loadingOlder} onClick={onOlder}>{loadingOlder?(i18nCopy(zh, "copy.components_chat_ConversationTimeline.001")):(i18nCopy(zh, "copy.components_chat_ConversationTimeline.002"))}</button></div>}

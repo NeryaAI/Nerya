@@ -1,0 +1,34 @@
+# @nerya.version 1
+# @nerya.title Sampled fixed-range LP research
+# @nerya.description Quote-unit historical policy; not dynamic rebalance or live trading.
+# @nerya.logic Entry, hold, collect and principal-floor exit in one fixed range.
+# @nerya.rationale Execute explicit saved research policy without forward fee forecasts.
+# @nerya.scope Historical quote-token model only; preserve requested thesis boundaries.
+# @nerya.input Explicit lp_sampled_policy, lp_source and host-prepared historical snapshot.
+# @nerya.output lp_decision only; no financial execution.
+# @nerya.risk Historical sampling cannot establish exact fees, fills or live ownership.
+# @nerya.validation Candidate behavior and replay source evidence must be checked separately.
+"""Save only when the requested thesis permits fixed-range research.
+
+This asset is not a repair for a requested dynamic-rebalance strategy. It never
+prepares financial actions; live mode explicitly requires a different reviewed
+implementation. Candidate tests and historical replay remain distinct evidence.
+"""
+from lp_sampled_policy import decide_sampled_lp
+
+
+# @nerya.step sampled_lp | Evaluate fixed-range research | Consume only the current historical quote-unit snapshot.
+def run(ctx):
+    metadata = {'financial_execution_allowed':False, 'funds_sent':False}
+    if ctx.mode != 'backtest':
+        return ctx.result.error(message='Sampled LP research requires historical replay',
+            kind='configuration_required', metadata=metadata)
+    try:
+        params = ctx.config.params
+        source = params['lp_source']
+        decision = decide_sampled_lp(policy=params['lp_sampled_policy'], source=source,
+            snapshot=ctx.inputs.source(source['source_id']))
+        return ctx.result.hold(reason=decision['reason'], metadata={**metadata, 'lp_decision':decision})
+    except (KeyError, TypeError, ValueError, ArithmeticError):
+        return ctx.result.error(message='Configured fixed-range snapshot unavailable or invalid',
+            kind='data_error', metadata=metadata)

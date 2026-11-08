@@ -1,77 +1,21 @@
-"""Verification-agent nudge and 3-tier verifier system.
+"""Verification of recorded checks, not universal completion or authority.
 
-Tier 1 — Nudge (legacy)
-========================
-When the model marks several todos completed without running a
-verification step (tests, type-check, dry-run), the harness nudges a
-verifier so the user does not have to accept "all done" on faith.
-
-The ``after_turn`` reflection hook counts completed todos, compares them
-to validation evidence, and attaches a follow-up suggestion to the next
-observation.
-
-This module is the *detection* half. The kernel uses
-:func:`compute_verifier_nudge` after a turn and, when triggered, emits
-an ``agent.verifier.nudge`` journal record + injects a system-level
-note into ``memory/global.md`` (already plumbed for cross-turn
-context). The next turn's system prompt picks the note up via the
-existing memory-recall block, so the model sees:
-
-    [verifier] last turn marked 4 todos completed without running any
-    validation tool (no run_shell test invocations, no test_runner
-    tools, no diff/grep against the changed paths). Run a verification
-    step before declaring done.
-
-Tier 2 — 3-Tier Verifier (new)
-===============================
-The 3-tier verifier augments the legacy nudge with a structured
-outcome that the kernel (or any caller) can use to decide *why* a turn
-ended and whether the result is trustworthy.
-
-``verify_hard``  — External truth signal
-    Checks whether any test / validation / verification tool ran **and
-    succeeded** in the turn blocks. Missing validation is explicit
-    ``hard_status="missing"`` rather than a pass, so model prose is
-    never mislabeled as hard-verified.
-
-``verify_soft``  — Budget / heuristic check
-    Two conditions OR'd:
-      a. Token budget over 90 % (pass ``tokens_used`` and
-         ``tokens_budget`` as params).
-      b. 3 consecutive turns each producing < 500 new tokens of
-         assistant text (diminishing returns).
-    Default is ``False`` (no budget pressure).
-
-``verify_giveup`` — Model self-stopped
-    Model emits no ``tool_use`` AND has assistant text. This is a
-    natural completion signal.
-
-``compute_verifier_outcome`` combines all three tiers and returns a
-``VerifierOutcome`` with a ``transition_label`` suitable for journal
-records and downstream decision-making.
-
-What counts as "validation"
----------------------------
-Configurable, but the defaults follow the same basic heuristic:
-
-* a ``run_shell`` call whose command matches one of ``test_patterns``
-  (``pytest``/``go test``/``cargo test``/``npm test``/``make test``/…),
-* a ``script_run`` whose script name contains ``test`` or ``check``,
-* an explicit ``verify_*`` / ``check_*`` native tool invocation,
-* an ``llm_classify`` / ``llm_extract_json`` call whose ``task`` tag
-  starts with ``verify``,
-* a fresh ``read_file`` on a path that ``edit_file`` touched in the
-  same turn (re-read after edit).
-
-Anything else doesn't count — including running the *failing* code
-path, since the model already knows the change works there.
+Host receipts bind checks to source versions. All required recorded checks must
+pass; pending, missing, failed and stale remain distinct. A later revision
+invalidates older checks. Shell compatibility evidence is explicitly turn-scoped.
+Model self-review, tool names and quoted checker commands are not hard evidence.
+The legacy todo nudge is advisory only; it never changes a verification verdict.
 """
 
 from __future__ import annotations
 
 import re
+import json
+import shlex
 from dataclasses import dataclass, field
 from typing import Any, Iterable, Sequence
+
+from ..tools.verification import read_verification_receipt
 
 
 # ---------------------------------------------------------------------------
@@ -79,33 +23,60 @@ from typing import Any, Iterable, Sequence
 # ---------------------------------------------------------------------------
 
 
-_TEST_COMMAND_PATTERNS: tuple[re.Pattern[str], ...] = tuple(
-    re.compile(p, re.IGNORECASE)
-    for p in (
-        r"\bpytest\b",
-        r"\bpython\s+-m\s+(?:unittest|pytest)\b",
-        r"\bgo\s+test\b",
-        r"\bcargo\s+test\b",
-        r"\bnpm\s+(?:run\s+)?test\b",
-        r"\byarn\s+(?:run\s+)?test\b",
-        r"\bpnpm\s+(?:run\s+)?test\b",
-        r"\bmake\s+(?:test|check|verify)\b",
-        r"\bjest\b",
-        r"\bvitest\b",
-        r"\btox\b",
-        r"\bnox\b",
-        r"\bmypy\b",
-        r"\bruff\s+check\b",
-        r"\beslint\b",
-        r"\btsc\b",
-    )
-)
-
 _VERIFY_TOOL_PREFIXES: tuple[str, ...] = ("verify_", "check_", "validate_", "test_")
 
 
 def is_validation_command(command: str) -> bool:
-    return any(pattern.search(command or "") for pattern in _TEST_COMMAND_PATTERNS)
+    """Recognize an invoked checker, not quoted words or masked shell exits.
+
+    Deliberately conservative: complex shell programs need a host receipt. A
+    pipeline's last process or ``|| true`` cannot prove the checker succeeded.
+    This is evidence classification, never a shell authorization policy.
+    """
+    if not command or any(token in command for token in (";", "|", "\n", "`")):
+        return False
+    if "$(" in command or "&" in command.replace("&&", ""):
+        return False
+    try:
+        segments = [shlex.split(segment) for segment in command.split("&&")]
+    except ValueError:
+        return False
+    checked = False
+    for words in segments:
+        if not words:
+            return False
+        if words[0] == "cd" and len(words) == 2 and not checked:
+            continue
+        # A leading environment assignment does not change which command runs.
+        while words and re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", words[0]):
+            words = words[1:]
+        if not words:
+            return False
+        executable = words[0].replace("\\", "/").rsplit("/", 1)[-1]
+        args = words[1:]
+        no_check = {"-h", "--help", "--version", "--collect-only", "--co", "--listTests",
+                    "--list-tests", "--showConfig", "--show-config", "--listFilesOnly", "--show-settings"}
+        if any(arg.split("=", 1)[0] in no_check for arg in args):
+            return False
+        if re.fullmatch(r"python(?:\d+(?:\.\d+)*)?(?:\.exe)?", executable):
+            if len(args) < 2 or args[0] != "-m" or args[1] not in {"pytest", "unittest"}:
+                return False
+        elif executable in {"go", "cargo"}:
+            if not args or args[0] != "test":
+                return False
+        elif executable in {"npm", "pnpm", "yarn"}:
+            if args[:1] != ["test"] and args[:2] != ["run", "test"]:
+                return False
+        elif executable == "make":
+            if not args or args[0] not in {"test", "check", "verify"}:
+                return False
+        elif executable == "ruff":
+            if args[:1] != ["check"]:
+                return False
+        elif executable not in {"pytest", "jest", "vitest", "tox", "nox", "mypy", "eslint", "tsc"}:
+            return False
+        checked = True
+    return checked
 
 
 # ---------------------------------------------------------------------------
@@ -163,7 +134,7 @@ class VerifierOutcome:
     ----------
     hard_passed:
         ``True`` only when at least one test / validation tool ran
-        **and succeeded** in the turn.
+        **and succeeded**, with no unresolved required check in the turn.
     soft_triggered:
         ``True`` when the token budget is over 90 % **or** the last
         3 turns each produced < 500 new tokens of assistant text
@@ -225,173 +196,110 @@ def verify_hard(
     *,
     blocks: Iterable[dict[str, Any]],
 ) -> tuple[bool, dict[str, Any]]:
-    """Check whether any test/validation tool ran **and succeeded**.
+    """Reduce recorded checks, with failure/missing/stale precedence.
 
-    Scans the turn blocks for ``tool_result`` entries whose action
-    matches a known test/verify pattern *and* whose ``ok`` flag is
-    ``True``.  Also checks ``tool_use`` entries for the same patterns
-    and cross-references with their result (when available).
-
-    Returns ``(passed, details)`` where ``passed`` is ``False`` when
-    no validation signal exists. The absence of hard evidence is a
-    lazy/model-done fallback, not a hard verifier pass.
-
-    Parameters
-    ----------
-    blocks:
-        Per-turn :class:`BlockEnvelope` dicts — the same shape accepted
-        by :func:`compute_verifier_nudge`.
+    A new receipt supersedes the same check only, for the same artifact. Other
+    checks on an older revision become stale. Legacy shell checks are explicitly
+    turn-scoped; named tools without host receipts cannot self-certify a version.
     """
-
-    # Collect tool_result blocks that carry validation evidence.
-    # A tool_result envelope has block.kind == "tool_result" with
-    # block.ok, block.action, etc.
-    successful_validation_actions: list[str] = []
-    failed_validation_actions: list[str] = []
-    test_commands_seen: list[str] = []
-    tool_use_by_call_id: dict[str, dict[str, Any]] = {}
-    result_call_ids: set[str] = set()
-
-    # First pass: index tool_use blocks by call_id so we can
-    # cross-reference with tool_result blocks.
-    for env in blocks or ():
-        block = env.get("block") if isinstance(env.get("block"), dict) else env
-        if not isinstance(block, dict):
+    rows = [env.get("block", env) for env in blocks or () if isinstance(env, dict)]
+    rows = [row for row in rows if isinstance(row, dict)]
+    uses = {str(row["call_id"]): row for row in rows if row.get("kind") == "tool_use" and row.get("call_id")}
+    checks: dict[tuple[str, str], dict[str, Any]] = {}
+    completed: set[str] = set()
+    test_commands: list[str] = []
+    unverified: list[str] = []
+    for row in rows:
+        if row.get("kind") != "tool_result":
             continue
-        kind = block.get("kind")
-        if kind == "tool_use":
-            call_id = str(block.get("call_id") or "")
-            if call_id:
-                tool_use_by_call_id[call_id] = block
-
-    # Second pass: scan tool_result blocks for validation success.
-    for env in blocks or ():
-        block = env.get("block") if isinstance(env.get("block"), dict) else env
-        if not isinstance(block, dict):
-            continue
-        kind = block.get("kind")
-        if kind != "tool_result":
-            continue
-
-        action = str(block.get("action") or "")
-        ok = bool(block.get("ok", False))
-        call_id = str(block.get("call_id") or "")
-        if call_id:
-            result_call_ids.add(call_id)
-
-        # Determine whether this tool_result corresponds to a
-        # validation action.  We check both the result's own action
-        # field and the original tool_use payload (for run_shell,
-        # the validation pattern lives in the command, not the
-        # action name).
-        is_validation = False
-
-        # Direct prefix match on the action name.
-        if any(action.startswith(p) for p in _VERIFY_TOOL_PREFIXES):
-            is_validation = True
-
-        # llm_classify / llm_extract_json with verify-prefixed task.
-        if action in {"llm_classify", "llm_extract_json"}:
-            # Try to get the task from the original tool_use payload.
-            orig_use = tool_use_by_call_id.get(call_id)
-            if orig_use:
-                payload = orig_use.get("payload") or {}
-                task = str(payload.get("task") or "").lower()
-                if task.startswith("verify") or task.startswith("check"):
-                    is_validation = True
-
-        # run_shell with a test command pattern.
-        if action == "run_shell":
-            # The command is in the original tool_use payload.
-            orig_use = tool_use_by_call_id.get(call_id)
-            cmd = ""
-            if orig_use:
-                cmd = str((orig_use.get("payload") or {}).get("command") or "")
-            if is_validation_command(cmd):
-                is_validation = True
-                test_commands_seen.append(cmd[:120])
-
-        # script_run with test/check/verify in the name.
-        if action == "script_run":
-            orig_use = tool_use_by_call_id.get(call_id)
-            name = ""
-            if orig_use:
-                name = str((orig_use.get("payload") or {}).get("name") or "")
-            if any(s in name.lower() for s in ("test", "check", "verify")):
-                is_validation = True
-
-        # Also check tool_use-level actions for explicit verify tools
-        # that might not appear in the tool_result action (some adapters
-        # normalise the action name).
-        if not is_validation and call_id:
-            orig_use = tool_use_by_call_id.get(call_id)
-            if orig_use:
-                orig_action = str(orig_use.get("action") or "")
-                if any(orig_action.startswith(p) for p in _VERIFY_TOOL_PREFIXES):
-                    is_validation = True
-
-        if is_validation:
-            if ok:
-                successful_validation_actions.append(action)
+        call_id = str(row.get("call_id") or "")
+        completed.add(call_id)
+        use = uses.get(call_id, {})
+        action = str(row.get("action") or use.get("action") or "")
+        if row.get("modified_paths") or (row.get("ok") is True and action in {"write_file", "edit_file"}):
+            # Without a complete dependency graph, a source write conservatively
+            # invalidates earlier successes. Rechecking restores that check only.
+            for check in checks.values():
+                if check["status"] == "passed":
+                    check["status"] = "stale"
+        receipt = read_verification_receipt(row.get("verification"))
+        if receipt is not None:
+            artifact, revision = receipt["artifact_id"], receipt["revision"]
+            for (owner, _), previous in checks.items():
+                if owner == artifact and previous["revision"] != revision:
+                    previous["status"] = "stale"
+            for item in receipt["checks"]:
+                check = {**item, "artifact_id": artifact, "revision": revision,
+                         "scope": receipt["scope"], "action": action, "call_id": call_id, "binding": "source_revision"}
+                checks[(artifact, item["check_id"])] = check
+            if row.get("ok") is not True or row.get("semantic_success") is False:
+                checks[(artifact, f"{action}:operation")] = {
+                    "check_id": f"{action}:operation", "label": "Tool operation", "artifact_id": artifact,
+                    "revision": revision, "action": action, "call_id": call_id, "binding": "source_revision",
+                    "status": "failed", "required": True,
+                }
             else:
-                failed_validation_actions.append(action)
-
-    # Third pass: scan tool_use blocks that have no matching
-    # tool_result (e.g. the turn ended before results came back).
-    # A test was *invoked* but we don't yet know the result — we
-    # conservatively treat unknown-result invocations as
-    # non-passing by counting them as failed.
-    for call_id, use_block in tool_use_by_call_id.items():
-        if call_id in result_call_ids:
-            continue  # Already handled above.
-        action = str(use_block.get("action") or "")
-        payload = use_block.get("payload") or {}
-        is_validation = False
-
-        if any(action.startswith(p) for p in _VERIFY_TOOL_PREFIXES):
-            is_validation = True
-        elif action == "run_shell":
-            cmd = str(payload.get("command") or "")
-            if is_validation_command(cmd):
-                is_validation = True
-                test_commands_seen.append(cmd[:120])
-        elif action == "script_run":
-            name = str(payload.get("name") or "")
-            if any(s in name.lower() for s in ("test", "check", "verify")):
-                is_validation = True
-        elif action in {"llm_classify", "llm_extract_json"}:
-            task = str(payload.get("task") or "").lower()
-            if task.startswith("verify") or task.startswith("check"):
-                is_validation = True
-
-        if is_validation:
-            # No result yet — conservatively count as failed.
-            failed_validation_actions.append(f"{action} (pending_result)")
-
-    if successful_validation_actions:
-        passed = True
-        hard_status = "passed"
-    elif failed_validation_actions:
-        passed = False
-        hard_status = "failed"
-    else:
-        passed = False
-        hard_status = "missing"
-
-    has_validation_attempt = bool(
-        successful_validation_actions or failed_validation_actions
-    )
-    has_hard_evidence = bool(successful_validation_actions)
-
-    details: dict[str, Any] = {
-        "successful_validation_actions": successful_validation_actions,
-        "failed_validation_actions": failed_validation_actions,
-        "test_commands_seen": test_commands_seen,
-        "hard_status": hard_status,
-        "has_hard_evidence": has_hard_evidence,
-        "has_validation_attempt": has_validation_attempt,
+                checks.pop((artifact, f"{action}:operation"), None)
+            unverified.extend(receipt["unverified"])
+            continue
+        payload = use.get("payload") or {}
+        command = str(payload.get("command") or "") if isinstance(payload, dict) else ""
+        shell_check = action == "run_shell" and bool(use) and is_validation_command(command)
+        named_check = action.startswith(_VERIFY_TOOL_PREFIXES)
+        if not shell_check and not named_check:
+            continue
+        status = _legacy_check_status(row)
+        if named_check and status == "passed":
+            status = "missing"  # a tool name is not a verification contract
+        key = command if shell_check else action
+        checks[("turn", key)] = {"check_id": key, "label": key, "action": action, "call_id": call_id,
+                                 "artifact_id": "", "revision": "", "scope": "Recorded command only",
+                                 "binding": "turn", "status": status, "required": True}
+        if shell_check:
+            test_commands.append(command[:240])
+    for call_id, use in uses.items():
+        if call_id in completed:
+            continue
+        action = str(use.get("action") or "")
+        command = str((use.get("payload") or {}).get("command") or "")
+        if action == "run_shell" and is_validation_command(command) or action.startswith(_VERIFY_TOOL_PREFIXES):
+            checks[("pending", call_id)] = {"check_id": command or action, "label": command or action,
+                "action": action, "call_id": call_id, "artifact_id": "", "revision": "",
+                "binding": "turn", "status": "pending", "required": True}
+    items = list(checks.values())
+    required = [item for item in items if item["required"]]
+    statuses = {item["status"] for item in required}
+    hard_status = next((status for status in ("failed", "pending", "stale", "missing") if status in statuses),
+                       "passed" if required else "missing")
+    successful = [item["action"] for item in items if item["status"] == "passed"]
+    failed = [item["action"] for item in items if item["status"] == "failed"]
+    return hard_status == "passed", {
+        "successful_validation_actions": successful, "failed_validation_actions": failed,
+        "test_commands_seen": test_commands, "hard_status": hard_status,
+        "has_hard_evidence": bool(successful), "has_validation_attempt": bool(items),
+        "checks": items, "unverified": list(dict.fromkeys(unverified)),
+        "scope": "Recorded checks only; not universal task completion or live authorization.",
     }
-    return passed, details
+
+
+def _legacy_check_status(row: dict[str, Any]) -> str:
+    value = row.get("result")
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except ValueError:
+            value = {}
+    data = value if isinstance(value, dict) else {}
+    if (data.get("terminal") is False or data.get("complete") is False
+            or data.get("execution_state") == "unknown"
+            or data.get("status") in {"pending", "submitted", "confirming", "awaiting_approval"}):
+        return "pending"
+    if (row.get("ok") is not True or row.get("semantic_success") is False
+            or data.get("ok") is False or data.get("success") is False
+            or data.get("exit_code", 0) != 0 or data.get("errors") or data.get("error")
+            or data.get("status") in {"failed", "error", "blocked", "cancelled"}):
+        return "failed"
+    return "passed"
 
 
 # ---------------------------------------------------------------------------
@@ -592,6 +500,7 @@ def compute_verifier_outcome(
         timeout, etc.).
     """
 
+    blocks = list(blocks or ())
     hard_passed, hard_details = verify_hard(blocks=blocks)
     soft_triggered, soft_details = verify_soft(
         tokens_used=tokens_used,

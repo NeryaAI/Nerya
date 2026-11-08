@@ -71,6 +71,18 @@ class LoopConfig:
     tool_argument_defaults: dict[str, dict[str, Any]] = field(default_factory=dict)
     tool_call_metadata: dict[str, Any] = field(default_factory=dict)
 
+    def __post_init__(self) -> None:
+        # Trusted runtime selection travels separately from model-authored arguments.
+        self.tool_call_metadata = {
+            **self.tool_call_metadata,
+            "parent_model_selection": {
+                "provider": self.model_provider,
+                "model": self.model_id,
+                "reasoning_effort": self.reasoning_effort,
+                "reasoning_summary": self.reasoning_summary,
+            },
+        }
+
     @classmethod
     def from_config(cls, config: Any, **overrides: Any) -> "LoopConfig":
         """Read the one native configuration surface; caller identities are not config."""

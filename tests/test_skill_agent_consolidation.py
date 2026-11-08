@@ -148,6 +148,43 @@ def test_inspect_is_read_only_and_invalid_encoding_is_a_tool_error(tmp_path):
     assert _call(index, skill="sample", file="binary.md").is_error
 
 
+def test_script_inspection_pages_through_actual_helper_without_execution(tmp_path):
+    path = _skill(tmp_path, "sample", "sample")
+    scripts = path.parent / "scripts"
+    scripts.mkdir()
+    lines = [f"raise AssertionError('never execute line {i}')" for i in range(205)]
+    (scripts / "helper.py").write_text("\n".join(lines) + "\n", encoding="utf-8")
+    index = SkillIndex([tmp_path])
+    pages = []
+    offset = 0
+    while True:
+        page = _call(index, action="inspect", skill="sample", script="helper.py", offset=offset)
+        assert not page.is_error
+        meta = _json(page)
+        text = next(part.text for part in page.content if part.type == "text")
+        assert meta["offset"] == offset
+        assert meta["lines_shown"] == len(text.splitlines()) <= 80
+        assert meta["lines_total"] == 205
+        pages.extend(text.splitlines())
+        if meta["next_offset"] is None:
+            break
+        assert meta["next_offset"] > offset
+        offset = meta["next_offset"]
+    assert pages == lines
+    tail = _call(index, action="inspect", skill="sample", script="helper.py", offset=200, limit=2)
+    assert next(part.text for part in tail.content if part.type == "text").splitlines() == lines[200:202]
+    assert _json(tail)["next_offset"] == 202
+
+
+@pytest.mark.parametrize("paging", [{"offset": -1}, {"offset": True}, {"offset": "80"},
+                                      {"limit": 0}, {"limit": 401}, {"limit": True}])
+def test_script_inspection_rejects_invalid_paging(tmp_path, paging):
+    path = _skill(tmp_path, "sample", "sample")
+    (path.parent / "scripts").mkdir()
+    (path.parent / "scripts" / "helper.py").write_text("pass\n")
+    assert _call(SkillIndex([tmp_path]), action="inspect", skill="sample", script="helper.py", **paging).is_error
+
+
 def _descriptor(name):
     return make_native_descriptor(name=name, description=name, input_schema={"type": "object"}, handler=lambda call: ToolResult(name=call.name))
 
@@ -156,7 +193,7 @@ def test_compact_tools_preserve_legacy_only_policies_and_execution_entries():
     names = ["Skill", "skill_index", "skill_view", "script_inspect", "script_run", "task_get", "task_output", "trade_intent_submit"]
     descriptors = [_descriptor(name) for name in names]
     compact = {d.name for d in compact_tool_catalog(descriptors)}
-    assert compact == {"Skill", "script_run", "task_get", "trade_intent_submit"}
+    assert compact == {"Skill", "script_run", "task_get", "task_output", "trade_intent_submit"}
     legacy_only = [d for d in descriptors if d.name in {"skill_view", "task_output"}]
     assert compact_tool_catalog(legacy_only) == legacy_only
     registry = ToolRegistry()

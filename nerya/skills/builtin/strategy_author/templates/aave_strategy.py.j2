@@ -1,0 +1,23 @@
+# @nerya.version 1
+# nerya-template: implementation-incomplete
+# @nerya.title Aave supply/withdraw authoring scaffold
+# @nerya.description Disabled protocol scaffold; complete the data and decision gates before validation.
+# @nerya.logic Delegate protocol execution and recovery to the candidate-local Aave helper.
+# @nerya.rationale Aave deposits require financial actions, not spot positions.
+# @nerya.scope One run(ctx) tick; no schedule activation or historical replay.
+# @nerya.input Reviewed financial_request and stable operation_key in params; authored observations and decision gates.
+# @nerya.output StrategyResult retaining the financial receipt or a closed-gate hold.
+# @nerya.risk Missing resource binding or historical inputs cannot establish execution or yield.
+# @nerya.validation Scaffold only; author and test the actual entrypoint before submission.
+from aave_supply import aave_supply_tick
+
+
+# @nerya.step protocol_gate | Preserve protocol execution | Keep gates closed until the requested rules and observations are implemented.
+def run(ctx):
+    return aave_supply_tick(
+        ctx,
+        request=ctx.config.params.get('financial_request', {}),
+        operation_key=ctx.config.params.get('operation_key', ''),
+        data_ready=False,
+        decision=False,
+    )

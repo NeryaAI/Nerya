@@ -24,7 +24,7 @@ from nerya.llm.messages import MessagesRequest, OpenAIMessagesBackend
 from nerya.llm.retry import is_retryable_stream_transport_error
 from nerya.subagents.tasks import TaskStore
 from nerya.tools.native.shell import run_shell_handler
-from nerya.tools.native.tasks import task_output_handler, task_stop_handler
+from nerya.tools.native.tasks import TASK_GET_SCHEMA, TASK_OUTPUT_SCHEMA, task_get_handler, task_output_handler, task_stop_handler
 from nerya.tools.executor import NativeToolExecutor
 from nerya.tools.orchestrator import ToolOrchestrator
 from nerya.tools.permissions import PermissionContext, PermissionEngine, PermissionMode
@@ -105,7 +105,7 @@ def test_background_shell_has_task_live_output_exit_and_stop(tmp_path):
     assert 'ready' in json.dumps(output.asdict())
     stopped = task_stop_handler(ToolCall(name='task_stop', arguments={'task_id': task_id}), store=store)
     assert 'live_worker_found' in json.dumps(stopped.asdict())
-    record = eventually(lambda: (r if (r := store.load(task_id)).is_terminal() else None))
+    record = store.wait_for_completion(task_id)
     assert record.state == 'cancelled'
     assert record.output['process_exited'] and record.output['process_group_stopped']
     assert record.output['exit_code'] is not None
@@ -119,6 +119,68 @@ def test_missing_worker_stop_is_not_false_confirmation(tmp_path):
     assert reopened.request_stop(record.task_id) is False
     assert reopened.load(record.task_id).state == 'queued'
     assert reopened.load(record.task_id).progress[-1]['payload']['stop_confirmed'] is False
+    store.update_state(record.task_id, 'running')
+    before = store._path(record.task_id).read_bytes()
+    started = time.monotonic()
+    result = task_output_handler(ToolCall(name='task_output', arguments={
+        'task_id': record.task_id, 'wait_for_completion': True,
+    }), store=reopened)
+    assert time.monotonic() - started < .5
+    data = result.content[0].data
+    assert data['state'] == 'running'
+    assert data['wait_status'] == 'owner_unconfirmed'
+    assert data['is_terminal'] is False and data['next_required_action']
+    assert store._path(record.task_id).read_bytes() == before
+    # A not-yet-started Thread is also insufficient proof of an active worker.
+    store.attach_thread(record.task_id, threading.Thread(target=lambda: None))
+    assert reopened.wait_for_completion(record.task_id).state == 'running'
+    assert 'wait_for_completion' not in TASK_GET_SCHEMA['properties']
+    assert TASK_OUTPUT_SCHEMA['properties']['wait_for_completion']['default'] is False
+
+    release = threading.Event()
+    token = CancelToken()
+    def complete():
+        assert release.wait(5), 'test failed to release worker'
+        store.finish(record.task_id, output={'completed': True})
+    thread = threading.Thread(target=complete)
+    thread.start()
+    store.attach_thread(record.task_id, thread)
+    assert TaskStore(WorkspacePaths(tmp_path / 'other'))._threads.get(record.task_id) is None
+    try:
+        assert task_get_handler(ToolCall(name='task_get', arguments={
+            'task_id': record.task_id,
+        }), store=reopened).content[0].data['state'] == 'running'
+        immediate = task_output_handler(ToolCall(name='task_output', arguments={
+            'task_id': record.task_id,
+        }), store=reopened)
+        assert immediate.content[0].data['wait_status'] == 'not_requested'
+        timer = threading.Timer(.05, token.cancel)
+        timer.start()
+        try:
+            with pytest.raises(CancelledError):
+                task_output_handler(ToolCall(name='task_output', arguments={
+                    'task_id': record.task_id, 'wait_for_completion': True,
+                }, metadata={'cancel_token': token}), store=reopened)
+        finally:
+            timer.join()
+        assert thread.is_alive() and reopened.load(record.task_id).state == 'running'
+        with pytest.raises(CancelledError, match='deadline_exceeded'):
+            task_output_handler(ToolCall(name='task_output', arguments={
+                'task_id': record.task_id, 'wait_for_completion': True,
+            }, metadata={'turn_deadline_epoch': time.time() - 1}), store=reopened)
+        timer = threading.Timer(.05, release.set)
+        timer.start()
+        try:
+            result = task_output_handler(ToolCall(name='task_output', arguments={
+                'task_id': record.task_id, 'wait_for_completion': True,
+            }), store=reopened)
+        finally:
+            timer.join()
+        assert result.content[0].data['state'] == 'succeeded'
+        assert result.content[0].data['output'] == {'completed': True}
+    finally:
+        release.set()
+        thread.join(5)
 
 def test_background_without_store_does_not_launch(tmp_path):
     result = run_shell_handler(ToolCall(name='run_shell', arguments={
@@ -358,16 +420,19 @@ def test_loop_executes_complete_tool_once_and_text_reconciles(tmp_path, monkeypa
     assert {e['stream_id'] for e in deltas} == {final[-1]['stream_id']}
     assert final[-1]['stream_id'] == 'managed:2:1'
 
-def test_loop_partial_tool_is_not_executed_or_retried(tmp_path, monkeypatch):
+def test_loop_partial_tool_is_not_executed_and_safe_recovery_is_bounded(tmp_path, monkeypatch):
     writes, events = [], []
     transport = StreamTransport([delta(content='partial'), tool_chunks()[0]], fail=True)
-    outcome = make_loop(gateway(tmp_path, monkeypatch, [transport]), events, writes).run(
+    loop = make_loop(gateway(tmp_path, monkeypatch, [transport]), events, writes)
+    loop.config.llm_retry_attempts = 2
+    loop.config.llm_retry_base_delay = loop.config.llm_retry_max_delay = 0
+    outcome = loop.run(
         system='fixture', user_message='execute fixture', turn_id='interrupted')
-    assert not writes and len(transport.calls) == 1 and outcome.aborted
+    assert not writes and len(transport.calls) == 2 and outcome.aborted
     assert outcome.abort_reason == 'stream_interrupted'
-    assert '模型流式响应中断' in outcome.final_text
-    assert '1 步，0 次工具调用' in outcome.final_text
-    assert '错误详情' in outcome.final_text
+    assert outcome.tool_calls == 0 and outcome.extra_llm_attempts == 1
+    assert 'incomplete' in outcome.final_text.lower()
+    assert any(e.block.get('status') == 'discarded' for e in events)
 
 
 def test_pre_output_disconnect_retries_in_same_loop_round(tmp_path, monkeypatch):
@@ -549,19 +614,24 @@ def test_loop_cancel_during_stream_does_not_execute_partial_tool(tmp_path, monke
     assert not writes and len(transport.calls) == 1
     assert outcome.stop_reason == 'cancelled'
     final = [e.block for e in events if e.block['kind'] == 'text' and e.block.get('stream_id')][-1]
-    assert final['stream_id'] == 'cancel:1:1' and final['text'].startswith('partial')
+    assert final['stream_id'] == 'cancel:1:1'
+    assert 'incomplete' in final['text'].lower() and not final['text'].startswith('partial')
+    assert any(e.block.get('text') == 'partial' for e in events if e.block['kind'] == 'text_delta')
 
 def test_after_tool_commits_stream_failure_never_replays_tool(tmp_path, monkeypatch):
     writes, events = [], []
-    transports = [StreamTransport(tool_chunks()), StreamTransport([delta(content='partial')], fail=True)]
+    transports = [StreamTransport(tool_chunks()), StreamTransport([delta(content='partial')], fail=True),
+                  StreamTransport([delta(content='Verified from saved tool evidence.'), finish()])]
     gw = gateway(tmp_path, monkeypatch, [transports[0]])
     pending = iter(transports)
     monkeypatch.setattr(gw, '_resolve_messages_backend', lambda *a, **k: backend(next(pending)))
-    outcome = make_loop(gw, events, writes).run(system='fixture', user_message='fixture')
+    loop = make_loop(gw, events, writes)
+    loop.config.llm_retry_base_delay = loop.config.llm_retry_max_delay = 0
+    outcome = loop.run(system='fixture', user_message='fixture')
     assert writes == [{'value': 1}] and outcome.tool_calls == 1
-    assert outcome.aborted and outcome.abort_reason == 'stream_interrupted'
-    assert [len(t.calls) for t in transports] == [1, 1]
-    assert outcome.checkpoint.resumable is False
+    assert not outcome.aborted and outcome.final_text == 'Verified from saved tool evidence.'
+    assert [len(t.calls) for t in transports] == [1, 1, 1]
+    assert transports[1].calls[0]['messages'] == transports[2].calls[0]['messages']
 
 def test_retry_before_stream_uses_new_identity(tmp_path, monkeypatch):
     from nerya.core.errors import LLMError

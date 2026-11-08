@@ -2,9 +2,25 @@ import type { LiveEvent } from "./chat";
 
 /** Only transport identity may deduplicate a delta. Equal text is not identity. */
 export function streamEventKey(event: LiveEvent): string {
-  if (event.event_id) return String(event.event_id);
+  const domain = [event.session_id || "", event.turn_id || "", event.epoch || ""].join(":");
+  if (event.event_id) return `${domain}:event:${String(event.event_id)}`;
   if (typeof event.seq !== "number") return "";
-  return [event.session_id || "", event.turn_id || "", event.epoch || "", event.seq].join(":");
+  return `${domain}:seq:${event.seq}`;
+}
+
+/**
+ * Merge a provider text snapshot or delta without duplicating reconnect data.
+ * Providers use both forms on the same transport, so callers must use this
+ * helper instead of concatenating text directly.
+ */
+export function mergeStreamText(previous: string, incoming: string, mode?: unknown): string {
+  if (!previous) return incoming;
+  if (!incoming) return mode === "replace" ? "" : previous;
+  if (mode === "replace") return incoming;
+  if (mode === "append") return previous + incoming;
+  if (incoming === previous || previous.endsWith(incoming)) return previous;
+  if (incoming.startsWith(previous)) return incoming;
+  return previous + incoming;
 }
 
 export function mergeStreamEvents(...batches: readonly LiveEvent[][]): LiveEvent[] {

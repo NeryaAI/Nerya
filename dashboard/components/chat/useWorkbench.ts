@@ -46,7 +46,9 @@ export function useWorkbench(sessionId?: string) {
           if (view && (!view.status || view.session_id !== sessionId)) throw new Error("runtime_incompatible");
         }
         active=Boolean(view&&["running","stopping","queued"].includes(view.status.execution));
-        if (!stopped) setState(old => old.sid === sessionId && old.connection === "online" && old.view?.revision === view?.revision && old.runtime === info ? old : {sid:sessionId,view,runtime:info,connection:"online"});
+        // A view revision can stay unchanged while command status/actions change.
+        // Each successful poll is authoritative for the displayed execution state.
+        if (!stopped) setState({sid:sessionId,view,runtime:info,connection:"online"});
       } catch(error) {
         runtimeRequest=undefined;
         if (!stopped) setState(old => ({sid:sessionId,view:old.sid===sessionId ? old.view:null,runtime:info || old.runtime,

@@ -14,7 +14,7 @@ from ..core.paths import WorkspacePaths
 from ..evolution.patch_proposal import create_proposal, list_proposals
 from .workflow_graph import (
     MAX_FILE_BYTES, WORKFLOW_FILE, WorkflowError, build_workflows,
-    package_revision, parse_metadata, safe_relative_path,
+    package_revision, parse_metadata, read_manifest, safe_relative_path,
 )
 
 _LOCK = threading.RLock()
@@ -40,7 +40,15 @@ def _read_files(root: Path) -> tuple[dict[str, str], list[str]]:
     total = 0
     for path in sorted(root.rglob("*")):
         rel = path.relative_to(root)
-        if any(p.startswith(".") or p in _SKIP_DIRS for p in rel.parts):
+        parts = rel.parts
+        if parts[0] == "backtests":
+            # Direct Python entrypoints/helpers are authored source; nested
+            # run snapshots and output/data files are not. Keep the directory
+            # itself in the symlink check so it cannot hide external source.
+            if len(parts) > 1 and (len(parts) != 2 or path.suffix != ".py"):
+                continue
+            parts = parts[1:]
+        if any(p.startswith(".") or p in _SKIP_DIRS for p in parts):
             continue
         if path.is_symlink() or any(root.joinpath(*rel.parts[:i]).is_symlink() for i in range(1, len(rel.parts))):
             omitted.append(rel.as_posix())
@@ -107,6 +115,21 @@ def view_workflow(paths: WorkspacePaths, strategy_id: str, proposal_id: str | No
                   *, schedules: list[dict[str, Any]] | None = None,
                   _proposal_index: dict[str, Any] | None = None) -> dict[str, Any]:
     files, source = source_files(paths, strategy_id, proposal_id, _proposal_index=_proposal_index)
+    source["file_count"] = len(files)
+    try:
+        read_manifest(files)
+    except WorkflowError as exc:
+        if 'strategy.yml' not in files:
+            raise
+        # Source access does not depend on reconstructing an invalid graph.
+        # Keep exact text and diagnostics; never guess or normalize a repair.
+        return {'ok': True, 'strategy_id': strategy_id, 'source': source,
+                'revision': package_revision(files), 'can_edit': not bool(source['omitted_files']),
+                'manifest': {}, 'legacy': False,
+                'strategy': {'id': 'strategy', 'nodes': [], 'edges': []},
+                'evolution': {'id': 'evolution', 'nodes': [], 'edges': []},
+                'metadata': {'version': 1, 'nodes': {}, 'edges': []},
+                'recovery': {'file': 'strategy.yml', 'content': files['strategy.yml'], 'diagnostic': str(exc)}}
     out = build_workflows(files)
     _resolve_role_prompts(paths, out)
     declared_id = str(out["manifest"].get("strategy_id") or out["manifest"].get("id") or strategy_id)
@@ -115,6 +138,40 @@ def view_workflow(paths: WorkspacePaths, strategy_id: str, proposal_id: str | No
     out.update(ok=True, strategy_id=strategy_id, source=source,
                can_edit=not bool(source["omitted_files"]),
                metadata=parse_metadata(files.get(WORKFLOW_FILE, "")))
+    if proposal_id:
+        # Current evidence is a projection, not the historical tool payload or
+        # the sealed review bundle. Never execute source while reading a card.
+        receipt: dict[str, Any] = {"status": "missing", "report": None}
+        proposal_root = _safe_root(paths.proposals, proposal_id)
+        path = proposal_root / "validation_report.json"
+        latest_receipt = proposal_root / "latest_validation_receipt.json"
+        if source["state"] != "draft" and (latest_receipt.exists() or latest_receipt.is_symlink()):
+            path = latest_receipt
+        try:
+            if path.is_symlink():
+                raise ValueError("Symlink validation receipt")
+            report = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(report, dict):
+                raise ValueError("Invalid validation receipt")
+            bound_revision = report.get("source_revision")
+            from .verification import source_revision
+            # Older generator reports bind normalized code, excluding layout.
+            legacy_revision = package_revision({
+                name: text.replace("\r\n", "\n").replace("\r", "\n")
+                for name, text in files.items() if name != WORKFLOW_FILE
+            })
+            current = not source["omitted_files"] and (
+                bound_revision == source_revision(files) if bound_revision
+                else report.get("package_hash") == legacy_revision
+            )
+            current = current and report.get("strategy_id") == strategy_id
+            receipt = {"status": "current" if current else "stale",
+                       "report": report if current else None}
+        except FileNotFoundError:
+            pass
+        except (OSError, ValueError):
+            receipt["status"] = "unavailable"
+        out["validation_receipt"] = receipt
     if schedules and not proposal_id:
         _attach_schedules(out, schedules, strategy_id)
     return out
@@ -167,6 +224,11 @@ def workflow_index(paths: WorkspacePaths) -> dict[str, Any]:
         row: dict[str, Any] = {"key": f"{strategy_id}:{proposal_id or 'published'}", "strategy_id": strategy_id, "proposal_id": proposal_id}
         try:
             out = view_workflow(paths, strategy_id, proposal_id, _proposal_index=proposal_index)
+            if out.get('recovery'):
+                row.update(title=strategy_id, state='invalid', mode='unknown', counts={},
+                           error=out['recovery']['diagnostic'], revision=out['revision'])
+                rows.append(row)
+                continue
             manifest = out["manifest"]
             row.update(title=str(manifest.get("title") or strategy_id), description=str(manifest.get("description") or ""),
                        mode=str(manifest.get("mode") or "paper"), state=out["source"]["state"],
@@ -290,9 +352,25 @@ def propose_workflow(paths: WorkspacePaths, payload: dict[str, Any]) -> dict[str
         revision = package_revision(files)
         if payload.get("base_revision") != revision:
             raise WorkflowError("revision_conflict: package changed; reload before saving")
+        original_files = dict(files)
+        if "manifest_source" in payload:
+            content = payload["manifest_source"]
+            if not isinstance(content, str) or len(content.encode("utf-8")) > MAX_FILE_BYTES:
+                raise WorkflowError("Manifest source exceeds the text size limit")
+            if payload.get("changes") or payload.get("additions") or "metadata" in payload:
+                raise WorkflowError("Manifest repair cannot include other workflow edits")
+            try:
+                read_manifest(files)
+            except WorkflowError:
+                pass
+            else:
+                raise WorkflowError("Manifest source repair requires an invalid manifest")
+            files["strategy.yml"] = content
+            repaired = read_manifest(files)
+            if str(repaired.get("strategy_id") or repaired.get("id") or "") != strategy_id:
+                raise WorkflowError("Manifest strategy ID does not match the requested package")
         view = build_workflows(files)
         _resolve_role_prompts(paths, view)
-        original_files = dict(files)
         manifest = copy.deepcopy(view["manifest"])
         canonical = {n["id"]: n for g in (view["strategy"], view["evolution"]) for n in g["nodes"]}
         changes, additions = payload.get("changes", []), payload.get("additions", [])
@@ -327,8 +405,6 @@ def propose_workflow(paths: WorkspacePaths, payload: dict[str, Any]) -> dict[str
         else:
             # Saving operator source, including imported source, must not execute it.
             validation = validate_proposal_files(strategy_id=strategy_id, files=files, smoke_test=False)
-            if not validation.ok:
-                return {"ok": False, "error": "validation_failed", "validation": validation.asdict()}
             validation_data = validation.asdict()
         # Recheck after validation: tools outside this service may edit files.
         latest, _ = source_files(paths, strategy_id, proposal_id)
@@ -337,7 +413,7 @@ def propose_workflow(paths: WorkspacePaths, payload: dict[str, Any]) -> dict[str
         proposal = create_proposal(
             paths, kind="prompt_patch" if view["legacy"] else "strategy_package_proposal", summary=f"Workflow · {manifest.get('title') or strategy_id}",
             rationale="Operator-authored workflow edits. Existing executable source remains authoritative; annotations do not execute.",
-            test_plan="Legacy syntax check passed; review the patch through evolution before applying." if view["legacy"] else "Static validation passed without executing source. Review the diff and run required backtests before promotion.",
+            test_plan="Legacy syntax check passed; review the patch through evolution before applying." if view["legacy"] else "Review static diagnostics in validation_report.json. Source was not executed; validate and run required backtests before promotion.",
             rollback="The current strategy is unchanged until approved promotion; use version rollback after promotion.",
             target=f"strategies/{strategy_id}", initial_state="pending_review",
             extra_files={**{f"after/strategies/{strategy_id}/{rel}": text for rel, text in files.items() if not view["legacy"] or original_files.get(rel) != text},

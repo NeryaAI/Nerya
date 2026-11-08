@@ -380,14 +380,8 @@ class StrategyAPI:
         proposal_id: Optional[str] = None,
     ) -> dict[str, Any]:
         if proposal_id:
-            sid, files = self._read_proposal_files(proposal_id)
-            if not files:
-                raise NeryaError(
-                    f"proposal {proposal_id!r} has no after/strategies/* tree"
-                )
-            return validate_proposal_files(
-                strategy_id=strategy_id or sid or proposal_id, files=files
-            ).asdict()
+            from ..strategies.validation_receipt import validate_proposal_receipt
+            return validate_proposal_receipt(self.config.paths, proposal_id, strategy_id=strategy_id)
         if not strategy_id:
             raise NeryaError("strategy_id or proposal_id is required")
         return validate_strategy_package(self.config.paths, strategy_id).asdict()

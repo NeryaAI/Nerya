@@ -57,6 +57,7 @@ from ..tools.approval_runtime import first_approval_pause
 from ..tools.orchestrator import ToolOrchestrator
 from ..tools.registry import ToolRegistry
 from ..tools.result_contracts import (
+    result_counts_as_success,
     NON_SUCCESS_RESULT_STATUSES as _NON_SUCCESS_RESULT_STATUSES,
     compacted_kept_data as _tool_compacted_kept_data,
     parse_compacted_kept_jsonish as _parse_compacted_kept_jsonish,
@@ -64,6 +65,7 @@ from ..tools.result_contracts import (
     tool_json_data as _tool_json_data,
 )
 from ..tools.types import ToolResult
+from .outcome_summary import recorded_tool_count, render_outcome_summary
 from ..tools.execution_contracts import is_read_only_tool as _tool_name_is_read_only
 from .artifact_index import summarize_batch
 from .attachments import ATTACHMENT_BLOCK_TYPES, assistant_attachment_block
@@ -78,6 +80,7 @@ from .loop_state import (
     LoopRunState,
     ProviderToolSelection,
     TurnCheckpoint,
+    batch_recovery_blocked,
     filter_provider_tools_by_names as _filter_provider_tools_by_names,
     provider_tool_name as _provider_tool_name,
 )
@@ -87,7 +90,6 @@ from .tool_phase import (
     ToolCallBuildContext,
     build_tool_calls,
     failed_required_actions,
-    truncate_tool_loop_text as _truncate_for_tool_loop,
 )
 from .tool_projection import project_tool_results
 from .provider_errors import (
@@ -355,35 +357,10 @@ _SKIP_REPORT_KEYS = {"done", "ok", "truncated"}
 def _required_action_repeated_error_blocked_final_text(
     pending_tool_names: set[str] | tuple[str, ...],
     results: list[ToolResult],
+    *, original_user_text: str = "",
 ) -> str:
-    pending = ", ".join(sorted(str(name) for name in pending_tool_names if name))
-    pending = pending or "the required action tool"
-    error_snippets: list[str] = []
-    for result in results:
-        if not result.is_error or result.error is None:
-            continue
-        if result.name and result.name not in pending_tool_names:
-            continue
-        snippet = result.error.message or result.text()
-        if not snippet:
-            continue
-        error_snippets.append(_truncate_for_tool_loop(redact_text(snippet), limit=900))
-    lines = [
-        "Required action did not complete because the same required "
-        "tool payload repeated after an error.",
-        "",
-        f"Required tool(s): {pending}",
-    ]
-    if error_snippets:
-        lines.append("")
-        lines.append("Latest tool error:")
-        lines.append(error_snippets[-1])
-    lines.append("")
-    lines.append(
-        "No fake tool result was created. Retry after correcting the payload "
-        "or narrowing the request."
-    )
-    return "\n".join(lines)
+    return render_outcome_summary(reason="repeated_tool_call", user_text=original_user_text,
+        tool_calls=len(results), error_count=sum(result.is_error for result in results))
 
 
 def _parse_jsonish(value: Any, *, depth: int = 0) -> Any:
@@ -544,109 +521,28 @@ def _render_report_markdown(output: Any, *, limit: int = 4200) -> str:
     return _clip_report_text(text, limit=limit)
 
 def _build_deterministic_final_summary(
-    *,
-    iterations: int,
-    tool_calls: int,
-    error_count: int,
-    had_model_text: bool,
-    evidence_snippets: list[str] | None = None,
-    abort_reason: str = "",
-    failure_detail: str = "",
+    *, iterations: int, tool_calls: int, error_count: int, had_model_text: bool,
+    evidence_snippets: list[str] | None = None, abort_reason: str = "",
+    failure_detail: str = "", original_user_text: str = "",
+    completed_tool_results: list[ToolResult] | None = None,
 ) -> str:
-    # An aborted turn is a real failure, not an invitation to blindly retry
-    # the whole task. Keep the cause visible, especially on a first-turn SSE
-    # failure with no completed tool evidence.
-    reason = (abort_reason or "aborted").split(":", 1)[0]
-    descriptions = {
-        "stream_interrupted": "模型流式响应中断，已有输出不保证完整",
-        "empty_model_response": "模型连续返回空响应，没有有效文本或工具调用",
-        "model_output_truncated": "模型输出达到长度限制，回答未完整生成",
-        "provider_content_filtered": "模型服务过滤了本轮输出，未获得完整答复",
-        "interrupted_max_tokens": "模型输出达到长度限制，工具参数未完整生成",
-        "interrupted_length": "模型输出达到长度限制，工具参数未完整生成",
-        "interrupted_content_filter": "模型服务过滤了尚未完成的工具调用",
-        "timeout": "模型请求或任务超过执行时限",
-        "max_iterations": "达到本轮最大执行步数",
-        "token_budget_exceeded": "达到本轮 Token 预算",
-        "diminishing_returns": "执行持续缺乏有效进展",
-        "repeated_tool_call": "工具调用重复且未取得进展",
-        "task_poll_no_progress": "后台任务轮询未取得进展",
-        "cancelled": "本轮任务已取消",
-    }
-    system_stops = {
-        "cancelled:command_control_unavailable": "任务控制数据库暂时不可用，系统已停止执行，并非用户主动取消",
-        "cancelled:command_lease_lost": "执行租约已丢失，需要核对结果后再继续",
-        "cancelled:event_persistence_failed": "执行记录未能可靠保存，系统已停止执行以保护审计记录",
-        "cancelled:operator_cancel": "用户请求停止任务",
-    }
-    description = system_stops.get(abort_reason, descriptions.get(reason, f"执行中断（{reason}）"))
-    lines = [
-        f"本轮任务未完成：{description}。",
-        f"执行情况：{iterations} 步，{tool_calls} 次工具调用"
-        + (f"，其中 {error_count} 次报错。" if error_count else "。"),
-    ]
-    if failure_detail:
-        lines.append(f"错误详情：{redact_text(failure_detail)[:240]}")
-    if had_model_text:
-        lines.append("此前生成的内容仅供参考，本轮没有获得可靠的完整结果。")
-    else:
-        lines.append("本轮尚未形成有效的最终答复。")
-    for snippet in evidence_snippets or []:
-        lines.append(f"- 已有证据：{snippet}")
-    if tool_calls:
-        lines.append("已执行的工具调用不会自动重放；恢复前请核对已完成的写入或交易操作。")
-    elif reason == "stream_interrupted":
-        lines.append("部分响应已开始传输，为避免重复执行上游操作，没有自动重试；请先核对上游操作与已保存结果，再决定是否继续。")
-    elif reason == "empty_model_response":
-        lines.append("请检查模型的响应格式、输出 Token 限制及流式连接状态。")
-    elif reason == "max_iterations":
-        lines.append("可在运行设置中检查本轮步数上限，或从当前检查点继续。")
-    elif reason == "model_output_truncated":
-        lines.append("请检查模型输出 Token 限制，或将请求拆分；截断内容不能视作已完成。")
-    elif reason == "provider_content_filtered":
-        lines.append("请查看模型服务的内容策略和提示词；本轮不会自动重放已执行操作。")
-    elif reason != "cancelled":
-        lines.append("请检查错误详情及运行限制，再决定是否从当前状态继续。")
-    return "\n".join(lines)
+    # Keep the legacy signature for callers; diagnostics belong to events, not prose.
+    return render_outcome_summary(reason=abort_reason, user_text=original_user_text,
+        language=None if original_user_text else "zh", tool_calls=tool_calls,
+        error_count=error_count, had_model_text=had_model_text)
 
 
 def _build_llm_safety_final_synthesis_fallback(
-    *,
-    transcript: list[dict[str, Any]],
-    original_user_text: str,
-    error: BaseException,
+    *, transcript: list[dict[str, Any]], original_user_text: str, error: BaseException,
 ) -> str:
-    snippets = _collect_abort_evidence_snippets(transcript, limit=6)
-    lines = [
-        "最终整理阶段被上游模型内容安全策略拒绝，Nerya 没有继续让模型改写工具结果。",
-        f"- 原始请求: {original_user_text or '[empty]'}",
-        f"- provider_error: {str(error)[:240]}",
-        "- 处理方式: 保留真实工具执行结果，改为返回已采集证据摘要；未验证的细节不补写。",
-    ]
-    if snippets:
-        lines.append("- 已采集证据片段:")
-        for idx, snippet in enumerate(snippets, start=1):
-            lines.append(f"  {idx}. {snippet}")
-    else:
-        lines.append("- 已采集证据片段: 工具结果中没有可用的结构化字段或错误标记。")
-    lines.append("如需完整自然语言总结，请缩小主题范围或重新运行；当前结果没有使用 mock 或模型记忆补齐。")
-    return "\n".join(lines)
+    return render_outcome_summary(reason="provider_content_filtered", user_text=original_user_text,
+                                  tool_calls=recorded_tool_count(transcript))
 
 
 def _build_llm_initial_safety_rejection_text(
-    *,
-    original_user_text: str,
-    error: BaseException,
+    *, original_user_text: str, error: BaseException,
 ) -> str:
-    request = redact_text(original_user_text or "[empty]").strip()
-    provider_error = redact_text(str(error))[:240]
-    return "\n".join([
-        "上游 LLM provider 在首轮请求阶段触发内容安全拒绝，Nerya 没有使用 mock 或伪造工具结果。",
-        f"- 原始请求: {request}",
-        f"- provider_error: {provider_error}",
-        "- 当前状态: 首轮没有执行任何工具或外部操作。",
-        "- 建议: 收窄请求、移除敏感内容，并明确允许的只读或受审批操作后重试。",
-    ])
+    return render_outcome_summary(reason="provider_content_filtered", user_text=original_user_text)
 
 
 def _build_llm_safety_final_synthesis_retry_prompt(
@@ -746,57 +642,20 @@ def _build_compact_required_tool_retry_prompt(
 
 
 def _build_llm_safety_required_tool_fallback(
-    *,
-    transcript: list[dict[str, Any]],
-    original_user_text: str,
-    pending_required_tool_names: tuple[str, ...],
-    error: BaseException,
+    *, transcript: list[dict[str, Any]], original_user_text: str,
+    pending_required_tool_names: tuple[str, ...], error: BaseException,
 ) -> str:
-    snippets = _collect_abort_evidence_snippets(transcript, limit=6)
-    request = redact_text(original_user_text or "[empty]").strip()
-    provider_error = redact_text(str(error))[:240]
-    tools = ", ".join(pending_required_tool_names) or "unknown"
-    lines = [
-        "上游 LLM provider 在必须调用工具的阶段触发内容安全拒绝；Nerya 没有使用 mock，也没有伪造工具结果。",
-        f"- 原始请求: {request or '[empty]'}",
-        f"- required_tool: {tools}",
-        f"- provider_error: {provider_error}",
-        "- 当前状态: 已保留真实工具证据，但必须工具尚未成功执行。",
-    ]
-    if snippets:
-        lines.append("- 已采集证据片段:")
-        for idx, snippet in enumerate(snippets, start=1):
-            lines.append(f"  {idx}. {redact_text(str(snippet))}")
-    lines.append("Next: 缩短请求或重试该 turn；系统会继续走真实 provider/tool 路径，不会降级到 mock。")
-    return "\n".join(lines)
+    return render_outcome_summary(reason="provider_content_filtered", user_text=original_user_text,
+                                  tool_calls=recorded_tool_count(transcript))
 
 
 def _build_required_action_provider_exhausted_text(
-    *,
-    transcript: list[dict[str, Any]],
-    original_user_text: str,
-    pending_required_tool_names: tuple[str, ...],
-    error: BaseException,
+    *, transcript: list[dict[str, Any]], original_user_text: str,
+    pending_required_tool_names: tuple[str, ...], error: BaseException,
 ) -> str:
-    snippets = _collect_abort_evidence_snippets(transcript, limit=6)
-    request = redact_text(original_user_text or "[empty]").strip()
-    provider_error = redact_text(str(error))[:240]
-    tools = ", ".join(pending_required_tool_names) or "unknown"
-    lines = [
-        "上游 LLM provider 在必须调用工具的阶段持续失败；Nerya 没有使用 mock，也没有伪造工具结果。",
-        f"- 原始请求: {request or '[empty]'}",
-        f"- required_tool: {tools}",
-        f"- provider_error: {provider_error}",
-        "- 当前状态: 已保留真实工具/校验证据，但必须工具尚未成功执行。",
-    ]
-    if snippets:
-        lines.append("- 已采集证据片段:")
-        for idx, snippet in enumerate(snippets, start=1):
-            lines.append(f"  {idx}. {redact_text(str(snippet))}")
-    lines.append(
-        "Next: 缩短请求或重试该 turn；系统会继续走真实 provider/tool 路径，不会降级到 mock。"
-    )
-    return "\n".join(lines)
+    return render_outcome_summary(reason=getattr(error, "code", "") or "provider_error",
+        status_code=getattr(error, "status_code", None), user_text=original_user_text,
+        tool_calls=recorded_tool_count(transcript))
 
 
 def _build_transient_final_synthesis_retry_prompt(
@@ -934,7 +793,7 @@ def _preserve_pre_tool_answer_after_optional_gap(
     if current:
         parts.append(current)
     if gap_notes:
-        parts.append("\n".join(gap_notes))
+        parts.append("补充查询的失败原因可在执行详情中查看；这些补充内容尚未验证。")
     return "\n\n".join(part for part in parts if part)
 
 
@@ -1227,76 +1086,46 @@ def _tool_result_blocker_summary(result: ToolResult, data: dict[str, Any] | None
     return ""
 
 
-def _tool_result_fact_summary(result: ToolResult) -> str:
+def _tool_result_fact_summary(result: ToolResult, *, zh: bool = False) -> str:
     """Render one bounded result without knowing the producer's domain."""
 
     name = str(result.name or "tool").strip() or "tool"
+    if result.is_error:
+        return f"{name} {'未成功，结果未确认' if zh else 'did not succeed; result is unconfirmed'}"
     data = _tool_json_data(result) or _tool_compacted_kept_data(result)
     blocker = _tool_result_blocker_summary(result, data)
     if blocker:
         return blocker
-    if result.is_error:
-        return f"{name} blocked: {_safe_finalizer_value(result.text(), limit=180)}"
     if isinstance(data, dict):
         fields: list[str] = []
         for key, value in _collect_evidence_fields(data).items():
+            if any(marker in str(key).lower() for marker in ("raw", "debug", "diagnostic", "error", "stderr", "trace")):
+                continue
             rendered = _safe_finalizer_value(value, limit=120)
+            if any(marker in rendered.lower() for marker in ("tool_use_error", "traceback", "api_key", "private_sentinel")):
+                continue
             if rendered:
                 fields.append(f"{key}={rendered}")
             if len(fields) >= 6:
                 break
         if fields:
-            return f"{name} returned: " + "; ".join(fields[:5])
-        return f"{name} returned evidence"
+            label = "已返回" if zh else "returned"
+            return f"{name} {label}: " + "; ".join(fields[:5])
+        return f"{name} {'已返回证据' if zh else 'returned evidence'}"
     text = _safe_finalizer_value(result.text(), limit=220)
     if text.startswith("{") or text.startswith("["):
-        return f"{name} returned structured evidence"
-    return f"{name} returned evidence" + (f": {text}" if text else "")
+        return f"{name} {'已返回结构化证据' if zh else 'returned structured evidence'}"
+    return f"{name} {'已返回证据' if zh else 'returned evidence'}" + (f": {text}" if text else "")
 
 
 def _build_tool_evidence_final_text(
-    *,
-    original_user_text: str,
-    results: list[ToolResult],
+    *, original_user_text: str, results: list[ToolResult],
 ) -> str:
     if not results:
         return ""
-    request = _safe_finalizer_value(original_user_text or "[empty]", limit=220)
-    facts: list[str] = []
-    blockers: list[str] = []
-    seen: set[str] = set()
-    for result in results:
-        if not isinstance(result, ToolResult):
-            continue
-        summary = _tool_result_fact_summary(result)
-        if not summary or summary in seen:
-            continue
-        seen.add(summary)
-        if " blocked: " in summary:
-            blockers.append(summary)
-        else:
-            facts.append(summary)
-    if not facts and not blockers:
-        return ""
-    lines = [
-        "Tool execution completed, but no separate final narrative was returned.",
-    ]
-    if request:
-        lines.append(f"- 请求: {request}")
-    if facts:
-        lines.append("- Confirmed:")
-        for item in facts[:6]:
-            lines.append(f"  - {item}")
-    if blockers:
-        lines.append("- Blocked or incomplete:")
-        for item in blockers[:5]:
-            lines.append(f"  - {item}")
-    lines.append("- Boundary: this report contains only returned tool evidence.")
-    if blockers:
-        lines.append("- Next: resolve the listed blocker, then retry the declared action.")
-    else:
-        lines.append("- Next: continue from the returned evidence if another action is required.")
-    return "\n".join(lines)
+    errors = sum(result.is_error for result in results)
+    return render_outcome_summary(reason="no_final_response", user_text=original_user_text,
+                                  tool_calls=len(results), error_count=errors)
 
 
 def _message_has_tool_result(message: dict[str, Any]) -> bool:
@@ -1426,40 +1255,15 @@ def _wall_time_final_synthesis_prompt(*, remaining_seconds: float) -> str:
 
 
 
-def _wall_time_llm_timeout_text(
-    error: BaseException,
-    *,
-    original_user_text: str = "",
-) -> str:
-    lines = [
-        "I ran out of time on this turn while waiting for a response, so I "
-        "stopped here.",
-    ]
-    if original_user_text.strip():
-        lines.append(f"Your request: {original_user_text.strip()}")
-    lines.append(f"(Technical detail: {error})")
-    return "\n".join(lines)
+def _wall_time_llm_timeout_text(error: BaseException, *, original_user_text: str = "") -> str:
+    return render_outcome_summary(reason="timeout", user_text=original_user_text)
 
 
 def _build_llm_timeout_evidence_fallback(
-    *,
-    transcript: list[dict[str, Any]],
-    original_user_text: str,
+    *, transcript: list[dict[str, Any]], original_user_text: str,
 ) -> str:
-    snippets = _collect_abort_evidence_snippets(transcript, limit=8)
-    lines = [
-        "I ran out of time before writing a full answer, but here's what I "
-        "gathered before stopping.",
-        f"Your request: {redact_text(original_user_text or '[empty]')}",
-    ]
-    if snippets:
-        lines.append("What I found so far:")
-        for idx, snippet in enumerate(snippets, start=1):
-            lines.append(f"{idx}. {_format_timeout_evidence_snippet(snippet)}")
-    else:
-        lines.append("I didn't capture compact evidence before stopping.")
-    lines.append("I didn't start anything new after running out of time.")
-    return "\n".join(lines)
+    return render_outcome_summary(reason="timeout", user_text=original_user_text,
+                                  tool_calls=recorded_tool_count(transcript))
 
 
 def _format_timeout_evidence_snippet(snippet: str) -> str:
@@ -1505,12 +1309,14 @@ class WorkspaceNativeAgentLoop:
         orchestrator: ToolOrchestrator,
         config: Optional[LoopConfig] = None,
         event_sink: Optional[EventSink] = None,
+        checkpoint_sink: Callable[[TurnCheckpoint | None], None] | None = None,
     ) -> None:
         self.gateway = gateway
         self.registry = registry
         self.orchestrator = orchestrator
         self.config = config or LoopConfig()
         self.event_sink = event_sink
+        self.checkpoint_sink = checkpoint_sink
 
     def _call_messages_with_attempt_budget(
         self,
@@ -1753,7 +1559,7 @@ class WorkspaceNativeAgentLoop:
         transition_reason = state.transition_reason
         final_text = state.final_text
         aborted_reason = state.aborted_reason
-        stream_failure_detail = ""
+        public_failure_reason = ""
         completed_tool_results = state.completed_tool_results
         attempted_tool_names = state.attempted_tool_names
         successful_tool_names = state.successful_tool_names
@@ -1799,6 +1605,29 @@ class WorkspaceNativeAgentLoop:
         )
         stream_id = ""
         streamed_text = []
+        def sync_checkpoint_state() -> None:
+            # Mutable ledgers/events already belong to state; synchronize only
+            # rebound locals, for both batch and terminal checkpoint producers.
+            state.transcript = transcript
+            state.iterations = iterations
+            state.total_tool_calls = total_tool_calls
+            state.error_count = error_count
+            state.truncated_no_tool_retry_used = truncated_no_tool_retry_used
+            state.wall_time_final_synthesis_used = wall_time_final_synthesis_used
+            state.llm_safety_final_synthesis_retry_used = llm_safety_final_synthesis_retry_used
+            state.llm_safety_required_tool_retry_used = llm_safety_required_tool_retry_used
+            state.transient_final_synthesis_retry_used = transient_final_synthesis_retry_used
+            state.text_only_final_attempt = text_only_final_attempt
+            state.preserved_pre_tool_answer = preserved_pre_tool_answer
+            state.last_tool_batch_had_semantic_success = last_tool_batch_had_semantic_success
+            state.last_optional_tool_gap_notes = last_optional_tool_gap_notes
+            state.diminishing_returns_triggered = diminishing_returns_triggered
+            state.steer_message_count = steer_message_count
+            state.stop_reason = stop_reason
+            state.transition_reason = transition_reason
+            state.final_text = final_text
+            state.aborted_reason = aborted_reason
+
         def stop_for_cancel() -> bool:
             nonlocal aborted_reason, stop_reason, transition_reason
             if cancel_token is None or not cancel_token.is_set:
@@ -2199,6 +2028,9 @@ class WorkspaceNativeAgentLoop:
                             "turn_id": turn_id,
                             "iteration": iterations,
                             "context_scope": "agent_loop",
+                            # Only this owner executes local tools, after the
+                            # entire response (including arguments) is validated.
+                            "tool_execution_boundary": "response_complete",
                             "max_iterations": self.config.max_iterations,
                             "llm_attempt": llm_attempt,
                             "tool_calls_completed": total_tool_calls,
@@ -2241,6 +2073,47 @@ class WorkspaceNativeAgentLoop:
                         aborted_reason = stop_reason = transition_reason = "timeout"
                         break
                     if getattr(exc, "stream_interrupted", False):
+                        if (getattr(exc, "stream_output_committed", True)
+                                and getattr(exc, "stream_request_replay_safe", False)
+                                and _is_transient_llm_error(exc)):
+                            # Model previews are not tool execution receipts.
+                            # Retry this request, not the turn or its completed
+                            # tool batches; never append partial arguments to
+                            # the model transcript. Native upstream capabilities
+                            # do not receive the adapter's replay-safe marker.
+                            delay = retry_delay(
+                                llm_attempt, base_delay=llm_base, max_delay=llm_cap,
+                                headers=getattr(exc, "response_headers", None),
+                                jitter=bool(self.config.llm_retry_full_jitter),
+                            )
+                            within_deadline = deadline is None or delay < deadline - time.time()
+                            if (llm_attempt < llm_max and within_deadline
+                                    and attempt_budget.claim("buffered_stream_retry")):
+                                emit("assistant", {"kind": "model_transport", "stream_id": stream_id,
+                                    "stream_mode": "stream", "status": "discarded",
+                                    "discard_partial": True, "reason": "stream_interrupted",
+                                    "retryable": True, "detail": redact_text(str(exc))[:4000]})
+                                streamed_text = []
+                                retry_state = {
+                                    "state": "waiting", "reason": "stream_interrupted",
+                                    "attempt": llm_attempt + 1,
+                                    "max_attempts": min(llm_max, llm_attempt + 1 + attempt_budget.remaining),
+                                    "delay_s": delay, "retry_at": time.time() + delay,
+                                }
+                                emit("assistant", {**ThinkingBlock(text=(
+                                    "Model stream interrupted; discarded the uncommitted preview. "
+                                    "Retrying this model step with completed tool results preserved."
+                                )).as_dict(), "retry": retry_state})
+                                if delay > 0:
+                                    if cancel_token is not None:
+                                        cancel_token.wait(delay)
+                                    else:
+                                        time.sleep(delay)
+                                continue
+                            setattr(exc, "retry_exhausted", (
+                                "deadline" if not within_deadline else
+                                "attempt_limit" if llm_attempt >= llm_max else "turn_budget"
+                            ))
                         if not getattr(exc, "stream_output_committed", True):
                             # ZCode retries *before* the model-output boundary.
                             # Reuse our existing bounded backoff, shared attempt
@@ -2249,17 +2122,18 @@ class WorkspaceNativeAgentLoop:
                             if not _is_transient_llm_error(exc):
                                 raise
                         else:
-                            # Once a model delta was received we cannot prove
-                            # that the upstream has not produced a side effect.
-                            # Preserve any partial text and expose the failure,
-                            # but never replay this ambiguous stream.
-                            stream_failure_detail = str(exc)
+                            # No proven client-only boundary (or recovery was
+                            # exhausted): preserve the failure, never replay
+                            # an ambiguous upstream operation.
                             aborted_reason = transition_reason = "stream_interrupted"
+                            if getattr(exc, "code", None) == "model_reasoning_repetition":
+                                public_failure_reason = "model_reasoning_repetition"
                             final_text = "".join(streamed_text)
                             response = MessagesResponse(content=[], stop_reason="stream_interrupted")
                             emit("assistant", {"kind": "model_transport", "stream_id": stream_id,
                                                "stream_mode": "stream", "status": "interrupted",
-                                               "reason": "stream_interrupted", "retryable": False})
+                                               "reason": "stream_interrupted", "retryable": False,
+                                               "detail": redact_text(str(exc))[:4000]})
                             break
                     if total_tool_calls == 0 and _is_llm_safety_rejection(exc):
                         final_text = _build_llm_initial_safety_rejection_text(
@@ -3620,7 +3494,12 @@ class WorkspaceNativeAgentLoop:
             batch_effects = ToolBatchPhase(
                 orchestrator=self.orchestrator,
                 registry=self.registry,
-            ).run(calls, state=state, policy=policy)
+            )
+            # Invalidate the previous closed boundary before any dispatch.
+            # Unlike observational event sinks, persistence failures propagate.
+            if self.checkpoint_sink is not None:
+                self.checkpoint_sink(None)
+            batch_effects = batch_effects.run(calls, state=state, policy=policy)
             batch = batch_effects.batch
             total_tool_calls = state.total_tool_calls
             error_count = state.error_count
@@ -3658,6 +3537,13 @@ class WorkspaceNativeAgentLoop:
                 "role": "user",
                 "content": list(projection.transcript_blocks),
             })
+            if self.checkpoint_sink is not None:
+                sync_checkpoint_state()
+                blocked = batch_recovery_blocked(state.completed_tool_results)
+                self.checkpoint_sink(state.to_checkpoint(
+                    resumable=not blocked,
+                    resume_block_reason="batch_recovery_blocked" if blocked else "",
+                ))
             if stop_for_cancel():
                 break
             if any(result.result_protocol == "user_interaction_pending" and not result.is_error for result in batch.results):
@@ -3697,6 +3583,7 @@ class WorkspaceNativeAgentLoop:
                     final_text = _required_action_repeated_error_blocked_final_text(
                         pending_required_action_tools,
                         batch.results,
+                        original_user_text=original_user_text,
                     )
                     transcript.append({
                         "role": "assistant",
@@ -3832,15 +3719,12 @@ class WorkspaceNativeAgentLoop:
                 tool_calls=total_tool_calls,
                 error_count=error_count,
                 had_model_text=bool(existing_text),
-                evidence_snippets=_collect_abort_evidence_snippets(transcript),
-                abort_reason=aborted_reason,
-                failure_detail=stream_failure_detail,
+                abort_reason=public_failure_reason or aborted_reason,
+                completed_tool_results=completed_tool_results,
+                original_user_text=original_user_text,
             )
-            final_text = (
-                f"{existing_text}\n\n{summary}"
-                if len(existing_text) >= 32 or (stream_id and streamed_text)
-                else summary
-            )
+            # Partial model output remains in the transcript; it is not the final result.
+            final_text = summary
             transcript.append({
                 "role": "assistant",
                 "content": [{"type": "text", "text": final_text}],
@@ -3853,35 +3737,8 @@ class WorkspaceNativeAgentLoop:
             if iterations >= self.config.iteration_limit
             else "end_turn"
         )
-        # Mutable ledgers and emitted events already belong to state; only
-        # rebound transcript/scalars need synchronization at this boundary.
-        state.transcript = transcript
-        state.iterations = iterations
-        state.total_tool_calls = total_tool_calls
-        state.error_count = error_count
-        state.truncated_no_tool_retry_used = truncated_no_tool_retry_used
-        state.wall_time_final_synthesis_used = wall_time_final_synthesis_used
-        state.llm_safety_final_synthesis_retry_used = (
-            llm_safety_final_synthesis_retry_used
-        )
-        state.llm_safety_required_tool_retry_used = (
-            llm_safety_required_tool_retry_used
-        )
-        state.transient_final_synthesis_retry_used = (
-            transient_final_synthesis_retry_used
-        )
-        state.text_only_final_attempt = text_only_final_attempt
-        state.preserved_pre_tool_answer = preserved_pre_tool_answer
-        state.last_tool_batch_had_semantic_success = (
-            last_tool_batch_had_semantic_success
-        )
-        state.last_optional_tool_gap_notes = last_optional_tool_gap_notes
-        state.diminishing_returns_triggered = diminishing_returns_triggered
-        state.steer_message_count = steer_message_count
+        sync_checkpoint_state()
         state.stop_reason = effective_stop_reason
-        state.transition_reason = transition_reason
-        state.final_text = final_text
-        state.aborted_reason = aborted_reason
         outcome = state.outcome(config=self.config, aborted=was_aborted, now=time.time())
         if was_aborted or waiting_for_approval or missing_required_artifact_tools_at_return:
             outcome.completion_status = "blocked"
@@ -4172,25 +4029,26 @@ class WorkspaceNativeAgentLoop:
 
         The goal is to keep the model on the tool-use track. On a
         schema failure we tell it to re-call the same tool; on a
-        transient failure we tell it to retry once; on unrecoverable
-        failures we tell it to stop. Mirrors the spirit of Claude
+        transient failure we tell it to retry once; a nonretryable call
+        requires a change of strategy, not a task-wide stop. Mirrors Claude
         Code's ``buildSchemaNotSentHint`` — one explicit instruction,
         no schema dump.
         """
 
         tool = result.name or "this tool"
-        if kind == "schema_validation":
+        # Retryability governs the same call; execution safety governs replay
+        # across tools. Read bounded structured state, never hint prose.
+        error = result.error
+        recovery_hint = error.recovery_hint if error is not None else {}
+        if error is not None and error.detail.get("execution_state") == "unknown":
             return (
-                f"Fix the payload and call `{tool}` again with the "
-                "corrected arguments. Do not switch to writing code "
-                "in chat — the operator asked you to DO something, "
-                "not to describe it."
+                "Preserve the unknown execution state and reconcile with the "
+                "producer before deciding recovery. Do not replay the operation "
+                "through this or another tool."
             )
-        if kind in {"timeout", "rate_limit", "provider_error"}:
-            return (
-                f"Transient error. Retry `{tool}` once; if it fails "
-                "again, report the issue to the operator and stop."
-            )
+
+        # These control-plane outcomes retain their specific operator-facing
+        # semantics even when their producer correctly marks them terminal.
         if kind == "permission_denied":
             return (
                 "This lane does not permit the tool. Pick a different "
@@ -4206,6 +4064,42 @@ class WorkspaceNativeAgentLoop:
             return (
                 "Use the prior result already in the transcript; do "
                 "not re-issue this exact call."
+            )
+        if kind == "aborted":
+            return (
+                "Do not resume or replay the aborted operation through any tool. "
+                "Respect cancellation and pending interaction; report existing evidence."
+            )
+        if isinstance(recovery_hint, dict) and recovery_hint.get("safe_to_retry") is False:
+            return (
+                "Do not retry this operation or replay it through another tool. "
+                "Preserve the original request and producer state; inspect and "
+                "reconcile as required before recovery. Do not bypass authorization. "
+                "Continue only independent permitted work and report the blocker."
+            )
+        if error is not None and error.detail.get("http_status") in (401, 403):
+            return (
+                "Correct configuration or access before retrying this operation. "
+                "Do not bypass authorization with another tool or transport."
+            )
+        if error is not None and error.retryable is False:
+            return (
+                "Do not automatically repeat the unchanged call. Inspect the failure "
+                "and possible side effects, then use corrected inputs or a different permitted method. "
+                "Do not bypass authorization or approvals, or replay side effects."
+            )
+
+        if kind == "schema_validation":
+            return (
+                f"Fix the payload and call `{tool}` again with the "
+                "corrected arguments. Do not switch to writing code "
+                "in chat — the operator asked you to DO something, "
+                "not to describe it."
+            )
+        if kind in {"timeout", "rate_limit", "provider_error"}:
+            return (
+                f"Transient error. Retry `{tool}` once; if it fails "
+                "again, report the issue to the operator and stop."
             )
         if kind == "budget":
             return (

@@ -178,6 +178,12 @@ class ToolDescriptor:
     delegates_to: str = ""
     """Optional declarative subagent target used by delegation handlers."""
 
+    dedupe_context: Optional[Callable[["ToolCall", Optional["ToolResult"]], Optional[str]]] = None
+    """Producer-owned state revision. Return None to preserve cached evidence;
+    a changed revision permits a fresh observation. Must not authorize effects
+    or opt uncertain/completed mutations out of their replay guards.
+    """
+
     # ----- helpers ---------------------------------------------------
 
     def to_provider_tool(self) -> dict[str, Any]:
