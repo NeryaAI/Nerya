@@ -140,7 +140,9 @@ def test_resolved_utc_diagnostic_survives_serialization_and_message_only_project
     for forbidden in (PRIVATE, "/private/", "private.invalid", "secret", "ignored"):
         assert forbidden not in public
     assert args == original
-    assert 30 < len(fake.calls) <= 2 + 2 * history.MAX_RESOLVER_READS
+    assert 2 < len(fake.calls) <= 2 + 2 * history.MAX_RESOLVER_READS
+    requested_headers = {req["params"][0] for req in fake.calls if req["method"] == "eth_getBlockByNumber"}
+    assert {hex(detail["resolved_start_block"]), hex(detail["resolved_end_block"])} <= requested_headers
     assert {req["method"] for req in fake.calls} == {
         "eth_chainId", "eth_blockNumber", "eth_getBlockByNumber"}
 
@@ -243,7 +245,7 @@ def test_handler_cancellation_preserves_exception_through_state_and_catalog(stag
             "op": "call", "provider": "uniswap", "action": "pool_history",
             "args": deepcopy(sample_args),
         }), registry=registry)
-    assert len(fake.calls) == (4 if stage == "state" else 53)
+    assert len(fake.calls) == (5 if stage == "state" else 53)  # Already sent batch finishes; no next batch.
     assert len(catalog.calls) == (1 if stage.startswith("catalog_") else 0)
     if stage == "catalog_error":
         assert caught.value is cancellation

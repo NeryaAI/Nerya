@@ -238,7 +238,7 @@ def data_api_handler(
                     "missing_result", "transport", "deadline", "request_budget", "response_size"}:
                 safe["failure_stage"] = stage
             method = detail.get("rpc_method")
-            if isinstance(method, str) and method in RPC_METHODS:
+            if isinstance(method, str) and method in (*RPC_METHODS, "batch"):
                 safe["rpc_method"] = method
             for field, lower, upper in (("rpc_error_code", -(2**31), 2**31 - 1),
                     ("http_status", 100, 599), ("request_count", 0, MAX_REQUESTS)):
@@ -298,7 +298,8 @@ def data_api_handler(
             error_message,
             detail=detail,
             # A rejected read can be corrected; no operation was submitted.
-            retryable=True if exc.kind == "schema_validation" and op == "call" else exc.retryable,
+            retryable=(True if exc.kind == "schema_validation" and op == "call"
+                       and detail.get("safe_to_retry") is not False else exc.retryable),
             recovery_hint=recovery_hint,
         )
     except Exception as exc:

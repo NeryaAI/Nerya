@@ -93,11 +93,12 @@ def test_one_call_settings_are_validated_and_saved_without_a_config_file(tmp_pat
     assert result["ok"]
     assert result["config"]["window_days"] == 365
     assert result["config"]["tf"] == "1h"
-    assert result["config"]["coverage_policy"] == "strict"
+    assert result["config"]["coverage_policy"] == "allow_partial"
     assert result["config"]["max_open_trades"] == 1
     assert not (tmp_path / "backtest.yml").exists()
     daily = run_strategy_backtest(strategy_id=root.name, workspace=tmp_path, preflight_only=True,
-        settings={"window_days": 365})
+        settings={"window_days": 365, "coverage_policy": "strict"})
+    assert daily["config"]["coverage_policy"] == "strict"
     assert daily["config"]["tf"] == "1d", "an omitted timeframe still inherits the strategy"
     assert daily["config"]["window_days"] == 365
     with pytest.raises(ValueError):

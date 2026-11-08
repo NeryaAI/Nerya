@@ -102,19 +102,26 @@ def test_rpc_failure_matrix_survives_tool_and_projection(provider, method, count
         return 200, doc
     fake = Fake(mutate, history.RPC_ORIGINS[provider])
     result, event = tool_result(fake, {**ARGS, "rpc_provider": provider})
-    assert len(fake.calls) == count  # No retry, fallback or further sampling.
+    # Count transmitted RPC operations, not fixture callbacks. A failed HTTP
+    # batch can stop the fake midway even though all three operations were sent.
+    methods = [req["method"] for post in fake.posts for req in (post if isinstance(post, list) else [post])]
+    expected = ["eth_chainId", "eth_blockNumber", "eth_getBlockByNumber", "eth_call", "eth_call"]
+    assert methods == expected[:count if count < 3 else 5]  # No retry or follow-up batch.
+    count = len(methods)
+    per_item = mode in {"rpc", "code_string", "code_bool", "code_large", "error_null", "both", "missing", "null"}
+    diagnostic_method = method if count < 3 or per_item else "batch"
     assert result.error.kind == ToolErrorKind.PROVIDER_ERROR
     reason = "historical_rpc_rate_limited" if mode == "http" else "historical_rpc_evidence_failure"
     assert result.error.detail == {
         "provider": "uniswap", "action": "pool_history", "op": "call",
         "reason": reason, "failure_stage": stage,
-        "rpc_method": method, "rpc_provider": provider, "request_count": count,
+        "rpc_method": diagnostic_method, "rpc_provider": provider, "request_count": count,
         "coverage_complete": False, "safe_to_retry": False, **extra}
     assert event["recovery"] == {
         "action": "inspect_historical_diagnostic", "reason": reason,
         "safe_to_retry": False, "preserve_candidate": True,
         "preserve_requested_constraints": True, "failure_stage": stage,
-        "rpc_method": method, "request_count": count, **extra}
+        "rpc_method": diagnostic_method, "request_count": count, **extra}
     from types import SimpleNamespace
     from nerya.agent.loop import WorkspaceNativeAgentLoop
 
@@ -122,7 +129,7 @@ def test_rpc_failure_matrix_survives_tool_and_projection(provider, method, count
     loop.config = SimpleNamespace(workspace_root="/tmp/rpc-diagnostic-test")
     projection = project_tool_results([result], render_tool_result=loop._render_tool_result,
         rendered_tool_result_text=loop._rendered_tool_result_text)
-    diagnostic = {"failure_stage": stage, "rpc_method": method, "request_count": count, **extra}
+    diagnostic = {"failure_stage": stage, "rpc_method": diagnostic_method, "request_count": count, **extra}
     assert json.loads(projection.event_blocks[0]["error"].split("Diagnostic: ")[1]) == diagnostic
     model_text = projection.transcript_blocks[0]["content"][0]["text"]
     assert json.dumps(diagnostic, sort_keys=True) in model_text

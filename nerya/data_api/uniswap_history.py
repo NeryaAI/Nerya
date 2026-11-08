@@ -455,7 +455,9 @@ class UniswapHistoryProvider:
             raise_if_cancelled(cancel_token)
             if not 1 <= len(calls) <= 10:
                 raise _error("Historical RPC batch size out of bounds")
-            method = calls[0][0]
+            # A transport/envelope failure has no per-call identity in a mixed batch.
+            methods = {name for name, _ in calls}
+            method = calls[0][0] if len(methods) == 1 else "batch"
 
             def failure(stage: RpcFailureStage, *, http_status: int | None = None,
                         rpc_error_code: int | None = None,
@@ -464,7 +466,7 @@ class UniswapHistoryProvider:
                 detail = {"provider": "uniswap", "action": "pool_history",
                           "reason": reason or "historical_rpc_evidence_failure",
                           "failure_stage": stage, "rpc_provider": rpc_provider,
-                          "rpc_method": method if method in RPC_METHODS else "unknown",
+                          "rpc_method": method if method in (*RPC_METHODS, "batch") else "unknown",
                           "request_count": request_count, "coverage_complete": False,
                           "safe_to_retry": False}
                 if type(http_status) is int and 100 <= http_status <= 599:

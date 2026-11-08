@@ -46,8 +46,10 @@ class Fake:
         if isinstance(req, list):
             responses = []
             for item in req:
-                status, document = self.request(method, url, **{**kwargs, "body": item})
-                self.posts.pop()
+                try:
+                    status, document = self.request(method, url, **{**kwargs, "body": item})
+                finally:
+                    self.posts.pop()  # Nested fixture evaluations are not separate HTTP requests.
                 if status != 200:
                     return status, document
                 responses.append(document)
@@ -350,6 +352,8 @@ def test_bounded_batches_preserve_64_sample_evidence_and_fail_closed(monkeypatch
 
 
 def test_drpc_free_plan_batch_cap_preserves_evidence(monkeypatch):
+    # The comparison covers provenance too, including the retrieval timestamp.
+    monkeypatch.setattr(history.time, "time", lambda: 1793404800)
     fake = Fake(rpc_url=history.RPC_ORIGINS["drpc"])
     request = fake.request
     nested, posts = [False], []
