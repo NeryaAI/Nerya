@@ -35,8 +35,7 @@ retry recipes or backtest rules are added to it.
 2. Prepare historical data independently of strategy execution.
 3. Verify requested timeframes, warmup, per-market boundaries and gaps. The default
    `allow_partial` policy retains gaps in the report; select `strict` when the
-   study requires full coverage. Trading
-   calendars must not be confused with gaps in a 24/7 market.
+   study requires full coverage. Do not treat exchange closures as gaps in a 24/7 market.
 4. Bind execution to a source revision and the exact loaded dataset hashes.
 5. Execute with bounded cancellation/timeout checks and publish phase progress.
 6. Persist either completed metrics/report or a structured failure receipt. Never
@@ -47,3 +46,10 @@ Execution success, coverage, strategy performance and real Agent model execution
 are separate facts. A profitable short-window run is not a full-year result;
 an observation replay is not an Agent trading backtest. Downloads do not activate
 strategies, schedulers or account orders.
+
+## Execution platform
+
+Candidate smoke tests and behavioral tests, strategy-isolated replay, and freeform
+replay use macOS Seatbelt (`sandbox-exec`). Without that backend these workers
+return unavailable; they do not execute candidate code on the host as a fallback.
+A successful static inspection or saved draft is not a passing execution receipt.

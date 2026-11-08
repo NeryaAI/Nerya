@@ -1,7 +1,6 @@
 """Isolated contract regressions; all state lives in pytest's /tmp workspace."""
 from copy import deepcopy
 import json
-from pathlib import Path
 
 import pytest
 
@@ -107,7 +106,8 @@ def test_requires_required_producer_evidence_bound_to_delivered_artifact(mutatio
     elif mutation == 'missing_check_artifact':
         check.pop('artifact_id')
     elif mutation == 'unbound_artifact':
-        artifact['artifact_id'] = 'model-only'
+        # A display alias alone does not break a valid producer reference.
+        artifact.update(artifact_id='model-only', ref='model-only')
     elif mutation == 'wrong_revision':
         artifact['revision'] = 'b'
     elif mutation == 'missing_artifact_revision':
@@ -304,21 +304,20 @@ def test_producer_output_reference_supports_alias_without_forging_verification()
     assert _completion(row)['allowed']
 
 
-def test_current_skill_contract_rejects_source_only_evidence_and_skipped_checks():
-    import nerya.task_delivery as delivery_module
-    skill = Path(delivery_module.__file__).parent / 'skills/builtin/strategy_author/SKILL.md'
-    args = json.loads(skill.read_text().split('```json', 1)[1].split('```', 1)[0])
-    row = new_delivery(command_id='isolated-skill-contract', **args)
-    for stage in row['stages']:
-        stage['state'] = 'completed'
-    row['checks'] = [{**evidence_delivery()['checks'][0], 'check_id': 'source_binding'}]
-    row['artifacts'] = [bound_artifact()]
+def test_authoring_delivery_uses_the_saved_candidate_without_implying_replay(tmp_path):
+    config, runtime = _runtime(tmp_path)
+    deps = _deps(config, _command(runtime))
+    contract = deps.skill_index.delivery_contract(ToolCall(name='delivery_start'), 'strategy_author', 'strategy_authoring')
+    row = new_delivery(command_id='isolated-skill-contract', skill_id='strategy_author',
+        workflow_id='strategy_authoring', requested_scope={'summary': 'Create an editable draft'},
+        workflow_contract=contract, stages=[{'id': 'save', 'state': 'completed'}])
+    row['checks'] = [{**evidence_delivery()['checks'][0], 'check_id': 'source_binding',
+                      'artifact_id': 'strategy:example:proposal:draft'}]
+    assert not _completion(row)['allowed']  # Source evidence without the candidate is not delivery.
+    row['artifacts'] = [dict(artifact_id='candidate', ref='strategy:example:proposal:draft', revision='a')]
+    assert _completion(row)['allowed']
+    row['artifacts'][0]['revision'] = 'different'
     assert not _completion(row)['allowed']
-    row['stages'][2]['state'] = row['stages'][3]['state'] = 'skipped'
-    completion = _completion(row)
-    assert not completion['allowed']
-    assert 'check_missing:behavioral_tests' in completion['reasons']
-    assert 'check_missing:historical_run' in completion['reasons']
 
 
 def test_current_bridge_does_not_attest_arbitrary_report_path(tmp_path):
@@ -335,8 +334,12 @@ def test_current_bridge_does_not_attest_arbitrary_report_path(tmp_path):
                     'revision': event['verification']['revision']}])
     result = native_delivery.delivery_finalize_handler(ToolCall(name='delivery_finalize',
         arguments={'expected_revision': row['delivery_revision']}), deps=deps)
-    assert result.semantic_success is False
-    assert 'artifact_unverified:report' in tool_json_data(result)['completion']['reasons']
+    final = tool_json_data(result)
+    report = next(item for item in final['artifacts'] if item['artifact_id'] == 'report')
+    expected = next(check['evidence_ref'] for check in event['verification']['checks'] if check['check_id'] == 'report_output')
+    assert (config.paths.root / expected).is_file()
+    assert report['ref'] == expected and report['revision'] == event['verification']['revision']
+    assert all('invented-report.md' not in item['ref'] for item in final['artifacts'])
 
 
 def test_model_required_placeholder_cannot_promote_optional_receipt(tmp_path):
