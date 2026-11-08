@@ -465,3 +465,27 @@ def test_report_parser_is_bounded_and_rejects_symlinks(tmp_path):
     path.symlink_to(tmp_path / "other")
     with pytest.raises(OSError):
         runner._read_report(path)
+
+
+@macos
+def test_worktree_path_is_literal_and_grants_only_sdk_source(tmp_path, monkeypatch):
+    import subprocess
+    root = (tmp_path / 'checkout.[review]-v1').resolve()
+    src = root / 'nerya'
+    (src / 'strategies').mkdir(parents=True)
+    monkeypatch.setattr(runner, '__file__', str(src / 'strategies/candidate_validation.py'))
+    good, secret, sibling = src / '__init__.py', src / 'local.json', root / 'other.py'
+    for file in (good, secret, sibling):
+        file.write_text('sentinel', encoding='utf-8')
+    python = Path(sys.executable).resolve()
+    policy = tmp_path / 'rules.sb'
+    policy.write_text(runner._profile(tmp_path.resolve(), python, []), encoding='utf-8')
+    script = """import sys
+assert open(sys.argv[1]).read() == 'sentinel'
+for path in sys.argv[2:]:
+    try: open(path).read()
+    except PermissionError: pass
+    else: raise AssertionError('out-of-scope read was allowed')
+"""
+    subprocess.run([str(runner._SANDBOX), '-f', str(policy), str(python), '-I', '-B', '-S',
+                    '-c', script, str(good), str(secret), str(sibling)], check=True, timeout=15)

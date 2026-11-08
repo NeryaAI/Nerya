@@ -287,8 +287,10 @@ def _profile(base: Path, python: Path, dependencies: list[str],
     rules.extend(f"(allow file-read-metadata (literal {q(p)}))" for p in sorted(metadata))
     # The public SDK eagerly imports many Nerya modules. Grant source files,
     # never workspace/config/DB files adjacent to them.
-    pattern = "^" + re.escape(str(source)) + r"/.*[.]py$"
-    rules.append(f"(allow file-read* (regex #{q(pattern)}))")
+    # Use a literal path boundary and a static extension predicate. Python's
+    # re.escape + JSON quoting does not have Seatbelt regex semantics (notably
+    # under .worktrees or a checkout name containing a hyphen).
+    rules.append(f'(allow file-read* (require-all (subpath {q(source)}) (regex #"[.]py$")))')
     rules.append(f"(allow file-read-metadata (subpath {q(source)}))")
     rules.append(f"(allow file-read-data (require-all (subpath {q(source)}) (vnode-type DIRECTORY)))")
     return "\n".join(rules)
