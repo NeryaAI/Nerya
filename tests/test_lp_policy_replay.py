@@ -646,7 +646,7 @@ def test_three_actual_assets_serialize_artifacts_through_freeform_run(tmp_path, 
     assert not result["performance_evidence"] and not result["requested_window_complete"]
     assert result["replay"]["strategy_execution_verified"] is True
     assert result["replay"]["scope"] == "sampled_fixed_range_counterfactual"
-    assert json.loads(Path(result["run_receipt"]).read_text())["status"] == "completed"
+    assert json.loads((tmp_path / result["run_receipt"]).read_text())["status"] == "completed"
     assert result["replay"]["action_counts"] == raw["action_counts"]
     assert result["replay"]["accounting_verified"] is True
     assert result["replay"]["input_observations"] == 3

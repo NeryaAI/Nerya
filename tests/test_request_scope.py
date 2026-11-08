@@ -217,33 +217,33 @@ def test_explicit_perpetual_uses_declared_family_without_spot_or_legacy_aliasing
         scope.compare(binance, {**candidate, 'markets': ['BINANCE_PERPETUAL:BTC/USDC:USDC']})
 
 
-def test_wrong_draft_blocked_before_candidate_creation(env, monkeypatch):
-    fake = FakeGateway()
-    install_fake(monkeypatch, fake)
+def test_draft_saves_editable_files_without_mandatory_scope_extraction(env):
+    # env forbids all network/model calls. Drafts are editable, not approved to trade.
     result = draft(env, 'BINANCE:ETHUSDC')
-    assert result.is_error and result.content[0].data['reason'] == 'request_scope_mismatch'
-    assert not env.paths.proposals.exists()
-
-
-def test_exact_submit_passes_and_replay_override_rejected_before_runner(env, monkeypatch, fake_execution):
-    fake = FakeGateway()
-    install_fake(monkeypatch, fake)
-    result = draft(env)
     assert not result.is_error, result.text()
-    pid = result.content[0].data['proposal_id']
-    submitted = strategy_runtime.strategy_submit_proposal_handler(ToolCall(name='strategy_submit_proposal', arguments={'proposal_id': pid}), config=env)
-    assert not submitted.is_error, submitted.text()
-    data = submitted.content[0].data
-    assert data['state'] == 'pending_review' and data['request_scope']['status'] == 'passed'
-    assert data['request_scope']['request_scope_hash'] == scope.current_contract(env)['request_scope_hash']
-    def denied(*args, **kwargs):
-        pytest.fail('runner must not start on scope mismatch')
-    monkeypatch.setattr('nerya.skills.builtin.backtest.scripts.backtest_run.run_strategy_backtest', denied)
+    data = tool_json_data(result)
+    assert data['state'] == 'draft'
+    saved = yaml_io.load(env.paths.root / data['proposal_paths']['strategy_yml_path'])
+    assert saved['markets'] == ['BINANCE:ETHUSDC']
+
+
+def test_submit_and_explicit_replay_period_do_not_require_scope_classification(env, monkeypatch):
+    result = draft(env)
+    pid = tool_json_data(result)['proposal_id']
+    submitted = strategy_runtime.strategy_submit_proposal_handler(ToolCall(
+        name='strategy_submit_proposal', arguments={'proposal_id': pid}), config=env)
+    assert not submitted.is_error and tool_json_data(submitted)['state'] == 'pending_review'
+    calls = []
+    def preflight(**kwargs):
+        calls.append(kwargs)
+        return {'ok': True, 'preflight_only': True}
+    monkeypatch.setattr('nerya.skills.builtin.backtest.scripts.backtest_run.run_strategy_backtest', preflight)
     result = strategy_runtime.strategy_backtest_handler(ToolCall(name='strategy_backtest', arguments={
-        'proposal_id': pid, 'settings': {'window_days': 7}, 'override_candidate_backtest_defaults': True,
+        'proposal_id': pid, 'preflight_only': True, 'settings': {'window_days': 7},
     }), config=env)
-    assert result.is_error and result.content[0].data['reason'] == 'request_scope_mismatch'
-    assert len(fake.calls) == 1
+    assert not result.is_error, result.text()
+    assert len(calls) == 1 and calls[0]['settings'] == {'window_days': 7}
+    assert calls[0]['proposal_id'] == pid and calls[0]['allow_mock'] is False
 
 
 def assistant_chain(config, followup, *, initial_text=TEXT, initial_choose=None):

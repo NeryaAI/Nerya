@@ -586,7 +586,7 @@ def attach_strategy_checks(result: ToolResult, *, before: dict[str, str], after:
         scope = prior["scope"] + " " + scope
         unverified = list(dict.fromkeys(prior["unverified"] + unverified))
     for check in checks:
-        if (kind == "validation" and check["check_id"] != "source_binding") or check["check_id"] in {"candidate_scope_match", "strategy_contract", "behavioral_tests",
+        if (kind == "validation" and check["check_id"] != "source_binding") or check["check_id"] in {"candidate_scope_match", "request_scope_match", "strategy_contract", "behavioral_tests",
                                 "data_coverage", "historical_data", "execution_integrity"}:
             check["required"] = False
     receipt = verification_receipt(**before, scope=scope, checks=checks, unverified=unverified)

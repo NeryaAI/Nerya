@@ -75,7 +75,8 @@ def fixture(tmp_path, text=TEXT):
         before=binding, after=binding, kind='backtest', config=config)
     assert produced.content[0].data['request_scope']['request_scope_hash'] == contract['request_scope_hash']
     scope_check = next(c for c in produced.metadata['verification']['checks'] if c['check_id'] == 'request_scope_match')
-    assert scope_check['status'] == 'passed' and scope_check['required'] is True
+    # The producer still attests the match; it is not a universal replay prerequisite.
+    assert scope_check['status'] == 'passed' and scope_check['required'] is False
     block = project_tool_results([produced], render_tool_result=lambda _: {'content': []},
         rendered_tool_result_text=lambda _: '[fixture receipt]').event_blocks[0]
     event = {**block, 'event_id': 'completed-replay-event', 'kind': 'tool.complete',
