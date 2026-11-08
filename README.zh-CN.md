@@ -102,7 +102,7 @@ npm --prefix desktop ci
 npm --prefix desktop run dev
 ```
 
-桌面启动器负责管理本地服务。源码构建还需要 Rust 和对应平台的原生构建依赖。纯 Web 部署可参考现有 [CLI / MCP 指南](MCP.md) 及 `nerya --help`；Web 工作台仍可独立于 Tauri 使用。
+桌面启动器负责管理本地服务。源码构建还需要 Rust 和对应平台的原生构建依赖。纯 Web 部署可参考现有 [CLI / MCP 指南](docs/mcp-integration.md) 及 `nerya --help`；Web 工作台仍可独立于 Tauri 使用。
 
 ## 构建、校验与发布
 

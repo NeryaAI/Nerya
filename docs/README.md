@@ -9,6 +9,8 @@ Start with the [repository guide](../AGENTS.md) for the source layout and local 
 | Approval requests and reusable tool grants | [Tool authorization](tool-permission-authorization.md) |
 | Historical data storage and replay | [Backtest data pipeline](backtest-data-pipeline.md) |
 | Adding a trading transport or component | [Trading components](trading-components.md) |
+| Configuring MCP, OAuth or external Agent access | [MCP integration](mcp-integration.md) |
+| Working on platform-specific native tools | [Cross-platform tools](cross-platform-tools.md) |
 
 For strategy creation, the [authoring Skill](../nerya/skills/builtin/strategy_author/SKILL.md) defines what saving a draft delivers. A [historical replay](../nerya/skills/builtin/backtest/SKILL.md) is a separate operation. Neither action activates live trading.
 
