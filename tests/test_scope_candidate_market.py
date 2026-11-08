@@ -8,7 +8,9 @@ import pytest
 from nerya.db.sqlite import connect_readonly
 from nerya.strategies import request_scope as scope
 from test_request_scope import FakeGateway, admit, spans_output
-from test_request_scope import env  # noqa: F401
+import test_request_scope as request_scope_fixtures
+
+env = request_scope_fixtures.env
 
 pytestmark = pytest.mark.smoke
 TEXT = ('候选 prp_f02d2714ecc7，BINANCE:BTCUSDT，1h，'

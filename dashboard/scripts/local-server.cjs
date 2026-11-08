@@ -59,5 +59,5 @@ async function start() {
   const stop = () => { if (stopping) return; stopping = true; server.close(); Promise.resolve(app.close()).finally(() => process.exit(0)); };
   process.on("SIGTERM", stop); process.on("SIGINT", stop);
 }
-module.exports = { loopback, markPeer, PROOF };
+module.exports = { start, loopback, markPeer, PROOF };
 if (require.main === module) start().catch((error) => { console.error(error); process.exitCode = 1; });

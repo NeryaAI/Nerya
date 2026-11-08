@@ -10,7 +10,9 @@ from nerya.llm.messages import MessagesResponse
 from nerya.strategies import request_scope as scope
 import test_request_scope as helpers
 from test_request_scope import admit, assistant_chain, spans_output
-from test_request_scope import env  # noqa: F401
+import test_request_scope as request_scope_fixtures
+
+env = request_scope_fixtures.env
 from test_scope_asset_alias_amendment import FOLLOWUP
 
 pytestmark = pytest.mark.smoke

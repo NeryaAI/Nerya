@@ -321,4 +321,3 @@ def _header(value: Any, block: int) -> dict[str, Any]:
         raise _error("Malformed pinned block header", stage="response_envelope")
     timestamp = _rpc_quantity(value.get("timestamp"), label="timestamp")
     return {"number": block, "hash": block_hash.lower(), "timestamp": timestamp}
-

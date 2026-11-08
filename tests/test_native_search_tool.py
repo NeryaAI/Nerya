@@ -85,7 +85,7 @@ def test_python_fallback_deadline_inside_file_is_not_swallowed(tmp_path, monkeyp
     assert result.is_error and result.error.kind == ToolErrorKind.TIMEOUT
 
 def test_python_fallback_preserves_lines_unicode_and_case(tmp_path, monkeypatch):
-    (tmp_path / 'notes.md').write_text('first\n行情 NEEDLE\nthird\n')
+    (tmp_path / 'notes.md').write_text('first\n行情 NEEDLE\nthird\n', encoding='utf-8')
     monkeypatch.setattr(search, '_have_rg', lambda: False)
     result = grep_handler(ToolCall(name='grep', arguments={'pattern':'needle','case_insensitive':True}), root=tmp_path)
     assert result.content[1].data['matches'] == [{'path':'notes.md','line':2,'match':'行情 NEEDLE'}]

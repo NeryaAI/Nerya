@@ -152,7 +152,7 @@ def test_restart_recovers_queued_follow_up_but_not_manual_pause(family,monkeypat
 
 def test_parent_guide_targets_the_running_turn_and_audit_matches(family):
     f=family;sender(f)
-    request=send(f,key="run-target")
+    send(f,key="run-target")
     active=f.manager.store.claim(f.second["task_session_id"],"target-worker")
     guide=send(f,key="guide-one",mode="guide")
     with f.manager.store.transaction() as con:

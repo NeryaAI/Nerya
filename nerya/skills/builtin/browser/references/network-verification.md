@@ -26,4 +26,3 @@ verify the requested page/result. A Turnstile widget alone is not proof of a
 blocking page or successful verification. `challenge_requires_handoff` means
 stop trying to interact and ask the operator to take over. No CAPTCHA solver,
 stealth identity spoofing or challenge bypass is provided.
-

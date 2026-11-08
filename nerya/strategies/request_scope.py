@@ -198,10 +198,17 @@ def _task_continuation_text(text: str) -> bool:
 
 def _scope_amendment_requested(text: str) -> bool:
     """Detect an explicit scope change without treating ordinary task work as one."""
-    value = str(text or '')
-    if re.search(r'(?<!不)(?:改为|改成|换成|修改(?:市场|窗口|时间|周期|资产|协议)?|调整(?:市场|窗口|时间|周期|资产|协议)?|变更(?:市场|窗口|时间|周期|资产|协议)?)', value):
+    # A description, comparison or prohibition is not an amendment. This
+    # signal selects re-extraction; only verified producer spans bind scope.
+    clauses = re.split(r'[。！？；，.!?;,\n]', str(text or ''))
+    affirmative = [clause for clause in clauses if not re.search(
+        r"(?:不要|不得|禁止|不应|无需|别|不)\s*(?:再|去)?(?:改|调整|变更|换)|"
+        r"\b(?:do not|don't|never|without)\s+(?:chang(?:e|ing)|switch(?:ing)?)\b", clause, re.I)]
+    value = " ".join(affirmative)
+    if re.search(r'(?:改为|改成|换成|(?:修改|调整|变更)(?:市场|窗口|时间|周期|资产|协议))', value):
         return True
-    if re.search(r'\b(?:change|switch|instead|different)\b', value, re.I):
+    if any(re.match(r'\s*(?:please\s+|(?:can|could|would) you\s+)?(?:change|switch)\b', clause, re.I)
+           for clause in affirmative):
         return True
     # A denial of the evidence mode is not an authorization, even when the
     # same sentence contains pool-price/simulation vocabulary.

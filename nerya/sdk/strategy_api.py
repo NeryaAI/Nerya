@@ -481,6 +481,14 @@ class StrategyAPI:
             route=RouterResult(event.event_id,'routed',event.target,None,strategy_id)
             result=admit_strategy(self.config,event,route,actor_id=operator or self.config.get('runtime.financial_actor_id'))
             return {**result.result,'status':result.status,'admission_only':True}
+        if trigger_event_id:
+            from ..trading.live_trigger import live_trigger_denial
+            # Pin the very same mode for admission and execution. A scheduled
+            # tick need not repeat the live mode stored in its manifest.
+            mode_override = mode_override or package.manifest.mode
+            denial = live_trigger_denial(self.config, strategy_id, mode_override, trigger_payload, trigger_event_id)
+            if denial:
+                return denial
         runner = StrategyRunner(config=self.config, skills=self.skills)
         record = runner.run_tick(
             strategy_id,

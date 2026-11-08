@@ -7,7 +7,10 @@ import pytest
 
 from nerya.agent.assistants import AssistantError
 from nerya.agent.interactions import create_interaction
-from test_assistant_receipts import create, env, followup, request
+import test_assistant_receipts as assistant_receipts_fixtures
+from test_assistant_receipts import create, followup, request
+
+env = assistant_receipts_fixtures.env
 
 pytestmark = pytest.mark.smoke
 PROMPT = "继续刚才 ETH/USDT 策略任务，完成现有策略的30天回测和报告，不启用交易。"

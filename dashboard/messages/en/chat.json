@@ -1126,6 +1126,37 @@
     "statusEmpty": "Empty"
   },
   "copy": {
+  "AssistantResultsCopy": {
+    "summaryIncomplete": "The task is incomplete. Open the task conversation for execution details."
+  },
+  "agentConversationCopy": {
+    "notExecuted": "Not executed: waiting for the user's answer.",
+    "waitingForAnswer": "Waiting for answer"
+  },
+  "legacyReceiptV1": {
+    "deliveryConfirmed": "Task delivery complete (confirmed by the delivery record).",
+    "deliveryNotConfirmed": "Task delivery completion is not confirmed.",
+    "turnSucceeded": "The command turn finished successfully; ",
+    "followUpAdmitted": "Follow-up request admitted.",
+    "taskAdmitted": "Task created; command admission confirmed.",
+    "state": "State",
+    "recordedChecks": "\n\nRecorded checks: "
+  },
+  "legacyTerminalSummaryCopy": {
+    "quota": "The task is incomplete because the model service reached a quota or request limit. Check the service limits and existing results before deciding whether to continue.",
+    "control": "The task is incomplete. The system stopped execution because its controls or records were unavailable. Review the turn details and saved results before deciding whether to continue.",
+    "cancelled": "The task was cancelled before completion. Review the actions already taken and existing results before continuing.",
+    "stalled": "The task is incomplete. Waiting stopped because the background task showed no new progress. Check its status and existing results before deciding whether to continue.",
+    "repeated": "The task is incomplete. Repeated actions made no progress, so execution stopped. Review the turn details and adjust the current step before continuing.",
+    "length": "The task is incomplete because an output length or usage limit was reached. Narrow the request or adjust the limit, then review existing results before continuing.",
+    "timeout": "The task is incomplete because execution timed out. Check background task status and existing results before deciding whether to continue.",
+    "stream": "The task is incomplete because the model response was interrupted. Review the turn details and existing results before deciding whether to continue.",
+    "runLimit": "The task is incomplete because this run reached its execution limit. Check the run limits or narrow the task, then review existing results before continuing.",
+    "unexpected": "The task stopped unexpectedly before completion. Review the turn details, existing results and failure cause before deciding whether to continue."
+  },
+  "toolSemanticsCopy": {
+    "offset": "offset"
+  },
     "agentStatus": {
       "001": "Running",
       "002": "Starting",

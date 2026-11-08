@@ -247,4 +247,3 @@ Retain genuine below-to-above/above-to-below coverage, not only equality cases.
 Keep test prices and time local; candidate validation owns isolated execution.
 After saving, use `strategy_validate` on the same proposal after the last edit;
 no shell probe, network call, live order or activation is needed for these tests.
-

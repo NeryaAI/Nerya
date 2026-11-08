@@ -38,6 +38,11 @@ def admit_strategy(config,event,route,*,prepared_task=None,prepared_inputs=None,
     if expected_hash and expected_hash!=spec.source_revision:
         from ..agent.command_store import CommandError
         raise CommandError("strategy_version_changed")
+    from ..trading.live_trigger import live_trigger_denial
+    denial = live_trigger_denial(config, spec.strategy_id, spec.snapshot["mode"], event.payload, event.event_id)
+    if denial:
+        return StrategyAgentTaskExecutionResult(event.event_id, event.target, "blocked", spec.strategy_id,
+                                               route_id=route.route_id, result=denial)
     receipt=task_runs(config).admit(spec,actor=str(actor_id or config.get("runtime.task_actor_id") or "local:loopback"),
         trigger=event.asdict(),trigger_id=event.idempotency_key or event.event_id,trigger_kind="event")
     return StrategyAgentTaskExecutionResult(event.event_id,event.target,receipt["execution_status"],spec.strategy_id,

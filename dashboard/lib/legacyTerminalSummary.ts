@@ -1,3 +1,4 @@
+import { copy as i18nCopy } from "./i18n";
 import type { AssistantMessage, TurnPayload } from "./chat";
 import { conversationError } from "./conversationError";
 
@@ -65,41 +66,31 @@ export function legacyTerminalSummary(message: AssistantMessage, body: string, z
   const diagnostic = conversationError([reason, message.error, message.turn?.error, hostError].filter(Boolean).join("\n"), zh).code;
   if (["model_quota_exhausted", "insufficient_quota", "rate_limited"].includes(code)
       || ["model_quota_exhausted", "rate_limited"].includes(diagnostic)) {
-    return zh ? "本轮任务未完成，模型服务的额度或请求限制阻止了继续执行。请检查服务额度与限制，并核对已有结果后再决定是否继续。"
-      : "The task is incomplete because the model service reached a quota or request limit. Check the service limits and existing results before deciding whether to continue.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.quota");
   }
   if (code === "cancelled" && ["command_control_unavailable", "command_lease_lost", "event_persistence_failed"].includes(detail)) {
-    return zh ? "本轮任务未完成，系统因执行控制或记录异常停止了任务。请查看本轮详情，核对已保存结果后再决定是否继续。"
-      : "The task is incomplete. The system stopped execution because its controls or records were unavailable. Review the turn details and saved results before deciding whether to continue.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.control");
   }
   if (["cancelled", "canceled"].includes(code)) {
-    return zh ? "本轮任务已取消，尚未完成。需要继续时，请先核对已执行的操作和已有结果。"
-      : "The task was cancelled before completion. Review the actions already taken and existing results before continuing.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.cancelled");
   }
   if (code === "task_poll_no_progress") {
-    return zh ? "本轮任务未完成，等待后台任务时持续没有新进展，已停止等待。请查看后台任务状态和已有结果，再决定是否继续。"
-      : "The task is incomplete. Waiting stopped because the background task showed no new progress. Check its status and existing results before deciding whether to continue.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.stalled");
   }
   if (["repeated_tool_call", "diminishing_returns"].includes(code)) {
-    return zh ? "本轮任务未完成，重复执行没有带来有效进展，已停止。请查看本轮详情，调整当前步骤后再决定是否继续。"
-      : "The task is incomplete. Repeated actions made no progress, so execution stopped. Review the turn details and adjust the current step before continuing.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.repeated");
   }
   if (["model_output_truncated", "interrupted_max_tokens", "interrupted_length", "token_budget_exceeded"].includes(code)) {
-    return zh ? "本轮任务未完成，已达到输出长度或用量限制，结果可能不完整。请缩小请求范围或调整限制，核对已有结果后再继续。"
-      : "The task is incomplete because an output length or usage limit was reached. Narrow the request or adjust the limit, then review existing results before continuing.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.length");
   }
   if (["timeout", "timed_out"].includes(code) || diagnostic === "request_timeout") {
-    return zh ? "本轮任务未完成，执行已超时。请先核对后台任务状态和已有结果，再决定是否继续。"
-      : "The task is incomplete because execution timed out. Check background task status and existing results before deciding whether to continue.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.timeout");
   }
   if (code === "stream_interrupted") {
-    return zh ? "本轮任务未完成，模型响应中断，结果可能不完整。请查看本轮详情并核对已有结果，再决定是否继续。"
-      : "The task is incomplete because the model response was interrupted. Review the turn details and existing results before deciding whether to continue.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.stream");
   }
   if (["max_iterations", "max_tool_calls", "needs_summarisation"].includes(code)) {
-    return zh ? "本轮任务未完成，已达到本轮执行限制。请检查运行限制或缩小任务范围，核对已有结果后再继续。"
-      : "The task is incomplete because this run reached its execution limit. Check the run limits or narrow the task, then review existing results before continuing.";
+    return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.runLimit");
   }
-  return zh ? "本轮任务因异常中止，尚未完成。请查看本轮详情，核对已有结果和失败原因后再决定是否继续。"
-    : "The task stopped unexpectedly before completion. Review the turn details, existing results and failure cause before deciding whether to continue.";
+  return i18nCopy(zh, "copy.legacyTerminalSummaryCopy.unexpected");
 }

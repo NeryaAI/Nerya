@@ -8,9 +8,12 @@ from nerya.api import routes_conversation_commands
 from nerya.api.auth import AuthResult, authorize_route
 from nerya.api.local_server import _stamp_trusted_auth
 from nerya.strategies import request_scope as scope
-from test_request_scope import (
-    FakeGateway, assistant_env, env, followup_task, parent_request, real_assistant_child, spans_output,
-)
+import test_request_scope as request_scope_fixtures
+from test_request_scope import FakeGateway, followup_task, parent_request, spans_output
+
+assistant_env = request_scope_fixtures.assistant_env
+env = request_scope_fixtures.env
+real_assistant_child = request_scope_fixtures.real_assistant_child
 
 pytestmark = pytest.mark.smoke
 

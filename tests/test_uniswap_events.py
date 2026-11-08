@@ -453,4 +453,3 @@ def test_nearby_timestamp_uses_verified_bracket_before_binary_search(missed_slot
     assert floor == (74 if missed_slot else 75)
     assert cache[floor]["timestamp"] <= 900 < cache[floor + 1]["timestamp"]
     assert len(reads) <= 3
-

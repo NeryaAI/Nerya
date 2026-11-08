@@ -7,7 +7,10 @@ import pytest
 from nerya.strategies import request_scope as scope
 from nerya.tools.native import strategy_runtime
 from nerya.tools.types import ToolCall
-from test_request_scope import FakeGateway, admit, env as env, spans_output, install_fake, fake_execution
+import test_request_scope as request_scope_fixtures
+from test_request_scope import FakeGateway, admit, env as env, spans_output, install_fake
+
+fake_execution = request_scope_fixtures.fake_execution
 
 pytestmark = pytest.mark.smoke
 TEXT = '帮我创建一个 Uniswap V3 ETH/USDC LP 策略，回测最近30天，不启用交易。'

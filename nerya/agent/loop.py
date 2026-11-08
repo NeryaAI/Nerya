@@ -57,7 +57,6 @@ from ..tools.approval_runtime import first_approval_pause
 from ..tools.orchestrator import ToolOrchestrator
 from ..tools.registry import ToolRegistry
 from ..tools.result_contracts import (
-    result_counts_as_success,
     NON_SUCCESS_RESULT_STATUSES as _NON_SUCCESS_RESULT_STATUSES,
     compacted_kept_data as _tool_compacted_kept_data,
     parse_compacted_kept_jsonish as _parse_compacted_kept_jsonish,

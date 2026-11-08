@@ -475,7 +475,7 @@ class AssistantWork:
         cannot approve a decision, widen the mandate, or execute live funds.
         """
         from .command_runtime import runtime
-        from .command_store import CommandError, input_context, validate_command_request
+        from .command_store import input_context, validate_command_request
         import hashlib
 
         with closing(self._connect()) as con:

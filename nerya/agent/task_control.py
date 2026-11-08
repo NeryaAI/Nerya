@@ -456,8 +456,7 @@ def dispatch_trigger(paths, event: Mapping[str, Any], *, config: Any | None = No
 
 
 def _deliver_to_task(paths, subscription: Mapping[str, Any], event: Mapping[str, Any], *, config: Any | None) -> dict[str, Any]:
-    event_id, task_id, sub_id = event["event_id"], subscription["task_id"], subscription["subscription_id"]
-    now = time.time()
+    event_id, task_id = event["event_id"], subscription["task_id"]
     with closing(connect(paths.db)) as con:
         existing = con.execute("SELECT * FROM task_trigger_deliveries WHERE event_id=? AND task_id=?", (event_id, task_id)).fetchone()
         if existing:

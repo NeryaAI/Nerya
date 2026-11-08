@@ -480,6 +480,7 @@ def attach_strategy_checks(result: ToolResult, *, before: dict[str, str], after:
     request_scope = None
     if config is not None and config.get("runtime.command_id"):
         request_scope = replay_scope_receipt(config, before, replay=data if kind != "validation" else None)
+    if request_scope is not None:
         scope_ref = "request_scope:" + str(config.get("runtime.command_id")) + ":" + request_scope["request_scope_hash"]
         if kind != "validation" and request_scope["status"] == "passed":
             try:
@@ -489,7 +490,10 @@ def attach_strategy_checks(result: ToolResult, *, before: dict[str, str], after:
                     raise ValueError("missing_scope_replay_output")
                 metrics = _output_path(config, run_ref).with_name("metrics.json")
                 saved = {**json.loads(metrics.read_text()), "run_receipt": run_ref}
-                request_scope = replay_scope_receipt(config, before, replay=saved)
+                saved_scope = replay_scope_receipt(config, before, replay=saved)
+                if not saved_scope or saved_scope.get("request_scope_hash") != request_scope["request_scope_hash"]:
+                    raise ValueError("saved_replay_scope_changed")
+                request_scope = saved_scope
                 scope_ref += ":" + hashlib.sha256(metrics.read_bytes()).hexdigest() + ":" + metrics.relative_to(config.paths.root).as_posix()
             except (OSError, ValueError):
                 request_scope["status"], request_scope["reason"] = "missing", "request_scope_replay_unverified"
@@ -582,7 +586,7 @@ def attach_strategy_checks(result: ToolResult, *, before: dict[str, str], after:
         scope = prior["scope"] + " " + scope
         unverified = list(dict.fromkeys(prior["unverified"] + unverified))
     for check in checks:
-        if (kind == "validation" and check["check_id"] != "source_binding") or check["check_id"] in {"candidate_scope_match", "request_scope_match", "strategy_contract", "behavioral_tests",
+        if (kind == "validation" and check["check_id"] != "source_binding") or check["check_id"] in {"candidate_scope_match", "strategy_contract", "behavioral_tests",
                                 "data_coverage", "historical_data", "execution_integrity"}:
             check["required"] = False
     receipt = verification_receipt(**before, scope=scope, checks=checks, unverified=unverified)

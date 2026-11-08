@@ -1739,7 +1739,13 @@ function WorkspaceChatView({ sessionId, preferredAssistantId }: { sessionId?: st
         onOpenReports={() => { setRequestedReport(null); selectWorkspace("reports", true); }}
         onOpenResult={commandId => { setRequestedReport({commandId}); selectWorkspace("reports", true); }} />}
       {!isAssistantConversation && <RuntimeNotice workbench={workbench} />}
-      {!isAssistantConversation && <ChatTaskHeader diagnostics={<><RuntimeNotice workbench={workbench} diagnostics/><TaskProvenance thread={active}/></>} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]}
+      {!isAssistantConversation && <ChatTaskHeader workStatus={taskStatus(active, commandEngine.commands, workbench.view?.status ? workbench.view : null)}
+        delivery={(() => {
+          const message = active?.messages.findLast(item => item.role === "assistant");
+          if (message?.role !== "assistant") return null;
+          const receipt = message.turn?.delivery;
+          return receipt && receipt.command_id === (message.command_id || message.turn?.command_id) ? receipt : null;
+        })()} diagnostics={<><RuntimeNotice workbench={workbench} diagnostics/><TaskProvenance thread={active}/></>} thread={active} agents={agentWork.rows} results={[...agentResults, ...results]}
         loading={showLoading} showTabs tab={taskDock.selected || ''}
         workspaceAvailable canvasVisible={canvasVisible} onSelect={(tab) => selectWorkspace(tab, true)}
         onToggleBrowser={openBrowserDock}

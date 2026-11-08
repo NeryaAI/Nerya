@@ -272,4 +272,3 @@ def test_malformed_rpc_is_redacted_and_compaction_keeps_evidence():
     compact = compact_data_result("uniswap", "pool_discover", run(), limit=1)
     assert compact["row_count"] == 2 and compact["truncated"] is True
     assert compact["_envelope"]["historical_data_verified"] is False
-

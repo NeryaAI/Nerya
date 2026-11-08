@@ -7,7 +7,7 @@ import pytest
 
 from nerya.core.errors import LLMError
 from nerya.harness.cancellation import CancelToken
-from nerya.llm.messages import MessagesRequest, OpenAIMessagesBackend
+from nerya.llm.messages import MessagesRequest
 from test_managed_io_polish import (
     StreamTransport, backend, delta, finish, gateway, make_loop, tool_chunks,
 )

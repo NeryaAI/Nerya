@@ -62,7 +62,9 @@ test('script-driven Agent classification follows projected role calls and retain
   ];
   const { execFileSync } = require('node:child_process');
   const path = require('node:path'), root = path.resolve(__dirname, '../..');
-  const views = JSON.parse(execFileSync(root+'/.venv/bin/python', ['-B', '-c',
+  const venv = path.join(root, '.venv', process.platform === 'win32' ? 'Scripts/python.exe' : 'bin/python');
+  const python = process.env.NERYA_PYTHON || (fs.existsSync(venv) ? venv : 'python');
+  const views = JSON.parse(execFileSync(python, ['-B', '-c',
     'import json, sys\nfrom nerya.core import yaml_io\nfrom nerya.strategies.workflow_graph import build_workflows\nprint(json.dumps([build_workflows({"strategy.yml":yaml_io.dumps(case["manifest"]),"main.py":case["code"]}) for case in json.load(sys.stdin)]))'],
     { cwd: root, input: JSON.stringify(cases.map(row => ({ manifest, code: row.code }))), encoding: 'utf8', env: { ...process.env, PYTHONDONTWRITEBYTECODE: '1' } }));
   const { compactWorkflow } = require('../lib/workflowProjection.ts');

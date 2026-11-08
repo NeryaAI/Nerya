@@ -145,5 +145,3 @@ def test_pair_discovery_resolves_symbols_and_marks_pool_handoff() -> None:
     assert env['source_role'] == 'alternative_pool_price'
     assert env['historical_data_verified'] is False
     assert 'historical_jupiter_routes' in env['incompatible_observations']
-
-

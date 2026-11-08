@@ -33,7 +33,7 @@ test('actual CEX result cannot show recorded checks passed with 0 passed and 3 u
  assert.equal(evidence.status,'pending');
  assert.equal(evidence.passed,0);assert.equal(evidence.unresolved,3);assert.equal(evidence.files.length,3);
  const output=html(React.createElement(DeliveryEvidence,{result}));
- assert.match(output,/Waiting for check results/);assert.match(output,/3 files/);assert.match(output,/0 passed/);assert.match(output,/3 unresolved/);
+ assert.match(output,/Waiting for check results/);assert.match(output,/3 artifacts/);assert.match(output,/0 passed/);assert.match(output,/3 unresolved/);
  assert.doesNotMatch(output,/Recorded checks passed/);
 });
 test('even declared completion cannot override unresolved contract checks or stages',()=>{

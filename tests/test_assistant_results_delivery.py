@@ -9,7 +9,9 @@ from pathlib import Path
 
 import pytest
 
-from test_assistant_receipts import env
+import test_assistant_receipts as assistant_receipts_fixtures
+
+env = assistant_receipts_fixtures.env
 
 
 def test_aave_result_exposes_command_delivery_without_rewriting_report(env):

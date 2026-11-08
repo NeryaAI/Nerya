@@ -222,7 +222,7 @@ export function toolPresentation(step: ToolStep, runState: string, zh: boolean) 
   const failed = !notStartedInteraction && !computedDelivery && (genericFailed || (Boolean(step.result) && name === "delivery_finalize"));
   const warning = computedDelivery && completion.status !== "complete";
   let summary = toolResultSummary(result, zh);
-  if (notStartedInteraction) summary = zh ? "未执行：等待用户回答后继续。" : "Not executed: waiting for the user's answer.";
+  if (notStartedInteraction) summary = i18nCopy(zh, "copy.agentConversationCopy.notExecuted");
   if (warning) {
     summary = (completion.reasons as string[]).slice(0, 3).map(reason => {
       const localized = localizeDeliveryReasons(reason, zh);
@@ -233,7 +233,7 @@ export function toolPresentation(step: ToolStep, runState: string, zh: boolean) 
   const waiting = !failed && (notStartedInteraction || /awaiting_(approval|input)|pending_approval|requires_approval/.test(status) || !step.result && ["awaiting_approval","awaiting_input","blocked"].includes(runState));
   const pending = !step.result && working(runState) && !failed && !waiting;
   const preparing = pending && d.phase === "input_streaming";
-  const state = notStartedInteraction ? (zh ? "等待回答" : "Waiting for answer") : failed ? (i18nCopy(zh, "copy.lib_agentConversation.005")) : warning ? i18nCopy(zh, completion.status === "partial" ? "copy.deliveryEvidence.partialDelivery" : "copy.deliveryEvidence.incomplete") : waiting ? (i18nCopy(zh, "copy.lib_agentConversation.010")) : preparing ? (i18nCopy(zh, "copy.lib_agentConversation.011")) : pending ? (i18nCopy(zh, "copy.lib_agentConversation.006"))
+  const state = notStartedInteraction ? (i18nCopy(zh, "copy.agentConversationCopy.waitingForAnswer")) : failed ? (i18nCopy(zh, "copy.lib_agentConversation.005")) : warning ? i18nCopy(zh, completion.status === "partial" ? "copy.deliveryEvidence.partialDelivery" : "copy.deliveryEvidence.incomplete") : waiting ? (i18nCopy(zh, "copy.lib_agentConversation.010")) : preparing ? (i18nCopy(zh, "copy.lib_agentConversation.011")) : pending ? (i18nCopy(zh, "copy.lib_agentConversation.006"))
     : step.result ? (d.ok === true ? (i18nCopy(zh, "copy.lib_agentConversation.007")) : (i18nCopy(zh, "copy.lib_agentConversation.008"))) : (i18nCopy(zh, "copy.lib_agentConversation.009"));
   const semantic = policyRead
     ? { family: "read" as const, title: i18nCopy(zh, "copy.lib_toolSemantics.004"), subject: name }

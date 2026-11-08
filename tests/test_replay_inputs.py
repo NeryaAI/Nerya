@@ -14,7 +14,9 @@ from nerya.skills.builtin.backtest.scripts.replay_inputs import prepare_inputs
 from nerya.skills.builtin.backtest.scripts.freeform_run import run_freeform_backtest
 from test_defillama_data_api import Fake, PID
 from test_freeform_sandbox import package, macos
-from test_request_scope import assistant_env, real_assistant_child  # noqa: F401
+import test_request_scope as request_scope_fixtures
+
+real_assistant_child = request_scope_fixtures.real_assistant_child
 
 pytestmark = pytest.mark.smoke
 

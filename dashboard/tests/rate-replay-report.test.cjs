@@ -154,8 +154,8 @@ test('trusted LP producer freeform shape routes card and report without trading 
       for (const suffix of ['Title', 'Warning']) assert.ok(report.includes(copy[prefix + suffix]), prefix + suffix);
       for (const html of [card, report]) {
         assert.match(html, locale === 'en' ? /quote-token units/ : /报价代币/);
-        assert.match(html, locale === 'en' ? /ignores dilution and price impact/ : /未计稀释和价格冲击/);
-        assert.match(html, locale === 'en' ? /not.*realized LP yield/ : /不.*已实现 LP 收益/);
+        assert.match(html, locale === 'en' ? /(?:ignores|excludes) dilution and price impact/ : /(?:未计|不包含(?:流动性)?)稀释和价格冲击/);
+        assert.match(html, locale === 'en' ? /not.*realized LP yield/ : /不.*(?:已实现|实际) LP 收益/);
         if (cadence) assert.doesNotMatch(publicMarkup(html), /[Ss]ampled|between samples|采样/);
       }
       assert.doesNotMatch(publicMarkup(report), forbidden);

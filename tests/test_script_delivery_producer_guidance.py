@@ -78,4 +78,3 @@ def test_latest_revision_and_finalize_remain_the_completion_authority(loaded_ski
     assert "never set completion manually" in text
     assert "send model-authored passing checks to force it" in text
     assert {"data_coverage", "report_output"} <= set(contract["required_checks"])
-

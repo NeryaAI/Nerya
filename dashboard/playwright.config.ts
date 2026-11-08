@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { defineConfig, devices } from "@playwright/test";
 
 if (process.env.NERYA_E2E_ALLOW_FINANCIAL_DATASETS_KEYS !== "1") {
@@ -30,6 +31,9 @@ const AUTOSTART_WORKSPACE = process.env.NERYA_WORKSPACE?.trim() || "dashboard/.n
 const PERMISSION_MODE = process.env.NERYA_PERMISSION_MODE?.trim() || "yolo";
 const PYTHON = process.env.NERYA_PYTHON?.trim() || "python";
 
+// Independently launched test servers must share the same server-only assertion.
+// Never expose it in NEXT_PUBLIC_* or forward it from the browser.
+if (AUTOSTART && !MOCKED_UI) process.env.NERYA_DASHBOARD_INTERNAL_TOKEN ||= randomBytes(32).toString("hex");
 process.env.NERYA_API = RUNTIME_URL;
 process.env.PORT = String(PORT);
 process.env.NERYA_PERMISSION_MODE = PERMISSION_MODE;

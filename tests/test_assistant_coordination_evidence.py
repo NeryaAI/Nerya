@@ -569,4 +569,3 @@ def test_hidden_failed_check_still_controls_the_bounded_summary(coordination):
     assert evidence["hard_status"] == "failed"
     assert len(evidence["checks"]) == 16
     assert evidence["checks_truncated"]
-

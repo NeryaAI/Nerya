@@ -11,10 +11,13 @@ import pytest
 
 from nerya.strategies import request_scope as scope
 from test_request_scope import FakeGateway, assistant_chain, spans_output
-from test_request_scope import env  # noqa: F401
-from test_scope_pinned_window_restatement import (
-    ANCHOR, END, START, append, contexts, inspection, pinned, restated,
-)
+import test_request_scope as request_scope_fixtures
+
+env = request_scope_fixtures.env
+import test_scope_pinned_window_restatement as scope_pinned_window_restatement_fixtures
+from test_scope_pinned_window_restatement import ANCHOR, END, START, append, contexts, inspection, restated
+
+pinned = scope_pinned_window_restatement_fixtures.pinned
 
 pytestmark = pytest.mark.smoke
 

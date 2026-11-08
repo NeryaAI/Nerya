@@ -42,3 +42,43 @@ def test_live_trigger_requires_real_snapshot_and_reconciliation_clear(tmp_path, 
     monkeypatch.setattr(live_trigger.ReconciliationStore, "worst_recent", lambda *a, **k: None)
     result = admit_live_trigger(cfg, "live_one")
     assert result["allowed"] is True and result["approval"] == "trade_intent_approval_gate"
+
+
+@pytest.mark.parametrize('payload', [{}, {'mode': 'live'}, {'mode_override': 'LIVE'}])
+def test_live_tick_without_admission_is_not_executed(tmp_path, monkeypatch, payload):
+    from nerya.triggers.runtime import TriggerRuntime, STRATEGY_RUN_TICK_TARGET
+    from nerya.triggers.event import TriggerEvent
+    from nerya.triggers.router import RouterResult
+    from nerya.skills.kernel import SkillKernel
+    from nerya.strategies.runner import StrategyRunner
+    cfg = _cfg(tmp_path)
+    monkeypatch.setattr(SkillKernel, 'boot', lambda *_: None)
+    monkeypatch.setattr(StrategyRunner, 'run_tick', lambda *a, **kw: pytest.fail('runner invoked after denial'))
+    event = TriggerEvent.new(source='schedule', kind='tick', target=STRATEGY_RUN_TICK_TARGET, strategy_id='live_one', payload=payload)
+    route = RouterResult(event.event_id, 'routed', event.target, None, 'live_one')
+    out = TriggerRuntime.boot(cfg)._execute_strategy_target(event, route)
+    assert out.status == 'blocked' and out.result['trigger_event_id'] == event.event_id
+    assert 'runtime_live_trading_disabled' in out.result['admission']['blockers']
+
+
+def test_payload_cannot_narrow_multiaccount_execution_authority(tmp_path):
+    cfg = _cfg(tmp_path, live=True)
+    path = cfg.paths.strategy('live_one') / 'strategy.yml'
+    manifest = yaml_io.load(path); manifest['accounts'].append('unchecked'); yaml_io.dump(path, manifest)
+    result = admit_live_trigger(cfg, 'live_one', {'account_id': 'live_main'})
+    assert not result['allowed'] and 'live_trigger_requires_one_declared_account' in result['blockers']
+
+
+def test_live_agent_task_is_not_queued_with_paper_payload(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from nerya.sdk import task_dispatch
+    from nerya.triggers.event import TriggerEvent
+    cfg = _cfg(tmp_path)
+    event = TriggerEvent.new(source='schedule', kind='tick', target='skill:strategy.agent_task',
+                             strategy_id='live_one', payload={'mode': 'paper'})
+    monkeypatch.setattr(task_dispatch, 'strategy_spec', lambda *a, **kw: SimpleNamespace(
+        strategy_id='live_one', snapshot={'mode': 'live'}))
+    monkeypatch.setattr(task_dispatch, 'task_runs', lambda *_: pytest.fail('queued a blocked live task'))
+    out = task_dispatch.admit_strategy(cfg, event, SimpleNamespace(route_id=None))
+    assert out.status == 'blocked'
+    assert 'runtime_live_trading_disabled' in out.result['admission']['blockers']

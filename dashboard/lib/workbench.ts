@@ -1,5 +1,5 @@
 import { copy as i18nCopy } from "./i18n";
-import type { ChatThread, TurnPayload } from "./chat";
+import type { AssistantMessage, ChatThread, TurnPayload } from "./chat";
 import type { ConversationCommand } from "./conversationCommands";
 import { recordOf } from "./externalCalls";
 import { conversationError } from "./conversationError";
@@ -54,7 +54,7 @@ export function taskStatus(thread: ChatThread | null, commands: ConversationComm
     if (status.execution !== "blocked" || status.waiting_for !== "configuration" || !status.turn_id) return status;
     let command = commands.filter(c => c.session_id === thread.id && c.kind !== "guide" && !["removed", "queued"].includes(c.state))
       .sort((a, b) => a.created_at - b.created_at).at(-1);
-    const last = thread.messages.findLast(m => m.role === "assistant");
+    const last = thread.messages.findLast((m): m is AssistantMessage => m.role === "assistant");
     const lastCommandId = last?.command_id || last?.turn?.command_id;
     if (command && lastCommandId && (lastCommandId === command.command_id
       ? (last?.command_revision || 0) > command.revision

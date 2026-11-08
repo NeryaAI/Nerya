@@ -1,7 +1,6 @@
 """Persistent real-Seatbelt replay bridge tests, synthetic temporary packages only."""
 from __future__ import annotations
 
-import json
 import os
 from pathlib import Path
 import sys

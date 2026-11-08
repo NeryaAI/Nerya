@@ -18,7 +18,10 @@ from nerya.tools.types import ToolCall
 from nerya.tools.types import ToolResult
 from nerya.tools.result_contracts import tool_json_data
 from nerya.strategies.tool_verification import attach_strategy_checks, source_binding, delivery_source_versions
-from test_assistant_receipts import env as assistant_env, request as parent_request, create as create_task, followup as followup_task
+import test_assistant_receipts as assistant_receipts_fixtures
+from test_assistant_receipts import request as parent_request, create as create_task, followup as followup_task
+
+assistant_env = assistant_receipts_fixtures.env
 
 pytestmark = pytest.mark.smoke
 TEXT = 'Binance ETH/USDT strategy, 1h candles, last 30 days; no trading.'
@@ -444,7 +447,7 @@ def test_question_quote_answer_binds_to_new_scope_document(env, monkeypatch, quo
     runtime = CommandRuntime(env, lambda *_: {'stopped_reason': 'end_turn'}, epoch='scope-question')
     monkeypatch.setattr(runtime, 'kick', lambda _: None)
     text = '创建一个 Hyperliquid BTC 永续趋势策略，回测最近7天，不启用交易。'
-    original = admit(env, cid='scope-question-original', sid='scope-question-session', text=text)
+    admit(env, cid='scope-question-original', sid='scope-question-session', text=text)
     with closing(connect(env.paths.db)) as con:
         AgentSessionRepository(con).upsert_session(session_id='scope-question-session',
             source='user_chat', title=text)
@@ -779,7 +782,7 @@ def test_lp_wrapped_asset_requires_bound_user_amendment_preserving_original_wind
      {'venue': 'Jupiter', 'base': 'SOL', 'quote': 'USDC', 'window_days': '30天'}, 'JUPITER:SOL/USDC'),
 ])
 def test_real_simple_prompt_shapes_have_positive_producer_scope(env, monkeypatch, fake_execution, text, values, market):
-    request = admit(env, cid='shape', sid='shape-session', text=text)
+    admit(env, cid='shape', sid='shape-session', text=text)
     fake = FakeGateway(lambda docs: spans_output(docs[0], **values))
     install_fake(monkeypatch, fake)
     # Keep the two contracts separate: extraction proves the admitted scope;
@@ -1666,3 +1669,14 @@ def test_pool_prices_require_admitted_permission_and_persisted_producer_bytes(en
         assert result['prepared_inputs'] == {receipt['snapshot_file']: receipt['sha256']}
         assert scope.compare(contract, candidate, replay=replay, config=env) == pinned
     assert scope.current_contract(env) == contract
+
+
+@pytest.mark.parametrize(('message', 'amend'), [
+    ('Compare the price change across different markets.', False),
+    ('Do not change the window, continue the original task.', False),
+    ('不要调整周期，继续原任务。', False),
+    ('Please switch to the weekly window.', True),
+    ('不要调整周期，但把资产改为 ETH。', True),
+])
+def test_scope_amendment_needs_an_affirmative_request(message, amend):
+    assert scope._scope_amendment_requested(message) is amend

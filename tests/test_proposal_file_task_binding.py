@@ -21,8 +21,9 @@ from test_request_scope import (
     admit, FakeGateway,
     parent_request, followup_task,
 )
-from test_request_scope import fake_execution, real_assistant_child, assistant_env  # noqa: F401
-from nerya.strategies.request_scope import ensure_contract
+import test_request_scope as request_scope_fixtures
+
+real_assistant_child = request_scope_fixtures.real_assistant_child
 from nerya.agent.tool_projection import project_tool_results
 
 pytestmark = pytest.mark.smoke

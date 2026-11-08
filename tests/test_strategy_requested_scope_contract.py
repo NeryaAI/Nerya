@@ -20,7 +20,10 @@ from nerya.tools.native import delivery as native_delivery, strategy_runtime
 from nerya.tools.result_contracts import tool_json_data
 from nerya.tools.types import ToolCall, ToolResult
 from test_task_delivery import _runtime, _deps, _persist_replay_outputs
-from test_request_scope import FakeGateway, install_fake, output, fake_execution
+import test_request_scope as request_scope_fixtures
+from test_request_scope import FakeGateway, install_fake, output
+
+fake_execution = request_scope_fixtures.fake_execution
 from nerya.strategies import request_scope as scope
 
 pytestmark = pytest.mark.smoke

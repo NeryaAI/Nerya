@@ -13,8 +13,11 @@ from nerya.tools.native.data_api import data_api_handler
 from nerya.tools.native.strategy_runtime import strategy_draft_proposal_handler
 from nerya.tools.types import ToolCall
 from test_defillama_data_api import Fake, PID, POOL
-from test_request_scope import (assistant_chain, env, admit, FakeGateway, install_fake,
-                                spans_output, fake_execution)  # noqa: F401
+import test_request_scope as request_scope_fixtures
+from test_request_scope import assistant_chain, admit, FakeGateway, install_fake, spans_output
+
+env = request_scope_fixtures.env
+fake_execution = request_scope_fixtures.fake_execution
 
 pytestmark = pytest.mark.smoke
 REFERENCE = (Path(__file__).parents[1]

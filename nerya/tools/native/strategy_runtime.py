@@ -192,7 +192,7 @@ def _retrospective_authorization_interaction(
                 }],
             },
         )
-    except Exception as exc:
+    except Exception:
         _LOG.debug("retrospective authorization interaction unavailable", exc_info=True)
         return None
     return ToolResult.from_json(
@@ -2010,6 +2010,14 @@ def _strategy_draft_proposal_handler(
     strategy_id = str(args.get("strategy_id") or "").strip()
     if not strategy_id:
         return _usage_error(call, "strategy_draft_proposal requires strategy_id")
+    # A concrete manifest must not silently replace an admitted instrument.
+    # Leave partial scaffolds editable; submission checks the saved package.
+    supplied = (args.get("files") or {}).get("strategy.yml")
+    if supplied and config.get("runtime.command_id"):
+        from ...strategies.request_scope import guard
+        denied, _ = guard(config, call, manifest=lambda _: yaml_io.loads(supplied), allow_incomplete=True)
+        if denied is not None:
+            return denied
     from_strategy_id = str(args.get("from_strategy_id") or "").strip()
     if from_strategy_id:
         return _draft_from_promoted(call, config.paths, strategy_id=strategy_id,
@@ -2065,6 +2073,11 @@ def _strategy_submit_proposal_handler(
         sid, files = _read_proposal_files(config.paths, proposal_id)
         if not files:
             return _usage_error(call, "proposal has no strategy files to submit")
+        if config.get("runtime.command_id"):
+            from ...strategies.request_scope import guard
+            denied, _ = guard(config, call, manifest=lambda _: yaml_io.loads(files["strategy.yml"]))
+            if denied is not None:
+                return denied
         validation = validate_proposal_files(strategy_id=sid, files=files,
                                              smoke_test=False, run_tests=False).asdict()
     except NeryaError as exc:
@@ -2340,6 +2353,13 @@ def _strategy_backtest_handler(call: ToolCall, *, config: Config) -> ToolResult:
         config.paths, strategy_id=strategy_id, proposal_id=proposal_id,
     )
     effective_settings = args.get("settings")
+    if config.get("runtime.command_id"):
+        from ...strategies.request_scope import guard
+        denied, pinned = guard(config, call, settings=effective_settings)
+        if denied is not None:
+            return denied
+        if pinned and not (use_rates or use_freeform):
+            effective_settings = {**(effective_settings or {}), **pinned}
     effective_data_mode = args.get("data_mode")
     try:
         from ...skills.builtin.backtest.scripts.backtest_run import (

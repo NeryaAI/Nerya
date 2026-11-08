@@ -5,7 +5,10 @@ import json
 import pytest
 
 from nerya.strategies import request_scope as scope
-from test_request_scope import FakeGateway, env, spans_output  # noqa: F401
+import test_request_scope as request_scope_fixtures
+from test_request_scope import FakeGateway, spans_output
+
+env = request_scope_fixtures.env
 
 
 @pytest.mark.smoke

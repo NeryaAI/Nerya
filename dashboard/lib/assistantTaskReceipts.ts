@@ -1,3 +1,4 @@
+import { copy as i18nCopy } from "./i18n";
 import type { AssistantMessage } from "./chat";
 import { projectMessageBlocks } from "./streamTranscript";
 import { contentValue, record } from "./agentConversation";
@@ -95,15 +96,15 @@ function assistantAdmissionReply(message: AssistantMessage, reply: string, opera
       .replace(/([\\`*_{}\[\]()#!|~])/g, "\\$1");
     for (const zh of [false, true]) {
       let explanation = value.task_complete
-        ? (zh ? "任务交付已完成（交付记录确认）。" : "Task delivery complete (confirmed by the delivery record).")
-        : (zh ? "任务交付完成尚未确认。" : "Task delivery completion is not confirmed.");
-      if (value.state === "succeeded") explanation = (zh ? "命令已成功结束；" : "The command turn finished successfully; ") + explanation;
+        ? (i18nCopy(zh, "copy.legacyReceiptV1.deliveryConfirmed"))
+        : (i18nCopy(zh, "copy.legacyReceiptV1.deliveryNotConfirmed"));
+      if (value.state === "succeeded") explanation = (i18nCopy(zh, "copy.legacyReceiptV1.turnSucceeded")) + explanation;
       const headline = operation === "task_follow_up"
-        ? (zh ? "补充请求已受理。" : "Follow-up request admitted.")
-        : (zh ? "已创建任务并确认命令已受理。" : "Task created; command admission confirmed.");
+        ? (i18nCopy(zh, "copy.legacyReceiptV1.followUpAdmitted"))
+        : (i18nCopy(zh, "copy.legacyReceiptV1.taskAdmitted"));
       const prefix = headline
-        + `\n\n[${title}](${value.url})\n\n${zh ? "状态" : "State"}: ` + "`" + value.state + "` · command: `" + value.command_id + "`"
-        + `\n\n${explanation}` + (zh ? "\n\n已记录检查：" : "\n\nRecorded checks: ") + "`" + checks + "`";
+        + `\n\n[${title}](${value.url})\n\n${i18nCopy(zh, "copy.legacyReceiptV1.state")}: ` + "`" + value.state + "` · command: `" + value.command_id + "`"
+        + `\n\n${explanation}` + (i18nCopy(zh, "copy.legacyReceiptV1.recordedChecks")) + "`" + checks + "`";
       if (reply === prefix) return "";
       if (reply.startsWith(prefix + "\n\n")) return reply.slice(prefix.length + 2);
     }

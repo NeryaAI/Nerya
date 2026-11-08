@@ -39,7 +39,7 @@ export function toolSemantics(rawName: string, payload: Record<string, unknown>,
   const inspecting = family === "skill" && payload.action === "inspect";
   const reference = family === "skill" ? text(inspecting ? payload.script : payload.file) : "";
   const offset = reference && typeof payload.offset === "number" && Number.isInteger(payload.offset) && payload.offset >= 0
-    ? ` · ${zh ? "偏移" : "offset"} ${payload.offset}` : "";
+    ? ` · ${i18nCopy(zh, "copy.toolSemanticsCopy.offset")} ${payload.offset}` : "";
   const specific = reference ? (inspecting ? actions.read_file : actions.skill_view) : actions[name];
   const title = i18nCopy(zh, (specific && !(name === "script_run" && family !== "shell") ? specific : labels[family]) ?? "");
   const target = text(payload.strategy_id || payload.market || payload.symbol || payload.path || payload.file_path || payload.query || payload.search_query || payload.url || payload.command || payload.cmd || payload.pattern || payload.task || payload.goal || payload.description);

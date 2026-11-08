@@ -104,13 +104,14 @@ def test_rpc_failure_matrix_survives_tool_and_projection(provider, method, count
     result, event = tool_result(fake, {**ARGS, "rpc_provider": provider})
     assert len(fake.calls) == count  # No retry, fallback or further sampling.
     assert result.error.kind == ToolErrorKind.PROVIDER_ERROR
+    reason = "historical_rpc_rate_limited" if mode == "http" else "historical_rpc_evidence_failure"
     assert result.error.detail == {
         "provider": "uniswap", "action": "pool_history", "op": "call",
-        "reason": "historical_rpc_evidence_failure", "failure_stage": stage,
+        "reason": reason, "failure_stage": stage,
         "rpc_method": method, "rpc_provider": provider, "request_count": count,
         "coverage_complete": False, "safe_to_retry": False, **extra}
     assert event["recovery"] == {
-        "action": "inspect_historical_diagnostic", "reason": "historical_rpc_evidence_failure",
+        "action": "inspect_historical_diagnostic", "reason": reason,
         "safe_to_retry": False, "preserve_candidate": True,
         "preserve_requested_constraints": True, "failure_stage": stage,
         "rpc_method": method, "request_count": count, **extra}
@@ -185,6 +186,7 @@ def test_authorization_branch_keeps_existing_recovery(status):
     assert result.error.detail["archive_access_established"] is False
     assert "supported_data_source_integration_required" not in result.error.detail
     assert result.error.detail["arbitrary_credentials_supported"] is False
-    assert "fixed pool_history action" in str(result.error)
+    assert event["recovery"]["fixed_public_source"] is True
+    assert event["recovery"]["credential_input_supported"] is False
     assert event["recovery"]["action"] == "inspect_historical_sources"
     assert len(fake.calls) == 1

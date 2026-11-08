@@ -7,7 +7,10 @@ import pytest
 from nerya.db.sqlite import connect_readonly
 from nerya.strategies import request_scope as scope
 from nerya.tools.types import ToolCall
-from test_request_scope import env, admit, FakeGateway, install_fake, spans_output  # noqa: F401
+import test_request_scope as request_scope_fixtures
+from test_request_scope import admit, FakeGateway, install_fake, spans_output
+
+env = request_scope_fixtures.env
 
 pytestmark = pytest.mark.smoke
 CANARY = 'PRIVATE_RESOURCE_CANARY_8bf19'

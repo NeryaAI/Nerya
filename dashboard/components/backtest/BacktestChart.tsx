@@ -264,7 +264,7 @@ const receiptText = (value: unknown): string => typeof value === "string" ? valu
 
 export function LpCounterfactualReport({ chart }: { chart: BacktestChartData }) {
   const zh = useLocale().startsWith("zh");
-  const copy = (key: string) => i18nCopy(zh, "copy.components_backtest_BacktestChart." + key);
+  const copy = (key: string) => i18nCopy(zh, `copy.components_backtest_BacktestChart.${key}`);
   const replay = (chart.meta.replay || {}) as Record<string, unknown>;
   const lpPrefix = lpCounterfactualLabelPrefix(chart.meta);
   const gaps = Array.isArray(replay.gaps) ? replay.gaps : [];

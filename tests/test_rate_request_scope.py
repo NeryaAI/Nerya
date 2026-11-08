@@ -12,9 +12,11 @@ from nerya.skills.builtin.backtest.scripts.replay_inputs import prepare_inputs
 from nerya.strategies import request_scope as scope
 from nerya.tools.types import ToolCall
 from test_defillama_data_api import Fake, PID, POOL
-from test_request_scope import (
-    FakeGateway, admit, env, spans_output, assistant_env, parent_request, create_task, followup_task,
-)
+import test_request_scope as request_scope_fixtures
+from test_request_scope import FakeGateway, admit, spans_output, parent_request, create_task, followup_task
+
+env = request_scope_fixtures.env
+assistant_env = request_scope_fixtures.assistant_env
 
 pytestmark = pytest.mark.smoke
 ANCHOR = 1793173237.9919071

@@ -12,8 +12,13 @@ from nerya.db.sqlite import connect
 from nerya.strategies import request_scope as scope
 from nerya.trading import components
 from test_request_scope import FakeGateway, assistant_chain, spans_output
-from test_request_scope import env  # noqa: F401
-from test_scope_extraction_budget import BudgetTransport, chain, offline  # noqa: F401
+import test_request_scope as request_scope_fixtures
+
+env = request_scope_fixtures.env
+import test_scope_extraction_budget as scope_extraction_budget_fixtures
+from test_scope_extraction_budget import BudgetTransport, chain
+
+offline = scope_extraction_budget_fixtures.offline
 
 pytestmark = pytest.mark.smoke
 INITIAL = 'Uniswap v3 ETH/USDC strategy, last 30 days; no trading.'

@@ -13,7 +13,10 @@ from nerya.financial.defi.book import ProtocolBook
 from nerya.financial.defi.uniswap import UniswapFunds
 from nerya.financial.gateway import FinancialGateway
 from nerya.sdk.financial_api import FinancialAPI
-from test_lp_strategy_scaffold import offline, real_context
+import test_lp_strategy_scaffold as lp_strategy_scaffold_fixtures
+from test_lp_strategy_scaffold import real_context
+
+offline = lp_strategy_scaffold_fixtures.offline
 import test_uniswap_execution as lp
 
 pytestmark = pytest.mark.smoke

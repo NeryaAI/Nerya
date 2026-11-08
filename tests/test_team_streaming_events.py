@@ -30,7 +30,8 @@ def team(tmp_path, monkeypatch):
     bus.clear()
 
     class Dispatcher:
-        def __init__(self, config, skills, tool_registry, executor):
+        def __init__(self, config, skills, tool_registry, executor, *, parent_model_selection):
+            assert isinstance(parent_model_selection, dict)
             assert tool_registry is registry
             self.executor = executor
 

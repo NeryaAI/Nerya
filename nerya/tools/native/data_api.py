@@ -229,7 +229,7 @@ def data_api_handler(
                     'and evidence requirements. Do not seek credentials, bypass access denial or trade.',
             }
             error_message = recovery_hint['message']
-        elif detail.get("reason") == "historical_rpc_evidence_failure":
+        elif detail.get("reason") in ("historical_rpc_evidence_failure", "historical_rpc_rate_limited"):
             from ...data_api.uniswap_history import MAX_REQUESTS, RPC_METHODS
 
             safe = {}
@@ -247,7 +247,7 @@ def data_api_handler(
                     safe[field] = value
             recovery_hint = {
                 "action": "inspect_historical_diagnostic",
-                "reason": "historical_rpc_evidence_failure",
+                "reason": detail["reason"],
                 "safe_to_retry": False, "preserve_candidate": True,
                 "preserve_requested_constraints": True, **safe,
             }

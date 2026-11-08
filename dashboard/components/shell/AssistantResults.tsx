@@ -1,5 +1,6 @@
 "use client";
 
+import { copy as i18nCopy } from "../../lib/i18n";
 import Link from "next/link";
 import { useEffect, useRef, useState } from "react";
 import { useLocale, useTranslations } from "next-intl";
@@ -24,8 +25,7 @@ export function assistantResultSummary(row: Pick<AssistantResult, "summary" | "s
   // Quoted examples, fenced/inline code, report headings and structured data
   // retain their authored preview, even when they contain the exact template.
   if (/[\x60~>"“”‘’「」『』:：#{}\[\]]/.test(introduction)) return row.summary;
-  return zh ? "本轮任务未完成。请打开任务对话查看执行详情。"
-    : "The task is incomplete. Open the task conversation for execution details.";
+  return i18nCopy(zh, "copy.AssistantResultsCopy.summaryIncomplete");
 }
 
 /** The selected result uses the same public final projection as chat. */

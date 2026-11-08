@@ -8,7 +8,8 @@ import {SearchIcon,XIcon} from "../icons";
 import Link from "next/link";
 import { useLocale, useTranslations } from "next-intl";
 import * as Menu from "@radix-ui/react-dropdown-menu";
-import type { ChatThread } from "../../lib/chat";
+import { shortTaskStatus } from "./taskStatusCopy";
+import type { ChatThread, TaskDelivery } from "../../lib/chat";
 import type { ChatResult } from "../../lib/chatResults";
 import type { Connection, TaskStatus } from "../../lib/workbench";
 import { toast } from "../../lib/dialogs";
@@ -19,7 +20,7 @@ import type { AgentWork } from "./useAgentWork";
 import styles from "./ChatTaskHeader.module.css";
 
 export function ChatTaskHeader({ thread, agents, results, loading = false,
-  showTabs, tab, canvasVisible, onSelect, onToggleCanvas, onOpenResult, onToggleBrowser, workspaceAvailable = false, diagnostics, onToggleReports, workStatus, connection, sending = false, approvalCount = 0 }: {
+  showTabs, tab, canvasVisible, onSelect, onToggleCanvas, onOpenResult, onToggleBrowser, workspaceAvailable = false, diagnostics, onToggleReports, workStatus, delivery, connection, sending = false, approvalCount = 0 }: {
   diagnostics?:ReactNode;
   thread: ChatThread | null; agents: AgentWork[]; results: ChatResult[];
   loading?: boolean; showTabs: boolean;
@@ -27,6 +28,7 @@ export function ChatTaskHeader({ thread, agents, results, loading = false,
   onToggleCanvas: () => void; onOpenResult: (id: string) => void;
   onToggleBrowser?: () => void; workspaceAvailable?: boolean;
   onToggleReports?: () => void;
+  delivery?: TaskDelivery | null;
   workStatus?: TaskStatus; connection?: Connection;
   sending?: boolean; approvalCount?: number;
 }) {
@@ -103,6 +105,13 @@ export function ChatTaskHeader({ thread, agents, results, loading = false,
         <ShellNotifications />
       </div>
     </div>
+    {workStatus?.needs_attention && <span className="px-3 text-xs text-warn">{shortTaskStatus(workStatus, zh)}</span>}
+    {delivery && <details className="mx-3 mb-1 min-w-0 text-xs text-[color:var(--text-muted)]" data-testid="delivery-stage-rail">
+      <summary className="cursor-pointer">{tAssistants(`deliveryStates.${delivery.completion?.allowed === true
+        ? delivery.completion.status === "complete" ? "complete" : "partial" : "incomplete"}`)}</summary>
+      <ol className="mt-1 flex flex-wrap gap-x-3 gap-y-1">{delivery.stages.map(stage => <li key={stage.id}
+        className="max-w-full break-words" data-current={stage.state}>{stage.label || stage.id}</li>)}</ol>
+    </details>}
     <Dialog.Root open={showDiagnostics} onOpenChange={setShowDiagnostics}><Dialog.Portal><Dialog.Overlay className="ui-modal-overlay"/><Dialog.Content className="ui-dialog" aria-describedby={undefined}><div className="mb-4 flex items-center justify-between gap-4"><Dialog.Title className="text-sm font-semibold">{i18nCopy(zh, "copy.components_chat_ChatTaskHeader.030")}</Dialog.Title><Dialog.Close className="ui-icon-button" aria-label={i18nCopy(zh, "copy.components_chat_ChatTaskHeader.031")}><XIcon size={16}/></Dialog.Close></div>{diagnostics}</Dialog.Content></Dialog.Portal></Dialog.Root>
   </header>;
 }

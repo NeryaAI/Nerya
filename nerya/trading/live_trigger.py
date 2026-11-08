@@ -29,12 +29,14 @@ def admit_live_trigger(config, strategy_id: str, payload: dict[str, Any] | None 
         blockers.append("strategy_mode_not_live")
     account_ids = list(package.manifest.accounts)
     requested = str(payload.get("account_id") or "").strip()
-    if requested:
-        account_ids = [requested] if requested in account_ids else []
-    if len(account_ids) != 1:
+    # The runner can access every account in the manifest; a payload hint
+    # cannot narrow that authority. Admit only an unambiguous account.
+    if len(account_ids) != 1 or (requested and requested != account_ids[0]):
         blockers.append("live_trigger_requires_one_declared_account")
         return {"allowed": False, "status": "blocked", "strategy_id": strategy_id, "blockers": blockers, "account_id": None}
     account_id = account_ids[0]
+    if blockers:
+        return {"allowed": False, "status": "blocked", "strategy_id": strategy_id, "blockers": blockers, "account_id": account_id}
     try:
         profile = get_account_profile(config.paths, account_id)
         if profile.mode != "live":
@@ -65,4 +67,15 @@ def admit_live_trigger(config, strategy_id: str, payload: dict[str, Any] | None 
             "approval": "trade_intent_approval_gate"}
 
 
-__all__ = ["admit_live_trigger"]
+def live_trigger_denial(config, strategy_id, mode, payload, event_id):
+    """Return a public denial for the effective execution mode, never a grant to trade."""
+    if str(mode).strip().lower() != "live":
+        return None
+    admission = admit_live_trigger(config, strategy_id, payload)
+    if admission["allowed"]:
+        return None
+    return {"status": "blocked", "reason": "live_trigger_admission_blocked",
+            "admission": admission, "trigger_event_id": event_id}
+
+
+__all__ = ["admit_live_trigger", "live_trigger_denial"]

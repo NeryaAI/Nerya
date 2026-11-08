@@ -9,7 +9,9 @@ from nerya.core.config import Config
 from nerya.db.sqlite import connect, connect_readonly
 from nerya.strategies import request_scope as scope
 from test_request_scope import FakeGateway, admit, assistant_chain, spans_output
-from test_request_scope import env  # noqa: F401
+import test_request_scope as request_scope_fixtures
+
+env = request_scope_fixtures.env
 
 
 INITIAL = '新建 Uniswap v3 ETH/USDC LP策略，回测最近30天，不启用交易。'
