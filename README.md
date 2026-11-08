@@ -102,7 +102,7 @@ For desktop development:
 npm --prefix desktop run dev
 ```
 
-The desktop launcher manages its local services. A source build additionally requires Rust and the platform's native build dependencies. For a web-only deployment, use the existing [CLI and MCP guide](MCP.md) and `nerya --help`; the web dashboard remains independent of Tauri.
+The desktop launcher manages its local services. A source build additionally requires Rust and the platform's native build dependencies. For a web-only deployment, use the existing [CLI and MCP guide](docs/mcp-integration.md) and `nerya --help`; the web dashboard remains independent of Tauri.
 
 ## Build, verify and release
 
