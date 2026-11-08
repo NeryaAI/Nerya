@@ -668,19 +668,22 @@ def test_three_actual_assets_serialize_artifacts_through_freeform_run(tmp_path, 
     observed = checks(result)
     assert observed['historical_data']['status'] == 'passed'
     assert observed['data_coverage']['status'] == 'failed'
-    assert observed['data_coverage']['required'] is True
+    # An incomplete history constrains the report; it does not block every sampled replay.
+    assert observed['data_coverage']['required'] is False
     assert observed['data_coverage']['message'] == result['coverage_message']
     assert observed['historical_performance']['status'] == 'missing'
     from nerya.task_delivery import _completion
+    contract_path = Path(__file__).resolve().parents[1] / 'nerya/skills/builtin/backtest/references/delivery-contract.json'
+    contract = json.loads(contract_path.read_text())['strategy_replay']
     completion = _completion({
-        'workflow_contract': {'required_checks': ['historical_data', 'data_coverage'],
-                              'required_artifacts': ['report']},
+        'workflow_contract': contract,
         'stages': [{'id': 'replay', 'state': 'completed'}],
-        'artifacts': [{'artifact_id': 'report', 'ref': binding['artifact_id']}],
+        'artifacts': [{'artifact_id': 'report', 'ref': result['report_path']},
+                      {'artifact_id': 'run_receipt', 'ref': result['run_receipt']}],
         'checks': [{**row, **binding, 'producer_owned': True} for row in observed.values()],
     })
-    assert completion['allowed'] is False and completion['status'] == 'incomplete'
-    assert completion['reasons'] == ['check_failed:data_coverage']
+    # The saved report is deliverable; missing requested history still prevents full completion.
+    assert completion['allowed'] is True and completion['status'] == 'partial', completion
     for flags, expected in [({}, 'missing'),
                             ({'coverage_ok': None, 'requested_window_complete': None}, 'missing'),
                             ({'coverage_ok': False}, 'failed'),

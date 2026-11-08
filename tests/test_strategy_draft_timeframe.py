@@ -26,7 +26,7 @@ def isolated_producer(monkeypatch):
     # Keep real file staging and static validation; exclude event DB and execution.
     monkeypatch.setattr("nerya.evolution.event_store.record_event", lambda *a, **kw: None)
     def static_validation(**kwargs):
-        return validate_proposal_files(**kwargs, smoke_test=False, run_tests=False)
+        return validate_proposal_files(**{**kwargs, "smoke_test": False, "run_tests": False})
     monkeypatch.setattr("nerya.evolution.strategy_code_generator.validate_proposal_files", static_validation)
     monkeypatch.setattr(strategy_runtime, "validate_proposal_files", static_validation)
     def blocked(*args, **kwargs):
@@ -109,18 +109,15 @@ def test_authored_manifest_preserved_or_conflict_rejected(tmp_path, request_tf):
         assert staged_manifest(tmp_path, result)["timeframe"] == "4h"
 
 
-def test_clone_preserves_source_and_rejects_timeframe_override(tmp_path):
+def test_clone_can_change_timeframe_without_mutating_its_source(tmp_path):
     paths = WorkspacePaths(tmp_path)
     source = paths.strategy("original")
     source.mkdir(parents=True)
     original = "strategy_id: original\ntimeframe: 4h\n"
     (source / "strategy.yml").write_text(original)
     payload = {"strategy_id": "cloned", "from_strategy_id": "original"}
-    before = list(tmp_path.rglob("*"))
-    rejected = draft(tmp_path, {**payload, "timeframe": "1h"})
-    assert rejected.is_error
-    assert rejected.error.recovery_hint["field"] == ["timeframe"]
-    assert list(tmp_path.rglob("*")) == before
+    changed = draft(tmp_path, {**payload, "strategy_id": "one_hour_clone", "timeframe": "1h"})
+    assert staged_manifest(tmp_path, changed)["timeframe"] == "1h"
     assert staged_manifest(tmp_path, draft(tmp_path, payload))["timeframe"] == "4h"
     assert (source / "strategy.yml").read_text() == original
 
