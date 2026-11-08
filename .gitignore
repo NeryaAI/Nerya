@@ -38,7 +38,13 @@ submission-*.md
 %SystemDrive%/
 /state/
 /tmp/
-/docs/
+/docs/*
+!/docs/README.md
+!/docs/assistant-conversations.md
+!/docs/backtest-data-pipeline.md
+!/docs/task-runs-and-financial-actions.md
+!/docs/tool-permission-authorization.md
+!/docs/trading-components.md
 /notes.md
 /task_plan.md
 nerya.egg-info/
