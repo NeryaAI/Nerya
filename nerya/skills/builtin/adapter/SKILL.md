@@ -2,7 +2,7 @@
 name: adapter
 description: "Use to integrate or repair exchange, prediction-market, wallet, DEX and aggregator adapters; inspect capabilities, validate protocol contracts and connect execution to Nerya's risk and approval flows."
 license: MIT
-version: 0.1.0
+version: 0.3.0
 metadata:
   nerya:
     script_policy:
@@ -27,12 +27,15 @@ the preferred integration target. Router aggregation does not add native LP.
 
 For the integration checklist, read [references/full-playbook.md](references/full-playbook.md).
 
-Start with connector_list/connector_describe for venues or wallet capability
+Start with connector_list/connector_view for venues or wallet capability
 discovery for wallets. Choose the relevant branch below; this is one adapter
 Skill, with protocol detail loaded only for the requested integration.
 
 - Prediction markets: read [references/prediction-markets.md](references/prediction-markets.md).
-  Use scripts/inspect_prediction.py for public outcomes, book and price history.
+  Use scripts/inspect_prediction.py with a discovered provider or venue-prefixed
+  outcome for public identities, book and price history; it also defines the
+  share/budget boundary and the existing funds-page projection.
+  Supply the script payload with `--json '{...}'`; `stdout_json.notes` contains the selected outcome, market status, best prices, timestamp and share/price constraints even after compaction.
 - CEX: extend ExchangeProviderSpec and the existing CCXT connector; preserve
   exchange feature discovery and optional protection. Do not replace CCXT with
   a new native CEX client.

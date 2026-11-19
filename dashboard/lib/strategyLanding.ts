@@ -15,3 +15,10 @@ export function strategyMarketTarget(value: string): { venue: string; market: st
   const market = value.slice(colon + 1).trim();
   return market ? { venue, market } : null;
 }
+
+/** The market API returns a venue-prefixed identity; legacy responses may be bare. */
+export function strategyMarketResponseMatches(target: { venue: string; market: string }, returned?: string): boolean {
+  if (!returned || returned === target.market) return true;
+  const identity = strategyMarketTarget(returned);
+  return identity?.venue === target.venue && identity.market === target.market;
+}

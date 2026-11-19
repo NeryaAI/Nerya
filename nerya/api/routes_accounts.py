@@ -43,7 +43,7 @@ from ..security.secrets import SecretVault
 from ..trading import account_intake as account_intake_mod
 from ..trading import accounts as accounts_mod
 from ..trading import account_proposals as account_proposals_mod
-from ..trading.account_snapshots import equity_curve as _account_equity_curve, latest_snapshot
+from ..trading.account_snapshots import equity_curve as _account_equity_curve, latest_snapshot, position_instruments, display_snapshot
 from ..trading.capital import CapitalReservationStore
 from ..trading.executors.orchestrator import ExecutorOrchestrator
 from ..trading.order_tracker import OrderTracker
@@ -253,46 +253,17 @@ def _account_summary(
     positions = PositionBook(paths)
     protections = ProtectionStore(paths)
     orchestrator = ExecutorOrchestrator(client.config)
-    snapshot = latest_snapshot(paths, profile.id)
+    snapshot = display_snapshot(paths, profile, latest_snapshot(paths, profile.id))
     open_positions = positions.open_positions(account_id=profile.id)
     # Post-v6 the open_positions list is one merged row per
     # (account, market). Each row carries a ``shares`` array so the
     # dashboard can render the merged top-line *and* the per-strategy
     # breakdown without a second round-trip.
     open_positions_payload: list[dict] = []
-    for pos in open_positions:
-        row = pos.asdict()
-        try:
-            shares = positions.list_shares(pos.position_id)
-        except Exception:
-            shares = []
-        merged_size = float(pos.size_base or 0.0)
-        merged_unrealized = float(pos.unrealized_pnl_usd or 0.0)
-        mark_value = float(pos.mark_price or pos.avg_entry_price or 0.0)
-        share_rows: list[dict] = []
-        for share in shares:
-            share_size = float(share.size_share_base or 0.0)
-            # Pro-rata so sum-of-shares reconciles to the merged
-            # unrealized — see ``trading.portfolio._shares_for_position``
-            # for the same invariant.
-            pro_rata = (
-                (share_size / merged_size) * merged_unrealized
-                if merged_size else 0.0
-            )
-            share_rows.append({
-                "strategy_id": share.strategy_id,
-                "size_base": share_size,
-                "avg_entry_price": float(share.avg_entry_share_price or 0.0),
-                "realized_pnl_usd": float(share.realized_pnl_share_usd or 0.0),
-                "fees_usd": float(share.fees_share_usd or 0.0),
-                "funding_usd": float(share.funding_share_usd or 0.0),
-                "notional_usd": abs(share_size * mark_value),
-                "unrealized_pnl_usd": pro_rata,
-                "opened_at": share.opened_at,
-                "updated_at": share.updated_at,
-            })
-        row["shares"] = share_rows
-        open_positions_payload.append(row)
+    instruments = position_instruments(paths, profile, snapshot)
+    from ..trading.portfolio import _position_book_rows, _marks_by_market, decorate_instrument
+    for row in _position_book_rows(open_positions, _marks_by_market(open_positions, snapshot), paths=paths).values():
+        open_positions_payload.append(decorate_instrument(row, snapshot, kind=profile.kind, instruments=instruments))
     open_protections = protections.list_active(account_id=profile.id)
     active_executors = orchestrator.list_active(account_id=profile.id)
     try:

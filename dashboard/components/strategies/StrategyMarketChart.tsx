@@ -7,7 +7,7 @@ import { ChoiceSelect } from "../ChoiceSelect";
 import { CandleChart } from "../CandleChart";
 import { callApi } from "../../lib/clientApi";
 import type { Candle } from "../../lib/api";
-import { strategyMarketTarget } from "../../lib/strategyLanding";
+import { strategyMarketTarget, strategyMarketResponseMatches } from "../../lib/strategyLanding";
 
 type CandleResult = { candles?: Candle[]; error?: string; market?: string; interval?: string };
 
@@ -17,7 +17,7 @@ export function StrategyMarketChart({ markets }: { markets: string[] }) {
   const market = markets.includes(picked) ? picked : markets[0] || "";
   const [interval, setInterval] = useState("1h");
   const [refresh, setRefresh] = useState(0);
-  const [data, setData] = useState<{ key: string; candles: Candle[]; updated: string } | null>(null);
+  const [data, setData] = useState<{ key: string; candles: Candle[]; updated: string; priceSamples: boolean } | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(false);
   const key = `${market}:${interval}`;
@@ -40,11 +40,12 @@ export function StrategyMarketChart({ markets }: { markets: string[] }) {
           method: "POST", body: { ...target, interval, count: 180 }, signal: controller.signal,
         });
         if (result.error) throw new Error(result.error);
-        if (result.market && result.market !== target.market || result.interval && result.interval !== interval) throw new Error(t("marketMismatch"));
+        if (!strategyMarketResponseMatches(target, result.market) || result.interval && result.interval !== interval) throw new Error(t("marketMismatch"));
         const candles = (result.candles || []).filter((row) =>
           [row.ts, row.open, row.high, row.low, row.close].every(Number.isFinite)
           && row.high >= Math.max(row.open, row.close) && row.low <= Math.min(row.open, row.close));
-        if (!disposed) { setData({ key, candles, updated: new Date().toLocaleTimeString() }); setError(""); }
+        const priceSamples = candles.length > 0 && candles.every(row => row.data_kind === "price_samples");
+        if (!disposed) { setData({ key, candles, updated: new Date().toLocaleTimeString(), priceSamples }); setError(""); }
       } catch (reason) {
         if (!disposed) setError(String(reason));
       } finally {
@@ -57,7 +58,7 @@ export function StrategyMarketChart({ markets }: { markets: string[] }) {
   }, [market, interval, refresh, key, t]);
 
   const current = data?.key === key ? data : null;
-  return <Card title={t("markets")} description={t("marketDescription")}>
+  return <Card title={t(current?.priceSamples ? "priceSamples" : "markets")} description={t(current?.priceSamples ? "priceSamplesDescription" : "marketDescription")}>
     <section data-testid="strategy-market-chart" className="space-y-3">
       {markets.length ? <>
         <div className="flex flex-wrap items-center gap-3">

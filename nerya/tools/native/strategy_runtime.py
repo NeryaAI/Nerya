@@ -734,6 +734,8 @@ STRATEGY_RUN_HISTORY_SCHEMA: dict[str, Any] = {
     "type": "object",
     "properties": {
         "strategy_id": {"type": "string"},
+        "run_id": {"type": "string", "description": "Check a specific admitted Agent task without executing another tick."},
+        "include_agent_runs": {"type": "boolean", "description": "Include recent Agent task receipts for this strategy and caller."},
         "limit": {"type": "integer", "minimum": 1, "default": 50},
     },
     "required": ["strategy_id"],
@@ -2061,6 +2063,8 @@ def _strategy_submit_proposal_handler(
     target = next((p for p in list_proposals(config.paths) if p.id == proposal_id), None)
     if target is None or target.kind != "strategy_package_proposal":
         return _usage_error(call, "strategy package proposal not found")
+    if target.state not in {'draft', 'pending_review', 'proposed'}:
+        return _usage_error(call, f"proposal is no longer editable: {target.state}")
     try:
         sid, files = _read_proposal_files(config.paths, proposal_id)
         if not files:
@@ -2073,6 +2077,18 @@ def _strategy_submit_proposal_handler(
         return _execution_error(call, f"failed to inspect proposal: {type(exc).__name__}: {exc}")
     (target.path / "validation_report.json").write_text(
         json.dumps(validation, indent=2, ensure_ascii=False), encoding="utf-8")
+    from ...evolution.candidate_bundle import verify_candidate_bundle
+    try:
+        bundle = json.loads((target.path / 'candidate_bundle.json').read_text())
+    except (OSError, ValueError):
+        return _execution_error(call, 'candidate review bundle missing or invalid')
+    verdict = verify_candidate_bundle(config.paths.root, target.path, bundle)
+    if not verdict['ok']:
+        changed = set(verdict.get('mismatches') or {})
+        if not changed or not changed <= {'after_digest', 'validation_report_digest'}:
+            return _execution_error(call, f"candidate review conflict: {verdict['reason']}")
+        if not reseal_candidate_bundle(config.paths, proposal_id, note='submitted edited candidate for review'):
+            return _execution_error(call, 'could not bind the edited candidate to review')
     set_state(config.paths, proposal_id, "pending_review",
               note=str(args.get("note") or "").strip() or "submitted for review")
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, semantic_success=True, data={
@@ -2979,6 +2995,7 @@ def strategy_run_tick_handler(
     skills: Any = None,
     tool_registry: Any = None,
     executor: Any = None,
+    actor_id: str | None = None,
 ) -> ToolResult:
     args = call.arguments or {}
     sid = (args.get("strategy_id") or "").strip()
@@ -2992,8 +3009,10 @@ def strategy_run_tick_handler(
         executor=executor,
     )
     try:
-        record = runner.run_tick(
+        from ...sdk.strategy_api import StrategyAPI
+        record = StrategyAPI(config, skills).run_tick(
             sid,
+            native_runner=runner, native_actor=actor_id,
             trigger_payload=dict(args.get("trigger_payload") or {}) or None,
             trigger_event_id=(args.get("trigger_event_id") or None),
             operator=(args.get("operator") or None),
@@ -3010,9 +3029,11 @@ def strategy_run_tick_handler(
         return _execution_error(
             call, f"runner failed: {type(exc).__name__}: {exc}"
         )
-    return ToolResult.from_json(
-        tool_use_id=call.id, name=call.name, data=record.asdict()
-    )
+    if record.get('admission_only') and record.get('run_id'):
+        record = {key: value for key, value in record.items() if key != 'run'}
+        record['next_read'] = {'tool': 'strategy_run_history', 'arguments': {
+            'strategy_id': sid, 'run_id': record['run_id']}}
+    return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=record)
 
 
 def strategy_kill_switch_handler(
@@ -3052,19 +3073,41 @@ def strategy_kill_switch_handler(
 
 
 def strategy_run_history_handler(
-    call: ToolCall, *, config: Config
+    call: ToolCall, *, config: Config, actor_id: str | None = None
 ) -> ToolResult:
     args = call.arguments or {}
     sid = (args.get("strategy_id") or "").strip()
     if not sid:
         return _usage_error(call, "strategy_id is required")
-    limit = max(1, int(args.get("limit") or 50))
+    def summary(run):
+        return {key: run.get(key) for key in ('run_id', 'command_id', 'admission_status',
+                'execution_status', 'business_status', 'reason', 'error')}
+
+    limit = max(1, int(args.get('limit') or 50))
+    agent_runs = {}
+    if args.get('run_id') or args.get('include_agent_runs'):
+        from ...agent.command_store import CommandError
+        from ...agent.task_runs import task_runs
+        if not actor_id:
+            return _usage_error(call, 'task receipt requires a scoped actor')
+        try:
+            store = task_runs(config)
+            if args.get('run_id'):
+                run = store.get(str(args['run_id']), actor=actor_id)
+                if run['task_kind'] != 'strategy_agent' or run['task_id'] != sid:
+                    return _usage_error(call, 'run does not belong to this strategy')
+                return ToolResult.from_json(tool_use_id=call.id, name=call.name,
+                                            data={'strategy_id': sid, 'run': summary(run)})
+            page = store.list(actor=actor_id, task_kind='strategy_agent', task_id=sid, limit=limit)
+            agent_runs = {'agent_runs': [summary(run) for run in page['runs']]}
+        except CommandError as exc:
+            return _usage_error(call, str(exc))
     store = StrategyRunStore(config.paths, sid)
     rows = [r.asdict() for r in store.list(limit=limit)]
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
-        data={"strategy_id": sid, "count": len(rows), "runs": rows},
+        data={"strategy_id": sid, "count": len(rows), "runs": rows, **agent_runs},
     )
 
 

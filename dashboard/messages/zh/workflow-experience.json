@@ -9,6 +9,8 @@
     "runtime": "运行详情",
     "markets": "监控品种 K 线",
     "marketDescription": "行情来自配置的交易场所；没有数据时明确提示，不使用模拟价格替代。",
+    "priceSamples": "市场价格采样",
+    "priceSamplesDescription": "来自配置来源的价格采样，并非成交 OHLCV K 线；成交量不可用。",
     "market": "监控品种",
     "interval": "K 线周期",
     "marketMismatch": "返回的品种或周期与当前选择不一致。",

@@ -343,6 +343,9 @@ def test_strategy_subagents_creates_an_explicit_native_scope(monkeypatch, tmp_pa
 
 
 def test_strategy_run_tick_handler_forwards_parent_native_deps(monkeypatch, tmp_path):
+    from test_strategy_agent_task_chain import _write_tick_strategy
+    config = Config(paths=WorkspacePaths(tmp_path), data={})
+    _write_tick_strategy(config, 'alpha')
     captured: dict[str, object] = {}
 
     class FakeRecord:
@@ -365,7 +368,7 @@ def test_strategy_run_tick_handler_forwards_parent_native_deps(monkeypatch, tmp_
             id="strategy-run-native",
             arguments={"strategy_id": "alpha"},
         ),
-        config=Config(paths=WorkspacePaths(tmp_path), data={}),
+        config=config,
         skills=SimpleNamespace(),
         tool_registry=registry,
         executor=executor,

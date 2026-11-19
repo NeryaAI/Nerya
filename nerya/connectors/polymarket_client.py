@@ -37,13 +37,37 @@ BalanceAllowanceParams = PartialCreateOrderOptions
 TradeParams = PartialCreateOrderOptions
 OrderPayload = PartialCreateOrderOptions
 OpenOrderParams = PartialCreateOrderOptions
-AssetType = SimpleNamespace(COLLATERAL="COLLATERAL", CONDITIONAL="CONDITIONAL")
+AssetType = SimpleNamespace(COLLATERAL="COLLATERAL", CONDITIONAL="CONDITIONAL", CONDITIONAL_V2="CONDITIONAL-V2")
+
+
+def asset_protocol(asset_id):
+    from polymarket._internal.protocol import is_v2_position_id
+    return 'v2' if is_v2_position_id(asset_id) else 'v1'
+
+
+def share_step(tick_size):
+    from polymarket._internal.actions.orders.context import resolve_rounding_config
+    return Decimal(1).scaleb(-resolve_rounding_config(Decimal(str(tick_size))).size)
 
 
 def wire(value):
     if hasattr(value, "model_dump"):
         return value.model_dump(mode="json", by_alias=True)
     return value
+
+
+def wire_pages(pages):
+    rows=[]; seen=set()
+    for index,page in enumerate(pages):
+        if page.limit_reached or index>=100:
+            raise TradingError('prediction SDK collection is incomplete')
+        rows.extend(wire(item) for item in page.items)
+        if not page.has_more:
+            return rows
+        if not page.next_cursor or page.next_cursor in seen:
+            raise TradingError('prediction SDK pagination is inconsistent')
+        seen.add(page.next_cursor)
+    return rows
 
 
 class ClobClient:
@@ -89,6 +113,12 @@ class ClobClient:
                                               size=Decimal(str(args.size)), side=args.side,
                                               expiration=args.expiration or None)
 
+    def create_market_order(self, args, *, order_type):
+        if args.side != 'SELL':
+            raise TradingError('instant BUY requires collateral-budget semantics; this interface accepts shares')
+        return self.client.create_market_order(asset_id=args.token_id, side='SELL', shares=Decimal(str(args.size)),
+                                               min_price=Decimal(str(args.price)), order_type=order_type)
+
     def signed_order_hash(self, signed):
         value = getattr(self.client, "nerya_order_hashes", {}).get(signed)
         if not value:
@@ -100,6 +130,8 @@ class ClobClient:
         return self.client.signer
 
     def post_order(self, signed, *, order_type="GTC", post_only=False):
+        if str(signed.side).upper() == 'BUY' and order_type in ('FOK', 'FAK'):
+            raise TradingError('share-sized BUY cannot be converted to an immediate collateral-budget order')
         response = wire(self.client.post_order(replace(signed, order_type=order_type, post_only=post_only)))
         return {**response, "orderID": response.get("order_id"), "success": response.get("ok", False),
                 "errorMsg": response.get("message") if response.get("ok") is False else None}
@@ -112,10 +144,10 @@ class ClobClient:
 
     def get_open_orders(self, params=None):
         values = self.client.list_open_orders(asset_id=getattr(params, "asset_id", None), market=getattr(params, "market", None))
-        return [wire(item) for item in values]
+        return wire_pages(values)
 
     def get_trades(self, params=None):
-        return [wire(item) for item in self.client.list_account_trades(id=getattr(params, "id", None))]
+        return wire_pages(self.client.list_account_trades(id=getattr(params, "id", None)))
 
     def cancel_order(self, payload):
         return wire(self.client.cancel_order(order_id=payload.orderID))

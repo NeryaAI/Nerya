@@ -223,7 +223,8 @@ class StrategyMarket:
     config: Config | None = field(default=None, repr=False)
     _connector_cache: dict[str, Any] = field(default_factory=dict, init=False, repr=False)
 
-    def _connector_for(self, market: str, *, account: Optional[str] = None) -> Any:
+    def _connector_for(self, market: str, *, account: Optional[str] = None,
+                       public_capability: Optional[str] = None) -> Any:
         from ..trading.accounts import load_accounts as _load_accounts
 
         account_id = account or (self.accounts[0] if self.accounts else None)
@@ -231,15 +232,26 @@ class StrategyMarket:
             raise StrategyRuntimeError(
                 "no account configured; set manifest.accounts before calling ctx.market"
             )
-        cache_key = f"{account_id}::{market}"
-        if cache_key in self._connector_cache:
-            return self._connector_cache[cache_key]
         accounts = _load_accounts(self.paths)
         if account_id not in accounts:
             raise StrategyRuntimeError(f"unknown account_id: {account_id}")
+        cfg = accounts[account_id].connector_cfg()
+        cache_key = f"{account_id}::{market}"
+        registry_key = account_id
+        if public_capability and ':' in market:
+            from ..connectors.provider_spec import get_registry
+            spec = get_registry(self.paths.root).find(market.split(':', 1)[0])
+            if spec and spec.supports.get(f'public_{public_capability}') is True:
+                # Paper execution can use a mock account; its mock prices must
+                # not replace a venue's explicitly advertised public data.
+                options = (cfg.get('provider_config') or {}) if spec.matches(accounts[account_id].venue) else {}
+                cfg = {'venue': spec.id, 'live': False, 'provider_config': options}
+                registry_key = cache_key = f'public:{spec.id}:{account_id}'
+        if cache_key in self._connector_cache:
+            return self._connector_cache[cache_key]
         try:
             registry = self._registry_factory()
-            conn = registry.get(account_id, accounts[account_id].connector_cfg())
+            conn = registry.get(registry_key, cfg)
         except Exception as exc:  # connector build / vault failure
             raise StrategyRuntimeError(
                 f"connector unavailable for account={account_id} market={market}: {exc}"
@@ -301,7 +313,7 @@ class StrategyMarket:
     def mark_price(self, market: str, *, account: Optional[str] = None) -> float:
         if market.split(':',1)[0].upper() in {'ONCHAIN','BYREAL_ONCHAIN','BYREAL','OKX_ONCHAIN','BITGET_ONCHAIN'}:
             return float(self.ticker(market,account=account)['last'])
-        conn = self._connector_for(market, account=account)
+        conn = self._connector_for(market, account=account, public_capability='ticker')
         try:
             return float(conn.get_mark_price(market))
         except Exception as exc:
@@ -316,7 +328,7 @@ class StrategyMarket:
         it without breaking strategy code.
         """
 
-        conn = self._connector_for(market, account=account)
+        conn = self._connector_for(market, account=account, public_capability='order_book')
         try:
             book = conn.get_order_book(market)
         except Exception as exc:

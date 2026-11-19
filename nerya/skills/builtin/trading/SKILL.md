@@ -2,7 +2,7 @@
 ---
 name: trading
 description: "Use to size positions, place trades, review portfolio state, manage open risk, or move strategies through lifecycle gates. The agent can never switch live trading on: 'go live / 打开 live' requests get an explicit reject — live stays off, offer paper mode — never a strategy proposal as a substitute."
-version: 0.2.0
+version: 0.4.0
 license: MIT
 author: Nerya
 ---
@@ -17,6 +17,11 @@ to Byreal or infer LP support from a swap router's name.
 
 Use only after fresh market/account context exists. Live trading still
 requires runtime flags and approval gates.
+For prediction orders, load adapter's `references/prediction-markets.md` before
+sizing: share-sized BUY supports resting limits; immediate BUY budget semantics
+cannot preserve a requested share cap. Retain the requested intent on rejection.
+For prediction strategies in Agent mode, follow strategy_author's
+`references/prediction-strategies.md` to run once and check the admitted task and fills.
 
 ## Flow
 

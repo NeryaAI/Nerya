@@ -183,6 +183,8 @@ export type Api = typeof api;
 /* ---------------------------------------------------------------- types */
 
 export type Candle = {
+  data_kind?: string;
+  volume_available?: boolean;
   ts: number;
   open: number;
   high: number;
@@ -193,7 +195,22 @@ export type Candle = {
 
 export type EquityPoint = { ts: string; equity_usd: number };
 
+export type PositionInstrument = {
+  type: string;
+  label?: string;
+  outcome?: string;
+  quantity_unit?: string;
+  price_unit?: string;
+  asset_id?: string;
+  protocol_version?: string;
+  settlement_status?: string;
+  data_status: "available" | "stale" | "unavailable";
+  as_of?: number;
+};
+
 export type PortfolioPosition = {
+  instrument?: PositionInstrument;
+  shares?: { strategy_id: string; size_base: number }[];
   position_id?: string;
   account_id: string;
   strategy_id?: string;
@@ -202,10 +219,10 @@ export type PortfolioPosition = {
   size_base?: number;
   avg_entry_price?: number;
   avg_price?: number;
-  mark_price?: number;
-  market_value_usd?: number;
-  notional_usd?: number;
-  unrealized_pnl_usd?: number;
+  mark_price?: number | null;
+  market_value_usd?: number | null;
+  notional_usd?: number | null;
+  unrealized_pnl_usd?: number | null;
   realized_pnl_usd?: number;
   side?: string;
 };
@@ -214,26 +231,30 @@ export type PortfolioSummary = {
   accounts: {
     id: string;
     mode: string;
+    kind?: string;
     live_trading_enabled: boolean;
-    cash_usd: number;
-    equity_usd: number;
+    cash_usd: number | null;
+    equity_usd: number | null;
+    available_usd?: number | null;
+    locked_usd?: number | null;
     positions: Record<string, PortfolioPosition>;
     trade_count: number;
-    fees_paid_usd: number;
+    fees_paid_usd: number | null;
+    fees_status?: "known" | "unknown";
   }[];
-  totals: { cash_usd: number; equity_usd: number };
+  totals: { cash_usd: number | null; equity_usd: number | null };
 };
 
 export type PortfolioPnl = {
   initial_equity_usd?: number;
-  equity_usd: number;
-  realized_usd: number;
-  realized_net_usd?: number;
+  equity_usd: number | null;
+  realized_usd: number | null;
+  realized_net_usd?: number | null;
   realized_gross_usd?: number;
-  unrealized_usd?: number;
-  fees_usd?: number;
+  unrealized_usd?: number | null;
+  fees_usd?: number | null;
   funding_usd?: number;
-  total_pnl_usd?: number;
+  total_pnl_usd?: number | null;
 };
 
 export type StrategyCard = {

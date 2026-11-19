@@ -4,7 +4,7 @@ import pytest
 from eth_abi import encode
 from eth_utils import keccak
 
-from nerya.connectors.prediction_fees import EVENT, confirmed_order_fees
+from nerya.connectors.prediction_fees import EVENT, IMPLEMENTATION_SLOT, confirmed_order_fees
 from nerya.core.errors import TradingError
 
 pytestmark=pytest.mark.smoke
@@ -96,3 +96,35 @@ def test_connector_uses_chain_notional_and_cumulative_fee(monkeypatch,tmp_path):
     ack=p.get_order(market=TOKEN_ID,order_id=HASH)
     assert ack.fee_usd==.04 and ack.avg_price==pytest.approx(1.91/4)
     assert ack.raw['fee_status']=='chain_verified'
+
+
+@pytest.mark.parametrize('side',['buy','sell'])
+@pytest.mark.parametrize('problem',[None,'unreviewed','slot','implementation','code','upgrade','historical_failure'])
+def test_v3_fees_bind_proxy_and_implementation_at_receipt_block(side,problem):
+    rpc=Rpc(side); calls=[]
+    implementation='0x'+'4'*40
+    implementation_code='0x6003'
+    config={EXCHANGE:{'address':implementation,'code_hash':'0x'+keccak(bytes.fromhex(implementation_code[2:])).hex()}}
+    if problem=='unreviewed':config={}
+    def proxy_rpc(method,params):
+        calls.append((method,params))
+        if method=='eth_getStorageAt':
+            assert params==[EXCHANGE,IMPLEMENTATION_SLOT,'0x64']
+            if problem=='historical_failure':raise RuntimeError('historical state unavailable')
+            return '0x'+'0'*64 if problem=='slot' else '0x'+'0'*24+('5'*40 if problem=='implementation' else implementation[2:])
+        if method=='eth_getCode' and params[0]==implementation:
+            assert params[1]=='0x64'
+            return '0x6004' if problem=='code' else implementation_code
+        if method=='eth_getLogs':
+            assert params[0]['blockHash']==BLOCK
+            return [{}] if problem=='upgrade' else []
+        return rpc(method,params)
+    def run():
+        return confirmed_order_fees(proxy_rpc,transactions=[TX],order_hash=HASH,owner=OWNER,token_id=TOKEN,
+            side=side,filled_shares=10,exchange_code_hashes={EXCHANGE:CODE_HASH},protocol_version='v2',exchange_implementations=config)
+    if problem:
+        with pytest.raises(TradingError):run()
+    else:
+        result=run()
+        assert result['fee_collateral']=='0.1' and result['protocol_version']=='v2'
+        assert any(method=='eth_getStorageAt' for method,_ in calls)

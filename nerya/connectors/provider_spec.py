@@ -595,6 +595,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
             max_slippage_bps=int(options.get('max_slippage_bps',50)),
             settlement_rpc_url=str(options.get('settlement_rpc_url') or ''),
             settlement_exchange_code_hashes=dict(options.get('settlement_exchange_code_hashes') or {}),
+            settlement_exchange_implementations=dict(options.get('settlement_exchange_implementations') or {}),
             settlement_confirmations=int(options.get('settlement_confirmations',3)),
         )
 
@@ -772,11 +773,13 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         links={"docs": "https://docs.polymarket.com/",
                "api": "https://docs.polymarket.com/developers/CLOB/overview"},
         description="Prediction outcome shares on Polygon, collateral pUSD. "
-                    "Explicit token or slug#outcome; signed market/limit orders, cancel and confirmed-fill polling.",
+                    "Explicit asset or slug#outcome; share-sized limit BUY, market/limit SELL, cancel and confirmed-fill polling.",
         instrument_types=('prediction_outcome',),
         supports={"ticker": True, "klines": True, "order_book": True,
                   "balances": True, "place_order": True,'cancel_order':True,'get_order':True,
-                  'market_order':True,'limit_order':True,'native_tp_sl':False},
+                  'public_ticker':True,'public_klines':True,'public_order_book':True,
+                  'market_order':True,'limit_order':True,'market_buy':False,'market_sell':True,
+                  'native_tp_sl':False,'instrument_metadata':True},
         credential_fields=(
             CredentialField(
                 name="api_key", label="CLOB API Key", kind="secret",

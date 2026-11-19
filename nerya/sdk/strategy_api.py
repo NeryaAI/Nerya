@@ -466,10 +466,17 @@ class StrategyAPI:
         operator: Optional[str] = None,
         note: str = "",
         mode_override: Optional[str] = None,
+        native_runner: Optional[StrategyRunner] = None,
+        native_actor: Optional[str] = None,
     ) -> dict[str, Any]:
         from ..strategies.agent_task_mode import agent_task_requested
         package=load_package(self.config.paths,strategy_id)
         if agent_task_requested(package.manifest):
+            if native_runner is not None:
+                if not native_actor or package.manifest.mode not in {'paper', 'shadow'}:
+                    raise TradingError('assistant Agent ticks require a scoped actor and a paper or shadow strategy')
+                if StrategyKillSwitch(self.config.paths, strategy_id).get().asserted:
+                    raise TradingError('strategy kill switch is asserted')
             if mode_override and mode_override!=package.manifest.mode:
                 from ..agent.command_store import CommandError
                 raise CommandError('agent_task_mode_override_requires_isolated_debug',403)
@@ -479,7 +486,7 @@ class StrategyAPI:
             event=TriggerEvent.new(source='user_command',kind='strategy.manual',target='skill:strategy.agent_task',
                 strategy_id=strategy_id,payload=dict(trigger_payload or {}),**({'event_id':trigger_event_id} if trigger_event_id else {}))
             route=RouterResult(event.event_id,'routed',event.target,None,strategy_id)
-            result=admit_strategy(self.config,event,route,actor_id=operator or self.config.get('runtime.financial_actor_id'))
+            result=admit_strategy(self.config,event,route,actor_id=native_actor or operator or self.config.get('runtime.financial_actor_id'))
             return {**result.result,'status':result.status,'admission_only':True}
         if trigger_event_id:
             from ..trading.live_trigger import live_trigger_denial
@@ -489,7 +496,7 @@ class StrategyAPI:
             denial = live_trigger_denial(self.config, strategy_id, mode_override, trigger_payload, trigger_event_id)
             if denial:
                 return denial
-        runner = StrategyRunner(config=self.config, skills=self.skills)
+        runner = native_runner or StrategyRunner(config=self.config, skills=self.skills)
         record = runner.run_tick(
             strategy_id,
             trigger_payload=trigger_payload,
