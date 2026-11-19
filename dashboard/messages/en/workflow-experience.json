@@ -9,6 +9,8 @@
     "runtime": "Run details",
     "markets": "Monitored markets",
     "marketDescription": "Candles from the configured venue. Missing data is never replaced with simulated prices.",
+    "priceSamples": "Market price samples",
+    "priceSamplesDescription": "Sampled prices from the configured source. These are not traded OHLCV bars; trading volume is unavailable.",
     "market": "Market",
     "interval": "Timeframe",
     "marketMismatch": "The returned market or timeframe does not match this selection.",

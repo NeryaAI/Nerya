@@ -97,7 +97,13 @@ def test_builtin_skill_frontmatter_has_no_routing_extensions() -> None:
         assert set(metadata) <= {"nerya"}, md
         grouping = metadata.get("nerya", {})
         assert isinstance(grouping, dict), md
-        assert set(grouping) <= {"catalog_parent", "catalog_group"}, md
+        assert set(grouping) <= {"catalog_parent", "catalog_group", "script_policy"}, md
+        if 'script_policy' in grouping:
+            policy = grouping['script_policy']
+            assert set(policy) == {'read_only'}, md
+            assert isinstance(policy['read_only'], list), md
+            for filename in policy['read_only']:
+                assert Path(filename).name == filename and (skill_dir/'scripts'/filename).is_file(), md
         if "catalog_group" in grouping:
             assert grouping["catalog_group"] in {"core", "professional"}, md
         if "catalog_parent" in grouping:

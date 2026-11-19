@@ -2,7 +2,7 @@
 ---
 name: markets
 description: "Use for current or historical market data, order books, symbol metadata, wallet balances, on-chain activity, and venue capability reads."
-version: 0.1.0
+version: 0.2.0
 license: MIT
 author: Nerya
 metadata:
@@ -62,6 +62,7 @@ actually failed, and then move on or state the limitation.
 
 For wallet/DEX/prediction-market integration failures or adding a provider, load
 `adapter` to inspect the exact binding and public execution contract.
+For prediction outcomes, load `adapter.prediction_market` to interpret IDs, samples and state.
 
 Use a bundled script only for a capability the native tools do not expose and
 only when the operator explicitly requests it; `script_run` may require

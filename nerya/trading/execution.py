@@ -50,6 +50,8 @@ class ExecutionEngine:
     ) -> OrderResult:
         paths = self.config.paths
         profile = get_account_profile(paths, intent.account_id)
+        from ..connectors.module_policy import require_order_modules
+        require_order_modules(paths.root, profile, intent.market)
         if profile.is_real_money:
             raise TradingError(
                 "legacy ExecutionEngine cannot execute canary/live accounts; "

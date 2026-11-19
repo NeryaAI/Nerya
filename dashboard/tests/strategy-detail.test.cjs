@@ -8,8 +8,18 @@ for (const extension of ['.ts', '.tsx']) require.extensions[extension] = (module
 }).outputText, filename);
 require.extensions['.css'] = module => { module.exports = new Proxy({}, { get: (_, key) => String(key) }); };
 const { strategyDetailId, parseStrategyDetailId } = require('../lib/strategyDetail.ts');
+const { strategyMarketResponseMatches } = require('../lib/strategyLanding.ts');
 const { replayCandles, replayMarkers, replayTrades, replayNumber, replayTime } = require('../lib/backtestMarket.ts');
 const T = 1700000000;
+
+test('chart identity accepts canonical venue prefixes without accepting another asset or venue', () => {
+  const outcome = {venue:'polymarket',market:'123456789012345678901'};
+  assert.equal(strategyMarketResponseMatches(outcome,'POLYMARKET:123456789012345678901'),true);
+  assert.equal(strategyMarketResponseMatches(outcome,outcome.market),true);
+  assert.equal(strategyMarketResponseMatches(outcome,'POLYMARKET:999'),false);
+  assert.equal(strategyMarketResponseMatches(outcome,'OTHER:123456789012345678901'),false);
+  assert.equal(strategyMarketResponseMatches({venue:'bybit',market:'BTC/USDT:USDT'},'BYBIT:BTC/USDT:USDT'),true);
+});
 const panel = {id:'price:BTC',type:'candlestick',title:'BTC',market:'FIXTURE:BTC',series:[
   {kind:'candles',data:[{time:T,open:100,high:103,low:99,close:102}]},
   {kind:'markers',data:[{id:'trade:0',time:T,shape:'arrowUp'}, {id:'trade:1',time:T,shape:'arrowDown'}, {id:'gbs:0',time:T,kind:'gbs',text:'GBS'}]},

@@ -1,0 +1,49 @@
+"""Candidate contract for a fixed-budget, buy-when-flat script (not a backtest).
+
+Adapt the fixture to the candidate's configured inputs and confirmation schema.
+The healthy-book control must reach submit_intent. Keep the negative cases on
+that same branch and change only the indicated book field.
+"""
+from types import SimpleNamespace as NS
+
+import pytest
+
+from main import run
+from nerya.strategies import ResultBuilder
+
+
+def _tick(book_changes):
+    market, account, now = 'FIXTURE:outcome', 'practice', 1700000000000
+    book = dict(bid=.49, ask=.50, ts_ms=now, size_step='0.01',
+                tick_size='0.01', min_order_size=1)
+    book.update(book_changes)
+    calls, state = [], {}
+
+    def submit(**intent):
+        calls.append(intent)
+        return {'status': 'submitted', 'order_id': 'fixture'}
+
+    ctx = NS(config=NS(markets=[market], accounts=[account], params={
+        'sizing': {'method': 'fixed_usd', 'fixed_usd': 5},
+        'confirmation_agent': 'reviewer'}), trigger={'market': market},
+        clock=NS(now_ms=lambda: now), state=NS(get=state.get, set=state.__setitem__),
+        result=ResultBuilder(), portfolio=NS(position=lambda market: None),
+        market=NS(orderbook=lambda *a, **kw: dict(book),
+                  ticker=lambda *a, **kw: {'mid': .495, 'last': .50}),
+        subagents=NS(run=lambda *a, **kw: {'ok': True, 'output': {
+            'decision': 'BUY', 'confidence': .9, 'drivers': [], 'veto_reason': ''}}),
+        trading=NS(submit_intent=submit))
+    return run(ctx), calls
+
+
+def test_valid_book_reaches_order_branch():
+    _, calls = _tick({})
+    assert len(calls) == 1
+    assert calls[0]['side'] == 'buy' and 0 < calls[0]['size'] * calls[0]['limit_price'] <= 5
+
+
+@pytest.mark.parametrize('field', ['size_step', 'min_order_size'])
+def test_unknown_constraint_prevents_order(field):
+    result, calls = _tick({field: None})
+    assert not calls, f'order submitted without {field}'
+    assert result.status.value in {'hold', 'error'} and result.reason

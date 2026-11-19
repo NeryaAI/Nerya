@@ -192,6 +192,9 @@ class ExchangeProviderSpec:
     revision: str = "builtin"
     venue_family: str = ""
     route_instrument: str = ""
+    module: str = ""
+    order_rules: Callable | None = None  # Lazy provider-owned plan and sizing rules.
+    instrument_defaults: dict[str, str] = field(default_factory=dict)
 
     def matches(self, venue: str) -> bool:
         v = (venue or "").lower()
@@ -212,7 +215,7 @@ class ExchangeProviderSpec:
             "instrument_types": list(self.instrument_types),
             "venue_family": self.venue_family, "route_instrument": self.route_instrument,
             "credential_fields": [f.to_dict() for f in self.credential_fields],
-            "revision": self.revision,
+            "revision": self.revision, "module": self.module or None,
         }
 
 
@@ -341,7 +344,7 @@ class ExchangeProviderRegistry:
                 + ", ".join(sorted({s.id for s in self._specs}))
             )
         connector = spec.factory(
-            account_cfg, workspace=workspace, vault_passphrase=vault_passphrase,
+            account_cfg, workspace=root, vault_passphrase=vault_passphrase,
         )
         if spec.id.startswith("user:") and spec.kind in {"cex","options","futures","derivatives"}:
             from .ccxt_adapter import CcxtConnector
@@ -502,7 +505,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     from .bsc_native import BSCNative
     from .mock_chain import MockChain
     from .mock_exchange import MockExchange
-    from .polymarket import PolymarketConnector
+    from .prediction import prediction_spec
     from .solana_native import SolanaNative
     from .yahoo import YahooFinanceConnector
     from .ibkr import IBKRConnector, IBKRCredentials
@@ -581,22 +584,6 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
     def _yahoo(cfg, **_kw):
         timeout = float(cfg.get("timeout_s") or 12.0)
         return YahooFinanceConnector(timeout=timeout)
-
-    def _polymarket(cfg, *, workspace=None, vault_passphrase=None):
-        creds = _resolve_cex_creds(cfg, workspace, vault_passphrase,with_passphrase=True)
-        options={**cfg,**dict(cfg.get('provider_config') or {})}
-        return PolymarketConnector(
-            credentials=creds, live=bool(cfg.get("live", False)),
-            clob_url=options.get("clob_url") or "https://clob.polymarket.com",
-            gamma_url=options.get("gamma_url") or "https://gamma-api.polymarket.com",
-            data_url=options.get("data_url") or "https://data-api.polymarket.com",
-            workspace=workspace,account_id=str(cfg.get('id') or ''),
-            signature_type=int(options.get('signature_type') or 0),funder=str(options.get('funder') or options.get('wallet_address') or ''),
-            max_slippage_bps=int(options.get('max_slippage_bps',50)),
-            settlement_rpc_url=str(options.get('settlement_rpc_url') or ''),
-            settlement_exchange_code_hashes=dict(options.get('settlement_exchange_code_hashes') or {}),
-            settlement_confirmations=int(options.get('settlement_confirmations',3)),
-        )
 
     def _bsc(cfg, *, workspace=None, vault_passphrase=None):
         rpc = cfg.get("rpc_url") or "https://bsc-dataseed.binance.org"
@@ -762,40 +749,7 @@ def _register_builtins(reg: ExchangeProviderRegistry) -> None:
         instrument_types=("spot", "equity", "etf", "index", "fx"),
         credential_fields=(),
     ))
-    reg.register(ExchangeProviderSpec(
-        id="polymarket", label="Polymarket (CLOB v2)",
-        kind="prediction_market", runtime="python",
-        aliases=("polymarket_v2", "pm"), factory=_polymarket,
-        install_hint="pip install 'polymarket-client==0.12.0' (Python >=3.11)",
-        install_command="pip install 'polymarket-client==0.12.0'",
-        docs_url="https://docs.polymarket.com/developers/CLOB/overview",
-        links={"docs": "https://docs.polymarket.com/",
-               "api": "https://docs.polymarket.com/developers/CLOB/overview"},
-        description="Prediction outcome shares on Polygon, collateral pUSD. "
-                    "Explicit token or slug#outcome; signed market/limit orders, cancel and confirmed-fill polling.",
-        instrument_types=('prediction_outcome',),
-        supports={"ticker": True, "klines": True, "order_book": True,
-                  "balances": True, "place_order": True,'cancel_order':True,'get_order':True,
-                  'market_order':True,'limit_order':True,'native_tp_sl':False},
-        credential_fields=(
-            CredentialField(
-                name="api_key", label="CLOB API Key", kind="secret",
-                sensitive=True, required=True,
-                description="CLOB L2 API key, not a wallet address.",
-                vault_scope="exchange",
-            ),
-            CredentialField(
-                name="api_secret", label="CLOB API Secret",
-                kind="secret", required=True,
-                description="CLOB L2 HMAC secret, separate from private_key.",
-                vault_scope="exchange",
-            ),
-            CredentialField(name='api_passphrase',label='CLOB API Passphrase',kind='secret',required=True,vault_scope='exchange'),
-            CredentialField(name='private_key',label='Polygon signer private key',kind='secret',required=True,vault_scope='exchange'),
-            CredentialField(name='funder',label='Funder / proxy wallet',kind='public',sensitive=False,required=False),
-            CredentialField(name='signature_type',label='Signature type (0/1/2/3)',kind='public',sensitive=False,required=False),
-        ),
-    ))
+    reg.register(prediction_spec())
     reg.register(ExchangeProviderSpec(
         id="bsc", label="BSC (PancakeSwap)", kind="dex", runtime="python",
         aliases=("bnb", "binance_chain", "pancakeswap"), factory=_bsc,

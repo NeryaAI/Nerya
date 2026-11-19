@@ -32,6 +32,8 @@ import json
 import logging
 import time
 from dataclasses import asdict, dataclass, field
+from functools import lru_cache
+from pathlib import Path
 from typing import Any, Literal
 
 from ..core.config import Config
@@ -54,6 +56,12 @@ SnapshotHealth = Literal["ok", "degraded", "stale", "auth_error", "rate_limited"
 # ``trading.snapshot.max_age_seconds`` in nerya.yml.
 DEFAULT_MAX_AGE_S = 60
 _USD_STABLES = {"USDT", "USDC", "BUSD", "FDUSD", "USD", "TUSD", "DAI", "PUSD"}
+
+
+def usd_cash_value(amounts: dict[str, float]) -> float | None:
+    """Shared nominal cash valuation; an unpriced collection is not zero."""
+    known = [float(value) for asset, value in amounts.items() if asset.upper() in _USD_STABLES]
+    return sum(known) if known or not amounts else None
 
 
 @dataclass
@@ -116,6 +124,8 @@ class AccountSnapshot:
             "free_usd": self.free_usd,
             "available_usd": self.available_usd,
             "positions_value_usd": self.positions_value_usd,
+            "cash_usd": usd_cash_value(self.cash_by_asset),
+            "locked_usd": usd_cash_value(self.locked_by_asset),
         })
         return data
 
@@ -321,9 +331,8 @@ def _position_book_marks(paths: WorkspacePaths, account_id: str, *, readonly=Fal
 
         marks: dict[str, float] = {}
         for pos in PositionBook(paths, readonly=readonly).open_positions(account_id=account_id):
-            mark = float(pos.mark_price or 0.0)
-            if mark > 0:
-                marks[pos.market] = mark
+            if pos.mark_price is not None:
+                marks[pos.market] = float(pos.mark_price)
         return marks
     except Exception:  # pragma: no cover - read-model best effort
         log.debug("position mark lookup failed for account %s", account_id, exc_info=True)
@@ -339,10 +348,10 @@ def _paper_position_totals(
     for market, pos in positions.items():
         size = float((pos or {}).get("size") or 0.0)
         avg = float((pos or {}).get("avg_price") or 0.0)
-        mark = float(marks.get(market, avg) or avg or 0.0)
+        mark = float(marks.get(market, avg))
         if size and mark:
             market_value += abs(size * mark)
-        if size and avg and mark:
+        if size and avg:
             unrealized += (mark - avg) * size
     return market_value, unrealized
 
@@ -384,12 +393,8 @@ def _paper_book_position_totals(
         avg = float(getattr(pos, "avg_entry_price", 0.0) or 0.0)
         market = str(getattr(pos, "market", "") or "")
         position_id = str(getattr(pos, "position_id", "") or "")
-        mark = float(
-            marks.get(market)
-            or getattr(pos, "mark_price", None)
-            or avg
-            or 0.0
-        )
+        mark_value = marks.get(market, getattr(pos, "mark_price", None))
+        mark = float(avg if mark_value is None else mark_value)
         if size and mark:
             signed_value += size * mark
         if shares_by_position is not None and position_id in shares_by_position:
@@ -399,7 +404,7 @@ def _paper_book_position_totals(
                     gross_value += abs(sh_size * mark)
         elif size and mark:
             gross_value += abs(size * mark)
-        if size and avg and mark:
+        if size and avg:
             side = str(getattr(pos, "side", "") or "").lower()
             side_factor = -1.0 if side == "short" or size < 0 else 1.0
             unrealized += (mark - avg) * abs(size) * side_factor
@@ -461,10 +466,10 @@ def _paper_snapshot(
     effective_marks = dict(_position_book_marks(paths, profile.id, readonly=readonly))
     for key, value in (marks or {}).items():
         try:
-            mark = float(value or 0.0)
+            mark = float(value)
         except (TypeError, ValueError):
             continue
-        if mark > 0:
+        if mark >= 0:
             effective_marks[str(key)] = mark
     book_positions = _position_book_open(paths, profile.id, readonly=readonly)
     if book_positions:
@@ -494,7 +499,7 @@ def _paper_snapshot(
         for market, pos in legacy_only.items():
             size = float((pos or {}).get("size") or 0.0)
             avg = float((pos or {}).get("avg_price") or 0.0)
-            mark = float(effective_marks.get(market, avg) or avg or 0.0)
+            mark = float(effective_marks.get(market, avg))
             nav += size * mark
         open_notional += legacy_notional
         unrealized += legacy_unrealized
@@ -528,6 +533,31 @@ def _paper_snapshot(
             "marks": effective_marks,
         },
     )
+
+
+def display_snapshot(paths: WorkspacePaths, profile: AccountProfile,
+                     snapshot: AccountSnapshot | None) -> AccountSnapshot | None:
+    """Project current paper balances without persisting or changing risk snapshots."""
+    if profile.mode != 'paper':
+        return snapshot
+    from .capital import CapitalReservationStore
+    updated = {pos.market: pos.updated_at for pos in _position_book_open(paths, profile.id, readonly=True)}
+    captured_at = snapshot.ts if snapshot else 0.0
+    captured_marks = {
+        market: mark for market, mark in ((snapshot.meta.get('marks') or {}) if snapshot else {}).items()
+        if captured_at >= updated.get(market, 0)
+    }
+    current = _paper_snapshot(profile, paths, marks=captured_marks, readonly=True)
+    blocked = CapitalReservationStore(paths, readonly=True).total_blocked_usd(profile.id)
+    asset = profile.base_currency.upper()
+    cash = usd_cash_value(current.cash_by_asset)
+    if cash is not None:
+        current.free_by_asset = {asset: max(0.0, cash - blocked)}
+        current.locked_by_asset = {asset: blocked}
+    current.meta['display_projection'] = True
+    if snapshot and snapshot.meta.get('instruments'):
+        current.meta['instruments'] = dict(snapshot.meta['instruments'])
+    return current
 
 
 def _mock_snapshot(profile: AccountProfile) -> AccountSnapshot:
@@ -621,7 +651,7 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
     latency = int((time.perf_counter() - started) * 1000)
 
     positions_value = 0.0
-    if health=='ok' and getattr(conn,'kind','')=='prediction_market':
+    if health=='ok' and callable(getattr(conn, 'get_positions_value', None)):
         try:
             positions_value = conn.get_positions_value()
             nav_usd += positions_value
@@ -648,7 +678,8 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
                 positions_value += abs(float(getattr(pos, "notional_usd", 0.0) or 0.0))
             collections["positions"].update(status="ok", as_of=time.time())
         except NotImplementedError:
-            collections["positions"].update(status="unsupported")
+            if collections["positions"]["status"] != "ok":
+                collections["positions"].update(status="unsupported")
         except Exception as exc:
             health = "degraded"
             collections["positions"].update(status="error", error=redact_dict({"error": str(exc)})["error"])
@@ -873,6 +904,61 @@ def _wallet_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot
     )
 
 
+@lru_cache(maxsize=256)
+def _public_instrument(root: str, venue: str, options: str, market: str, _bucket: int) -> dict[str, Any]:
+    from ..connectors.registry import build_connector
+    try:
+        conn = build_connector({'venue': venue, 'live': False, 'provider_config': json.loads(options)},
+                               workspace=Path(root))
+        return {**conn.get_instrument(market), 'as_of': time.time()}
+    except Exception:
+        return {'data_status': 'unavailable', 'as_of': time.time()}
+
+
+def position_instruments(paths: WorkspacePaths, profile: AccountProfile,
+                         snapshot: AccountSnapshot | None = None) -> dict[str, Any]:
+    """Public display reads for locally owned positions, independent of NAV capture."""
+    from ..connectors.provider_spec import get_registry
+
+    registry = get_registry(paths.root)
+    positions = _position_book_open(paths, profile.id, readonly=True)
+    if not positions:
+        return {}
+    instruments = {}
+    previous = (snapshot.meta.get('instruments') or {}) if snapshot else {}
+    now = time.time()
+    for pos in positions:
+        if pos.market in instruments:
+            continue
+        spec = registry.find(pos.market.split(':', 1)[0]) or registry.find(pos.venue) or registry.find(profile.venue)
+        if spec is None or not spec.supports.get('instrument_metadata'):
+            continue
+        old = dict(previous.get(pos.market) or {})
+        from ..connectors.module_policy import module_enabled
+        if not module_enabled(paths.root, spec.module):
+            instruments[pos.market] = {**spec.instrument_defaults, **old,
+                                       'data_status': 'stale' if old.get('label') else 'unavailable'}
+            continue
+        observed = old.get('as_of') or (snapshot.ts if snapshot else 0)
+        if old.get('data_status') == 'available' and 0 <= now - observed < DEFAULT_MAX_AGE_S:
+            entry = old
+        else:
+            # Only public endpoint options are forwarded; never account credentials.
+            options = (profile.raw.get('provider_config') or {}) if spec.matches(profile.venue) else {}
+            fresh = _public_instrument(str(paths.root), spec.id, json.dumps(options, sort_keys=True),
+                                       pos.market, int(now // DEFAULT_MAX_AGE_S))
+            if fresh.get('data_status') == 'unavailable' and old.get('label'):
+                entry = {**old, 'data_status': 'stale'}
+            else:
+                entry = {'type': spec.instrument_types[0] if len(spec.instrument_types) == 1 else 'unknown', **fresh}
+        instruments[pos.market] = {**spec.instrument_defaults, **entry}
+    return instruments
+
+
+def _capture_instruments(config: Config, profile: AccountProfile) -> dict[str, Any]:
+    return position_instruments(config.paths, profile)
+
+
 def capture_snapshot(
     config: Config,
     account_id: str,
@@ -907,6 +993,14 @@ def capture_snapshot(
         snap = _live_snapshot(profile, config)
     else:
         snap = _mock_snapshot(profile)
+
+    try:
+        instruments = _capture_instruments(config, profile)
+        if instruments:
+            snap.meta['instruments'] = instruments
+    except Exception:
+        # Presentation availability must not change the risk snapshot.
+        pass
 
     if persist:
         try:

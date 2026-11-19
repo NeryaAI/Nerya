@@ -151,3 +151,23 @@ post-receipt liquidity and underlying asset flows. v4 `ModifyLiquidity` is
 emitted by PoolManager with PositionManager as sender; NFT owner is checked
 separately. Fee views include stored owed amounts and current fee growth.
 Empty liquidity retains the owning strategy's claim.
+## Optional prediction markets
+
+Prediction markets are bundled and loaded on demand. The `adapter.prediction_market`
+Skill inherits the workspace's `adapter` Skill permission; alternatively, allow
+that exact Skill ID. Discovery lists the provider without loading the connector.
+Public markets, order books, price samples and paper strategies do not need a
+signer. Live submission additionally requires the `prediction` Python extra,
+account credentials, and the usual trading permissions and approvals.
+
+To refuse new prediction-market activity in one workspace, set in `nerya.yml`:
+
+```yaml
+modules:
+  prediction_market: disabled
+```
+
+Omit the setting or use `on_demand` to allow it. This is not a liquidation or
+uninstall: existing orders can still be reconciled or cancelled. Local holdings
+remain visible; cached labels can be stale, and missing labels stay unavailable.
+The agent must not change this operator policy to complete a strategy request.

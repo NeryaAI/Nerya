@@ -1152,7 +1152,7 @@ def _wrap_portfolio_summary(deps: NativeToolDeps):
 
 def _wrap_portfolio_positions(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return portfolio_positions_handler(call, config=deps.config)
+        return portfolio_positions_handler(call, config=deps.config, strategy_id=deps.active_strategy_id)
 
     return handler
 
@@ -1549,6 +1549,7 @@ def _wrap_strategy_run_tick(deps: NativeToolDeps):
             return guarded
         return strategy_run_tick_handler(
             guarded,
+            actor_id=deps.active_actor_id,
             config=deps.config,
             skills=deps.skills,
             tool_registry=deps.tool_registry,
@@ -1666,7 +1667,7 @@ def _wrap_strategy_kill_switch(deps: NativeToolDeps):
 
 def _wrap_strategy_run_history(deps: NativeToolDeps):
     def handler(call: ToolCall):
-        return strategy_run_history_handler(call, config=deps.config)
+        return strategy_run_history_handler(call, config=deps.config, actor_id=deps.active_actor_id)
 
     return handler
 
@@ -3498,11 +3499,9 @@ def register_native_tools(
             make_native_descriptor(
                 name="strategy_run_tick",
                 description=(
-                    "Run one strategy tick. The runner imports the "
-                    "package's main.py, threads in a StrategyContext, "
-                    "and writes a run record to "
-                    "strategies/<id>/runs/<run_id>.json. Live mode "
-                    "still requires runtime.live_trading_enabled."
+                    "Run one installed strategy tick. Script ticks return a run record. "
+                    "Paper/shadow Agent ticks return an admission receipt; check strategy_run_history "
+                    "with that run_id for execution status. Admission is not a fill."
                 ),
                 input_schema=STRATEGY_RUN_TICK_SCHEMA,
                 handler=_wrap_strategy_run_tick(deps),

@@ -1,4 +1,24 @@
 {
+  "predictionPosition": {
+    "shares": "Shares",
+    "pricePerShare": "Price ({asset}/share)",
+    "open": "Trading",
+    "closed": "Trading closed",
+    "resolved": "Resolved",
+    "unknown": "Settlement unknown",
+    "stale": "Market details are stale",
+    "dataUnavailable": "Market details unavailable",
+    "originalId": "Asset identifier",
+    "available": "Available cash",
+    "locked": "Reserved cash",
+    "cashDetails": "Cash details",
+    "strategyScope": "Positions and PnL cover Nerya strategies. Account value includes all account assets.",
+    "positionValue": "Strategy position value",
+    "knownValue": "Priced holdings",
+    "unpricedPositions": "{missing} of {total} strategy positions are unpriced; percentages cover only known values.",
+    "valuationNote": "Marked at current prices, not a guaranteed redemption amount.",
+    "unknownFees": "Fees have not been verified."
+  },
   "ordersPage": {
     "statusOpen": "Open",
     "statusSubmitted": "Submitted",

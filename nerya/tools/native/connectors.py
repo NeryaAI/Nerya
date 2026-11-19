@@ -275,6 +275,10 @@ def _spec_to_dict(
     config_like: Any | None = None,
 ) -> dict[str, Any]:
     info = spec.to_info()
+    if spec.module:
+        from ...connectors.module_policy import module_enabled
+        root = getattr(getattr(config_like, 'paths', None), 'root', None)
+        info['module_mode'] = 'on_demand' if module_enabled(root, spec.module) else 'disabled'
     info["credential_status"] = _credential_status(spec, config_like=config_like)
     if include_source_path:
         src = _factory_module_path(spec)
@@ -560,6 +564,11 @@ def _public_connector(
     cfg, workspace, vault_passphrase = _resolve_account_for_venue(
         venue_l, config_like=config_like,
     )
+    workspace = workspace or getattr(getattr(config_like, 'paths', None), 'root', None)
+    if spec and spec.module and spec.supports.get('public_ticker'):
+        # Market data never needs a signing identity, even for a live account.
+        cfg = {'venue': spec.id, 'live': False, 'provider_config': {
+            key: value for key, value in (cfg.get('provider_config') or {}).items() if key.endswith('_url')}}
     if timeout_s is not None:
         cfg = dict(cfg)
         cfg["timeout_s"] = timeout_s
@@ -913,7 +922,7 @@ def market_data_handler(call: ToolCall, *, config_like: Any | None = None) -> To
             return _usage_error(call, "venue is required for list_symbols.")
         from ...skills.builtin.markets.scripts.list_symbols import run as list_symbols
 
-        data = list_symbols(venue=venue)
+        data = list_symbols(venue=venue, workspace=getattr(getattr(config_like, 'paths', None), 'root', None))
         return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=data)
     if not (str(args.get("market") or "").strip() or str(args.get("symbol") or "").strip()):
         return _usage_error(

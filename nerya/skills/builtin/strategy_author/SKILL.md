@@ -1,12 +1,14 @@
 ---
 name: strategy_author
 description: "Create, edit and repair Nerya script, script-gated Agent and scheduled/event Agent strategies, including CEX, on-chain, LP and DeFi candidates. Save an editable proposal; validate as needed and load backtest only for requested historical research."
-version: 0.22.0
+version: 0.24.0
 license: MIT
 author: Nerya
 ---
 
 # Strategy Author
+
+For prediction outcome strategies, load `adapter.prediction_market` before drafting.
 
 ## Create the candidate first
 

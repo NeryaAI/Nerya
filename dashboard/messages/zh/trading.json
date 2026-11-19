@@ -1,4 +1,24 @@
 {
+  "predictionPosition": {
+    "shares": "份额",
+    "pricePerShare": "价格（{asset}/份）",
+    "open": "交易中",
+    "closed": "交易已关闭",
+    "resolved": "已决议",
+    "unknown": "结算状态未知",
+    "stale": "市场信息已过期",
+    "dataUnavailable": "市场信息暂不可用",
+    "originalId": "资产标识",
+    "available": "可用现金",
+    "locked": "占用现金",
+    "cashDetails": "现金明细",
+    "strategyScope": "持仓与盈亏仅包含 Nerya 策略；账户总资产包含账户内全部资产。",
+    "positionValue": "策略持仓市值",
+    "knownValue": "已知市值",
+    "unpricedPositions": "有 {missing}/{total} 个策略持仓暂缺估值，以上比例仅覆盖已知部分。",
+    "valuationNote": "按现价估算，不代表保证兑付金额。",
+    "unknownFees": "费用尚未核实。"
+  },
   "ordersPage": {
     "statusOpen": "挂单中",
     "statusSubmitted": "已提交",

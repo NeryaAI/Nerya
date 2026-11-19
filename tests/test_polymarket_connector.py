@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from typing import Any
+import time
 
 from nerya.connectors.polymarket import PolymarketConnector
 
@@ -26,6 +27,7 @@ class FakePolymarketHttp:
         if url.endswith("/markets"):
             return 200, [
                 {
+                    "version": "v1", "acceptingOrders": True,
                     "slug": "event-slug",
                     "question": "Will this test pass?",
                     "outcomes": '["Yes", "No"]',
@@ -34,6 +36,7 @@ class FakePolymarketHttp:
             ]
         if url.endswith("/book"):
             return 200, {
+                "timestamp": str(int(time.time() * 1000)),
                 'tick_size':'.01','min_order_size':'1','neg_risk':False,
                 "bids": [
                     {"price": "0.10", "size": "10"},

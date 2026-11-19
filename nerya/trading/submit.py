@@ -592,6 +592,9 @@ def submit_trade_plan(
 
     paths = config.paths
     from .instruments import position_bucket
+    from ..connectors.module_policy import require_order_modules
+    profile = get_account_profile(paths, plan.account_id)
+    provider = require_order_modules(paths.root, profile, plan.market)
     meta = dict(plan.meta or {})
     bucket = position_bucket(meta)
     if plan.action in {"close_position", "reduce_position", "attach_protection"} and bucket == "net":
@@ -605,7 +608,6 @@ def submit_trade_plan(
         if eligible:
             bucket = eligible[0].position_side
     elif bucket == "net" and plan.action == "open_position":
-        profile = get_account_profile(paths, plan.account_id)
         if (profile.raw.get("provider_config") or {}).get("position_mode") in {"hedge", "hedged"}:
             bucket = plan.side
     meta["position_side"] = bucket
@@ -621,15 +623,9 @@ def submit_trade_plan(
         return gateway.execute(context,action["action_id"],quote_hash=action["quote_hash"])
     if is_wallet_account(config,plan.account_id):
         return submit_wallet_plan(config,plan)
-    prediction_account=get_account_profile(paths,plan.account_id)
-    from ..connectors.provider_spec import get_registry
-    prediction_spec=get_registry(paths.root).find(prediction_account.venue)
-    is_prediction=prediction_account.kind=='prediction_market' or bool(prediction_spec and prediction_spec.kind=='prediction_market')
-    if is_prediction:
-        if plan.side!='long' or plan.entry.order_type not in ('market','limit'):
-            raise IntentValidationError('prediction outcome shares support long market/limit entry and owned-share exits; native short/TP/SL is unsupported')
-        if plan.protection is not None and plan.protection.mode == "hard_exchange":
-            raise IntentValidationError("prediction protection requires a local executor; native protection is unsupported")
+    rules = provider.order_rules() if provider and provider.order_rules else None
+    if rules:
+        rules.validate(plan)
     if plan.protection is not None:
         from .protection_store import validate_supported_specs
         validate_supported_specs(plan.protection)
@@ -681,12 +677,8 @@ def submit_trade_plan(
     snapshot = _resolve_market_snapshot(
         config, intent, supplied=market_snapshot if isinstance(market_snapshot, dict) else None,
     )
-    if is_prediction and isinstance(snapshot,dict):
-        snapshot=dict(snapshot)
-        executable=snapshot.get('ask' if plan.buy_or_sell=='buy' else 'bid')
-        if executable:snapshot['price']=executable
-        if plan.entry.order_type=='limit' and plan.entry.limit_price:
-            snapshot['price']=plan.entry.limit_price
+    if rules:
+        snapshot = rules.execution_snapshot(plan, snapshot)
 
     risk = RiskGate(config).evaluate(intent, market_snapshot=snapshot, resume=resume)
     history_store.record_risk(
@@ -836,9 +828,8 @@ def submit_trade_plan(
         log.exception("reservation expire_due sweep failed")
     checker = BudgetChecker(profile=profile, snapshot=snap, store=store)
     mark_price = (snapshot or {}).get("price") or plan.entry.limit_price
-    if is_prediction and plan.buy_or_sell=='buy' and plan.entry.order_type=='market' and mark_price:
-        cap=int((profile.raw.get('provider_config') or {}).get('max_slippage_bps',50))
-        mark_price=float(mark_price)*(1+cap/10000)
+    if rules:
+        mark_price = rules.budget_mark(plan, profile, mark_price)
     # R3T5: ``attach_protection`` plans are intercepted above, so every
     # plan reaching this line is directional and ``buy_or_sell`` is
     # always defined.
@@ -934,14 +925,10 @@ def submit_trade_plan(
                     }
 
     candidate = decision.candidate
-    if is_prediction and candidate.size_base is not None:
-        from decimal import Decimal,ROUND_FLOOR
-        original_size=float(candidate.size_base)
-        candidate.size_base=float(Decimal(str(original_size)).quantize(Decimal('.01'),rounding=ROUND_FLOOR))
-        if candidate.size_base<=0:
-            return {'status':'rejected','execution_blocker':'prediction_share_size_below_precision','plan_id':plan.plan_id}
-        candidate.notional_usd*=candidate.size_base/original_size
-        candidate.meta['mark_price']=float((snapshot or {}).get('price') or mark_price or 0)
+    if rules:
+        blocker = rules.size_candidate(candidate, snapshot, mark_price)
+        if blocker:
+            return {'status': 'rejected', 'execution_blocker': blocker, 'plan_id': plan.plan_id}
     if risk_reducing:
         from contextlib import closing
         with closing(PositionBook(paths)) as book:
@@ -960,7 +947,6 @@ def submit_trade_plan(
     candidate.meta["max_slippage_bps"] = min(int(plan.entry.max_slippage_bps),
                                               int(risk.limits_snapshot.get("max_slippage_bps", plan.entry.max_slippage_bps)))
     from .accounts import account_revision
-    provider=get_registry(paths.root).find(profile.venue)
     candidate.meta["account_binding"]=account_revision(profile)
     if provider:candidate.meta["provider_binding"]=provider.binding()
     financial_action_id=config.get("runtime.financial_action_id")

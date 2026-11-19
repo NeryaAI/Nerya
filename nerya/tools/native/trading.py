@@ -29,6 +29,7 @@ Hand-picked surface (mirrors the legacy ``trading_skill`` /
 from __future__ import annotations
 
 import dataclasses
+import math
 from pathlib import Path as _Path
 from typing import Any
 
@@ -693,11 +694,22 @@ def portfolio_summary_handler(call: ToolCall, *, config: Config) -> ToolResult:
     return ToolResult.from_json(tool_use_id=call.id, name=call.name, data=summary)
 
 
-def portfolio_positions_handler(call: ToolCall, *, config: Config) -> ToolResult:
+def portfolio_positions_handler(call: ToolCall, *, config: Config, strategy_id: str | None = None) -> ToolResult:
+    rows = portfolio_mod.get_positions(config.paths)
+    if strategy_id:
+        for row in rows:
+            if (row.get('instrument') or {}).get('type') != 'prediction_outcome':
+                continue
+            shares = row.get('shares') or []
+            owned = next((s['size_base'] for s in shares if s['strategy_id'] == strategy_id), None)
+            # Without a complete attribution breakdown, absence is not evidence of zero.
+            if owned is None and shares and math.isclose(sum(s['size_base'] for s in shares), row['size_base']):
+                owned = 0.0
+            row['strategy_position'] = {'strategy_id': strategy_id, 'owned_shares': owned}
     return ToolResult.from_json(
         tool_use_id=call.id,
         name=call.name,
-        data={"positions": portfolio_mod.get_positions(config.paths)},
+        data={"positions": rows},
     )
 
 

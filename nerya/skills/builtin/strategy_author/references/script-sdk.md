@@ -1,5 +1,7 @@
 ## SDK essentials for finite script strategies
 
+For prediction outcomes, load `adapter.prediction_market` for share sizing and policy fields.
+
 The candle/spot examples below do not implement protocol supply/withdraw. For
 Aave, copy `templates/aave_supply.py.j2` to candidate-local `aave_supply.py`,
 call `aave_supply_tick` from `run(ctx)`, and load the financial request contract
@@ -79,9 +81,10 @@ An `ok` result or `open_long` label is not a fill. Keep SDK failures and rejecti
 Trading methods return dictionaries, not ResultBuilder objects. Return a real
 StrategyResult with the full receipt under `metadata.execution`; retain plan_id,
 session_id, executor_id, approval_id, order_id, nested order_ids, risk decisions
-and reservations. An `ok` wrapper loses the operational status. The installed
-`StrategyResult.from_trade_envelope` defaults unknown statuses to submitted, so
-classify before calling it:
+and reservations. An `ok` wrapper loses the operational status. Use
+`execution_result` from `templates/strategy_execution.py.j2`: it classifies
+known statuses and constructs `StrategyResult` explicitly. Runtime-internal
+`from_trade_envelope` calls are not accepted by the authored-strategy validator.
 
 | SDK status | Strategy result | Recovery |
 |---|---|---|

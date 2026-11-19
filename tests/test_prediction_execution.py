@@ -1,5 +1,6 @@
 """Prediction-market wiring acceptance, isolated from the network."""
 import socket
+from decimal import Decimal
 from dataclasses import dataclass
 from types import SimpleNamespace
 import pytest
@@ -61,6 +62,8 @@ def sdk_connector(monkeypatch,tmp_path):
     class Client:
         def create_order(self,args,options=None):
             calls.append(('sign',args,options));return SimpleNamespace(tokenId=args.token_id,side=args.side,price=args.price,size=args.size)
+        def create_market_order(self,args,*,order_type):
+            calls.append(('sign_market',args,order_type));return SimpleNamespace(tokenId=args.token_id,side=args.side,price=args.price,size=args.size)
         def post_order(self,signed,order_type='GTC',post_only=False):
             calls.append(('post',signed,order_type,post_only))
             return {'success':True,'orderID':'hash','status':'live'}
@@ -73,8 +76,9 @@ def sdk_connector(monkeypatch,tmp_path):
             calls.append(('balance',params));return {'balance':'10000000','allowances':{}}
         def get_open_orders(self,params=None):return []
     module=SimpleNamespace(OrderArgs=Args,PartialCreateOrderOptions=lambda **kw:SimpleNamespace(**kw),
-        BalanceAllowanceParams=lambda **kw:SimpleNamespace(**kw),AssetType=SimpleNamespace(COLLATERAL='COLLATERAL',CONDITIONAL='CONDITIONAL'),
-        TradeParams=lambda **kw:SimpleNamespace(**kw),OrderPayload=lambda **kw:SimpleNamespace(**kw),OpenOrderParams=lambda **kw:SimpleNamespace(**kw))
+        BalanceAllowanceParams=lambda **kw:SimpleNamespace(**kw),AssetType=SimpleNamespace(COLLATERAL='COLLATERAL',CONDITIONAL='CONDITIONAL',CONDITIONAL_V2='CONDITIONAL-V2'),
+        TradeParams=lambda **kw:SimpleNamespace(**kw),OrderPayload=lambda **kw:SimpleNamespace(**kw),OpenOrderParams=lambda **kw:SimpleNamespace(**kw),
+        asset_protocol=lambda token:'v2' if token.startswith('651150819117105875331414918119') else 'v1',share_step=lambda tick:Decimal('.01'))
     monkeypatch.setattr('nerya.connectors.polymarket._sdk_module',lambda:module,raising=False)
     p=PolymarketConnector(live=True,credentials=CEXCredentials(api_key='key',api_secret='secret',api_passphrase='pass',extras={'privateKey':'11'*32}),transport=FakePolymarketHttp())
     monkeypatch.setattr(p,'_sdk',lambda:Client(),raising=False)
@@ -86,10 +90,10 @@ def sdk_connector(monkeypatch,tmp_path):
 def test_limit_signs_current_parameters_and_tif(monkeypatch,tmp_path):
     p,calls=sdk_connector(monkeypatch,tmp_path)
     ack=p.place_order(market='POLYMARKET:'+TOKEN_ID,side='buy',order_type='limit',size=10,price=.5,time_in_force='post_only',client_order_id='client')
-    assert ack.order_id=='hash' and calls[0][0]=='sign'
-    args=calls[0][1]
+    assert ack.order_id=='hash'
+    args=next(call[1] for call in calls if call[0]=='sign')
     assert (args.token_id,args.price,args.size,args.side)==(TOKEN_ID,.5,10,'BUY')
-    assert calls[1][2:]==('GTC',True)
+    assert next(call for call in calls if call[0]=='post')[2:]==('GTC',True)
 
 
 def test_order_query_accounts_only_confirmed_execution_price(monkeypatch,tmp_path):
@@ -110,14 +114,22 @@ def test_private_balance_uses_authenticated_sdk(monkeypatch,tmp_path):
     assert balance.free==10 and balance.asset=='PUSD' and calls[0][0]=='balance'
 
 
-def test_market_buy_uses_bounded_share_order_not_usd_amount(monkeypatch,tmp_path):
+@pytest.mark.parametrize('order_type,tif',[('market','GTC'),('market','FOK'),('limit','IOC'),('limit','FOK'),('limit','FAK')])
+def test_share_sized_immediate_buy_is_rejected_before_signing(monkeypatch,tmp_path,order_type,tif):
     p,calls=sdk_connector(monkeypatch,tmp_path)
-    ack=p.place_order(market=TOKEN_ID,side='buy',order_type='market',size=2,reference_price=.35,client_order_id='market')
-    assert calls[0][1].size==2 and calls[0][1].price==.35
-    assert calls[1][2]=='FOK' and ack.filled==0
-    with pytest.raises(TradingError,match='liquidity|slippage'):
-        p.place_order(market=TOKEN_ID,side='buy',order_type='market',size=7,reference_price=.35,client_order_id='bad')
-    assert len([x for x in calls if x[0]=='post'])==1
+    with pytest.raises(TradingError,match='collateral budgets'):
+        p.place_order(market=TOKEN_ID,side='buy',order_type=order_type,time_in_force=tif,size=2,price=.35,client_order_id='market')
+    assert calls==[] and not p._load_send('market')
+
+
+@pytest.mark.parametrize('tif,expected',[('GTC','FOK'),('FOK','FOK'),('IOC','FAK'),('FAK','FAK')])
+def test_market_sell_keeps_shares_and_requested_execution_type(monkeypatch,tmp_path,tif,expected):
+    p,calls=sdk_connector(monkeypatch,tmp_path)
+    ack=p.place_order(market=TOKEN_ID,side='sell',order_type='market',size=1,reference_price=.3,
+                      client_order_id='market',time_in_force=tif)
+    signed=next(call for call in calls if call[0]=='sign_market')
+    assert signed[1].size==1 and signed[1].price==Decimal('.30') and signed[2]==expected
+    assert next(call for call in calls if call[0]=='post')[2]==expected and ack.filled==0
 
 
 def test_submission_timeout_persists_hash_and_never_reposts(monkeypatch,tmp_path):
@@ -198,42 +210,91 @@ def test_agent_and_script_prediction_orders_reach_approval_and_fill(tmp_path,mon
     assert len([c for c in calls if c[0]=='post'])==1
 
 
-def test_unified_sdk_signs_and_authenticates_without_provisioning_or_network(monkeypatch,tmp_path):
+@pytest.mark.parametrize('version,negative_risk',[('v1',False),('v1',True),('v2',False)])
+@pytest.mark.parametrize('side,tif,order_type',[(side,tif,'limit') for side in ('buy','sell') for tif in ('GTC','GTD','POST_ONLY')]+[('sell','FOK','market'),('sell','IOC','market')])
+def test_unified_sdk_signs_and_authenticates_without_provisioning_or_network(monkeypatch,tmp_path,version,negative_risk,side,tif,order_type):
     pytest.importorskip('polymarket')
     import json
     import httpx
     from eth_account import Account
     from eth_account.messages import encode_typed_data
-    from polymarket._internal.actions.orders.types import OrderDraft
     from polymarket._internal.environment import PRODUCTION_CONFIG
+    from test_prediction_metadata import V2_ID, gamma
+    import time
     key='11'*32;owner=Account.from_key(key).address
     creds=CEXCredentials(api_key='fixed-test-api',api_secret='dGVzdA==',api_passphrase='fixed-test-pass',extras={'privateKey':key})
-    p=PolymarketConnector(live=True,credentials=creds,workspace=tmp_path,transport=FakePolymarketHttp())
-    bridge=p._sdk();client=bridge.client;typed=[];captured=[]
+    class MarketHttp(FakePolymarketHttp):
+        def request(self,method,url,**kwargs):
+            if url.endswith('/markets'):return 200,[gamma(version)]
+            status,body=super().request(method,url,**kwargs)
+            if url.endswith('/book'):
+                body.update(neg_risk=negative_risk,bids=[{'price':'.5','size':'20'}],asks=[{'price':'.5','size':'20'}])
+            return status,body
+    token=V2_ID if version=='v2' else TOKEN_ID
+    p=PolymarketConnector(live=True,credentials=creds,workspace=tmp_path,transport=MarketHttp())
+    bridge=p._sdk();client=bridge.client;typed=[];captured=[];reads=[];canceled=[]
     original_sign=client._ctx.signer.sign_typed_data
     def sign(**kwargs):
         typed.append(kwargs['full_message']);return original_sign(**kwargs)
     monkeypatch.setattr(client._ctx.signer,'sign_typed_data',sign)
-    def draft(**kwargs):
-        return client._sign_order(OrderDraft(chain_id=137,exchange_address=PRODUCTION_CONFIG.standard_exchange,
-            expiration=0,funder_address=owner,offered_amount=5000000,requested_amount=10000000,
-            order_type='GTC',side=kwargs['side'],signer=owner,asset_id=TOKEN_ID),post_only=kwargs.get('post_only',False))
-    monkeypatch.setattr(client,'_prepare_and_sign_limit_order',draft)
     def request(method,path,**kwargs):
+        if method=='GET':
+            reads.append(path)
+            if str(path).startswith('/markets-by-token/'):
+                data={'condition_id':'0x'+'a'*64}
+            elif str(path).startswith('/clob-markets/'):
+                data={'nr':negative_risk,'mts':'.01','t':[{'t':token}],'fd':{'r':0,'e':0}}
+            elif path=='/balance-allowance':data={'balance':'10000000','allowances':{}}
+            elif path=='/data/orders':data={'data':[],'next_cursor':'LTE='}
+            elif str(path).startswith('/data/order/'):
+                data={'id':p._load_send('real-sdk')['order_id'],'market':'0x'+'a'*64,'asset_id':token,
+                      'owner':'fixed-test-api','maker_address':owner,'side':side.upper(),'price':'.5',
+                      'original_size':'10','size_matched':'4','outcome':'Yes','order_type':'GTC',
+                      'status':'CANCELED' if canceled else 'LIVE','associate_trades':['trade-fixture'],'created_at':int(time.time())}
+            elif path=='/data/trades':
+                data={'data':[{'id':'trade-fixture','market':'0x'+'a'*64,'asset_id':token,
+                    'owner':'fixed-test-api','maker_address':owner,'taker_order_id':p._load_send('real-sdk')['order_id'],
+                    'side':side.upper(),'trader_side':'TAKER','price':'.48' if side=='buy' else '.52','size':'4','outcome':'Yes',
+                    'status':'TRADE_STATUS_CONFIRMED','fee_rate_bps':'0','bucket_index':0,'transaction_hash':'0x'+'b'*64,
+                    'maker_orders':[],'match_time':int(time.time()),'last_update':int(time.time())}], 'next_cursor':'LTE='}
+            elif path=='/book':data={'market':'0x'+'a'*64,'asset_id':token,'timestamp':str(int(time.time()*1000)),
+                'hash':'fixture','min_order_size':'1','tick_size':'.01','neg_risk':negative_risk,'last_trade_price':'.5',
+                'bids':[{'price':'.5','size':'20'}],'asks':[{'price':'.5','size':'20'}]}
+            else:pytest.fail(f'unexpected SDK read {path}')
+            return httpx.Response(200,json=data,request=httpx.Request(method,'https://clob.example'+path))
+        if method=='DELETE':
+            assert path=='/order'
+            canceled.append(True)
+            return httpx.Response(200,json={'canceled':[p._load_send('real-sdk')['order_id']],'not_canceled':{}},
+                                  request=httpx.Request(method,'https://clob.example/order'))
         body=json.loads(kwargs['content']);captured.append((method,path,body,kwargs['headers']))
         row=p._load_send('real-sdk');assert row and row['order_id']
         assert method=='POST' and path=='/order'
         return httpx.Response(200,json={'success':True,'errorMsg':'','orderID':row['order_id'],'status':'live',
             'makingAmount':'0','takingAmount':'0','tradeIDs':[],'transactionsHashes':[]},request=httpx.Request(method,'https://clob.example/order'))
     monkeypatch.setattr(client._ctx.secure_clob._client,'request',request)
-    ack=p.place_order(market=TOKEN_ID,side='buy',order_type='limit',size=10,price=.5,client_order_id='real-sdk')
+    monkeypatch.setattr(client._ctx.clob._client,'request',request)
+    ack=p.place_order(market=token,side=side,order_type=order_type,size=10,price=.5,reference_price=.5,client_order_id='real-sdk',
+                      time_in_force=tif,extra_params={'expiration':int(time.time())+600} if tif=='GTD' else {})
     body,headers=captured[0][2:]
-    assert body['orderType']=='GTC' and str(body['order']['tokenId'])==TOKEN_ID
-    assert int(body['order']['makerAmount'])==5000000 and int(body['order']['takerAmount'])==10000000
+    assert body['orderType']==('GTC' if tif=='POST_ONLY' else 'FAK' if tif=='IOC' else tif) and str(body['order']['tokenId'])==token
+    assert int(body['order']['makerAmount'])==(5000000 if side=='buy' else 10000000)
+    assert int(body['order']['takerAmount'])==(10000000 if side=='buy' else 5000000)
+    assert typed[0]['domain']['version']==('3' if version=='v2' else '2')
+    expected_exchange=PRODUCTION_CONFIG.exchange_v3 if version=='v2' else PRODUCTION_CONFIG.neg_risk_exchange if negative_risk else PRODUCTION_CONFIG.standard_exchange
+    assert typed[0]['domain']['verifyingContract'].lower()==expected_exchange.lower()
+    assert any(str(path).startswith('/markets-by-token/') for path in reads)
+    assert any(str(path).startswith('/clob-markets/') for path in reads)
     assert headers['POLY_ADDRESS']==owner and headers['POLY_API_KEY']=='fixed-test-api' and headers['POLY_SIGNATURE']
     assert Account.recover_message(encode_typed_data(full_message=typed[0]),signature=body['order']['signature'])==owner
     assert ack.order_id==p._load_send('real-sdk')['order_id']
     assert len(captured)==1
+    observed=p.get_order(market=token,order_id=ack.order_id)
+    assert observed.status=='partial' and observed.filled==4 and observed.avg_price==(.48 if side=='buy' else .52)
+    assert observed.fee_usd is None and observed.raw['fee_status']=='unverified'
+    canceled_order=p.cancel_order(market=token,order_id=ack.order_id)
+    assert canceled==[True] and canceled_order.status=='canceled' and canceled_order.filled==4
+    assert len(captured)==1  # Reading and canceling never posts a replacement order.
     bridge.close()
 
 
@@ -243,6 +304,29 @@ def test_unsettled_matched_trade_is_not_booked(monkeypatch,tmp_path):
     monkeypatch.setattr(p,'_sdk',lambda:client)
     ack=p.get_order(market=TOKEN_ID,order_id='hash')
     assert ack.filled==0 and ack.avg_price is None and ack.status=='new'
+
+
+def test_real_sdk_does_not_retry_a_post_timeout(monkeypatch):
+    pytest.importorskip('polymarket')
+    import httpx
+    from eth_account import Account
+    from polymarket.models.clob.orders import SignedOrder
+    from nerya.connectors.polymarket_client import ClobClient, ApiCreds
+    key='11'*32; owner=Account.from_key(key).address
+    bridge=ClobClient(host='https://fixture.invalid',chain_id=137,key=key,
+                      creds=ApiCreds(api_key='fixture',api_secret='dGVzdA==',api_passphrase='fixture'))
+    signed=SignedOrder(builder='0x'+'0'*64,expiration=0,maker=owner,maker_amount=5_000_000,
+        metadata='0x'+'0'*64,order_type='GTC',salt=1,side='BUY',signature='0x'+'0'*130,
+        signature_type=0,signer=owner,taker_amount=10_000_000,timestamp=1,token_id=TOKEN_ID)
+    calls=[]
+    def timeout(method,path,**kwargs):
+        calls.append((method,path))
+        raise httpx.ReadTimeout('fixture response lost',request=httpx.Request(method,'https://fixture.invalid/order'))
+    monkeypatch.setattr(bridge.client._ctx.secure_clob._client,'request',timeout)
+    try:
+        with pytest.raises(Exception):bridge.post_order(signed)
+        assert calls==[('POST','/order')]
+    finally:bridge.close()
 
 
 def test_sell_requires_owned_outcome_and_gtd_expiry(monkeypatch,tmp_path):
@@ -351,6 +435,10 @@ def test_paper_prediction_plan_never_constructs_private_sdk(tmp_path,monkeypatch
     path=cfg.paths.strategy('s1')/'strategy.yml';doc=yaml_io.load(path);doc['markets']=[market];yaml_io.dump(path,doc)
     path=cfg.paths.strategy('s1')/'limits.yml';doc=yaml_io.load(path);doc.update(allowed_markets=[market],approval_threshold_usd=0);yaml_io.dump(path,doc)
     monkeypatch.setattr(PolymarketConnector,'_sdk',lambda self:pytest.fail('paper touched private SDK'))
-    result=submit_trade_plan(cfg,TradePlan(strategy_id='s1',account_id='paper_main',market=market,action='open_position',side='long',
-        sizing=SizingPolicy(method='fixed_usd',fixed_usd=5),confidence=1,source='strategy_runtime'),market_snapshot={'price':.5,'age_s':0})
+    plan=TradePlan(strategy_id='s1',account_id='paper_main',market=market,action='open_position',side='long',
+        sizing=SizingPolicy(method='fixed_usd',fixed_usd=5),confidence=1,source='strategy_runtime')
+    result=submit_trade_plan(cfg,plan,market_snapshot={'price':.5,'age_s':0})
     assert result['status']=='filled',result
+    yaml_io.dump(cfg.paths.config, {'modules': {'prediction_market': 'disabled'}})
+    with pytest.raises(TradingError, match='module_disabled'):
+        submit_trade_plan(cfg,plan,market_snapshot={'price':.5,'age_s':0})

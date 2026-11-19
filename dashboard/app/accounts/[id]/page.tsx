@@ -29,6 +29,8 @@ import type {
 } from "../../../lib/clientApi";
 import { formatBalance } from "../../../lib/currentAccount";
 import { formatTsShort } from "../../../lib/format";
+import type { PositionInstrument } from "../../../lib/api";
+import { InstrumentIdentity } from "../../../components/finance/InstrumentIdentity";
 
 function money(value: unknown, currency: string = "USDT"): string {
   return formatBalance(value, currency);
@@ -188,6 +190,8 @@ type PositionShareRow = {
 
 function PositionRow({ pos }: { pos: Record<string, unknown> }) {
   const t = useTranslations("accountDetail.positions");
+  const tp = useTranslations("predictionPosition");
+  const instrument = pos.instrument as PositionInstrument | undefined;
   const [expanded, setExpanded] = useState(false);
   const market = asStr(pos.market) || "–";
   const side = asStr(pos.side) || "–";
@@ -224,10 +228,13 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
         ) : (
           <span className="w-3" />
         )}
-        <span className="font-mono text-ink-100 min-w-[110px]">{market}</span>
-        <Pill tone={positionSideTone(side)}>{side}</Pill>
+        {instrument ? <span className="min-w-0 flex-1"><InstrumentIdentity market={market} instrument={instrument} secondary={side} /></span> : <>
+          <span className="font-mono text-ink-100 min-w-[110px]">{market}</span>
+          <Pill tone={positionSideTone(side)}>{side}</Pill>
+        </>}
         <span className="font-mono text-ink-300">
           {size !== null ? fmtNum(Math.abs(size)) : "–"}
+          {instrument?.type === "prediction_outcome" || instrument?.quantity_unit === "shares" ? ` ${tp("shares")}` : null}
           {avg !== null ? (
             <span className="text-ink-500"> @ {fmtNum(avg, 4)}</span>
           ) : null}
@@ -235,6 +242,7 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
         {mark !== null ? (
           <span className="font-mono text-ink-500 text-[11px]">
             mark {fmtNum(mark, 4)}
+            {instrument?.price_unit ? ` ${instrument.price_unit}` : null}
           </span>
         ) : null}
         {isMerged ? (
@@ -253,6 +261,7 @@ function PositionRow({ pos }: { pos: Record<string, unknown> }) {
           </span>
         ) : null}
       </div>
+      {instrument ? <details className="mt-2 min-w-0 text-ink-500"><summary className="cursor-pointer">{tp("originalId")}</summary><p className="break-all font-mono mt-1">{market}</p></details> : null}
       {expanded && hasShares ? (
         <ul className="mt-1.5 ml-4 space-y-0.5 border-l border-brand-500/15 pl-2">
           {rawShares.map((share, idx) => {
