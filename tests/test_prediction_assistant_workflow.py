@@ -88,7 +88,7 @@ def test_edited_candidate_submits_current_review_bundle(tmp_path):
 
 def test_compacted_inspection_preserves_decision_inputs(monkeypatch):
     from nerya.llm.tool_compaction import compact_tool_result
-    from nerya.skills.builtin.adapter.scripts import inspect_prediction
+    from nerya.skills.builtin.prediction_market.scripts import inspect_prediction
     from test_polymarket_connector import FakePolymarketHttp, PolymarketConnector
 
     connector = PolymarketConnector(transport=FakePolymarketHttp())

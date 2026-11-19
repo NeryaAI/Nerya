@@ -19,11 +19,17 @@ from .cex_base import CEXCredentials
 from .evm_native import EVMNative
 from .mock_chain import MockChain
 from .mock_exchange import MockExchange
-from .polymarket import PolymarketConnector
 from .yahoo import YahooFinanceConnector
 from .provider_spec import ExchangeProviderSpec, get_registry
 from .registry import ConnectorRegistry, build_connector, list_providers
 from .solana_native import SolanaNative
+
+
+def __getattr__(name):
+    if name == 'PolymarketConnector':  # Existing explicit imports stay compatible.
+        from .polymarket import PolymarketConnector
+        return PolymarketConnector
+    raise AttributeError(name)
 
 __all__ = [
     "Balance", "Connector", "CEXConnectorBase", "DEXConnectorBase",

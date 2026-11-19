@@ -31,11 +31,7 @@ Start with connector_list/connector_view for venues or wallet capability
 discovery for wallets. Choose the relevant branch below; this is one adapter
 Skill, with protocol detail loaded only for the requested integration.
 
-- Prediction markets: read [references/prediction-markets.md](references/prediction-markets.md).
-  Use scripts/inspect_prediction.py with a discovered provider or venue-prefixed
-  outcome for public identities, book and price history; it also defines the
-  share/budget boundary and the existing funds-page projection.
-  Supply the script payload with `--json '{...}'`; `stdout_json.notes` contains the selected outcome, market status, best prices, timestamp and share/price constraints even after compaction.
+- Prediction outcomes: load `adapter.prediction_market`.
 - CEX: extend ExchangeProviderSpec and the existing CCXT connector; preserve
   exchange feature discovery and optional protection. Do not replace CCXT with
   a new native CEX client.

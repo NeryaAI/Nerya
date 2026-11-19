@@ -18,6 +18,9 @@ def get_portfolio_summary(paths: WorkspacePaths) -> dict[str, Any]:
     accts = load_account_profiles(paths)
     out: dict[str, Any] = {"accounts": [], "totals": {"cash_usd": 0, "equity_usd": 0}}
     for a in accts.values():
+        from ..connectors.provider_spec import get_registry
+        spec = get_registry(paths.root).find(a.venue)
+        strategy_scope = bool(spec and spec.supports.get('strategy_pnl_scope'))
         ledger = open_ledger(paths, a.id, a.initial_balance_usd)
         snap = ledger.snapshot()
         book_positions = _book_positions(paths, a.id)
@@ -34,19 +37,20 @@ def get_portfolio_summary(paths: WorkspacePaths) -> dict[str, Any]:
             locked_usd = usd_cash_value(latest.locked_by_asset)
             if latest.health not in ('ok', 'stale'):
                 cash_usd = available_usd = locked_usd = eq = None
-        elif a.kind == 'prediction_market' and a.mode != 'paper':
+        elif strategy_scope and a.mode != 'paper':
             cash_usd = eq = None
         positions = _positions_for_account(
             snap["positions"], book_positions, marks, paths=paths,
         )
         instruments = position_instruments(paths, a, latest)
         for row in positions.values():
-            decorate_instrument(row, latest, kind=a.kind, instruments=instruments)
+            decorate_instrument(row, latest, defaults=spec.instrument_defaults if spec else None, instruments=instruments)
         fees = (_prediction_fees(paths, a.id, snap['trade_count'] or len(book_positions))
-                if a.kind == 'prediction_market' and a.mode != 'paper' else snap['fees_paid_usd'])
+                if strategy_scope and a.mode != 'paper' else snap['fees_paid_usd'])
         out["accounts"].append({
             "id": a.id, "mode": a.mode,
             "kind": a.kind,
+            'pnl_scope': 'strategy' if strategy_scope else 'account',
             "live_trading_enabled": a.is_real_money and a.live_trading_enabled,
             "cash_usd": cash_usd,
             "available_usd": available_usd, "locked_usd": locked_usd,
@@ -81,11 +85,11 @@ def get_pnl(paths: WorkspacePaths) -> dict:
     total_pnl = equity - initial_equity if equity is not None else None
     realized_net = total_pnl - unrealized if total_pnl is not None and unrealized is not None else None
     gross_realized, fees, funding = _position_book_pnl_components(paths, summary)
-    if any(a.get('kind') == 'prediction_market' for a in summary['accounts']):
+    if any(a.get('pnl_scope') == 'strategy' for a in summary['accounts']):
         profiles = load_accounts(paths)
         parts = []
         for account in summary['accounts']:
-            if account.get('kind') != 'prediction_market':
+            if account.get('pnl_scope') != 'strategy':
                 value = account['equity_usd']
                 parts.append(value - profiles[account['id']].initial_balance_usd if value is not None else None)
                 continue
@@ -285,7 +289,7 @@ def _position_unrealized_usd(pos: Position, mark: float | None = None) -> float 
     return (mark_value - avg) * abs(size) * side_factor
 
 
-def decorate_instrument(row, snapshot, *, kind='', instruments=None):
+def decorate_instrument(row, snapshot, *, defaults=None, instruments=None):
     metadata = (instruments or {}).get(row.get('market'))
     if metadata is None and snapshot:
         metadata = (snapshot.meta.get('instruments') or {}).get(row.get('market'))
@@ -297,8 +301,8 @@ def decorate_instrument(row, snapshot, *, kind='', instruments=None):
                  else bool(snapshot and snapshot.is_stale()))
         if stale and row['instrument'].get('data_status') == 'available':
             row['instrument']['data_status'] = 'stale'
-    elif kind == 'prediction_market':
-        row['instrument'] = {'type': 'prediction_outcome', 'quantity_unit': 'shares', 'data_status': 'unavailable'}
+    elif defaults:
+        row['instrument'] = {**defaults, 'data_status': 'unavailable'}
     return row
 
 
@@ -329,7 +333,7 @@ def _summary_unrealized_usd(summary: dict[str, Any]) -> float | None:
     total = 0.0
     for account in summary.get("accounts") or []:
         snapshot = account.get("snapshot") or {}
-        if account.get('kind') != 'prediction_market' and "unrealized_pnl_usd" in snapshot:
+        if account.get('pnl_scope') != 'strategy' and "unrealized_pnl_usd" in snapshot:
             total += float(snapshot.get("unrealized_pnl_usd") or 0.0)
             continue
         for pos in (account.get("positions") or {}).values():

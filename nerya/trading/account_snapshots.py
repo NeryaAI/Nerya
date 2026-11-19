@@ -651,7 +651,7 @@ def _live_snapshot(profile: AccountProfile, config: Config) -> AccountSnapshot:
     latency = int((time.perf_counter() - started) * 1000)
 
     positions_value = 0.0
-    if health=='ok' and getattr(conn,'kind','')=='prediction_market':
+    if health=='ok' and callable(getattr(conn, 'get_positions_value', None)):
         try:
             positions_value = conn.get_positions_value()
             nav_usd += positions_value
@@ -934,6 +934,11 @@ def position_instruments(paths: WorkspacePaths, profile: AccountProfile,
         if spec is None or not spec.supports.get('instrument_metadata'):
             continue
         old = dict(previous.get(pos.market) or {})
+        from ..connectors.module_policy import module_enabled
+        if not module_enabled(paths.root, spec.module):
+            instruments[pos.market] = {**spec.instrument_defaults, **old,
+                                       'data_status': 'stale' if old.get('label') else 'unavailable'}
+            continue
         observed = old.get('as_of') or (snapshot.ts if snapshot else 0)
         if old.get('data_status') == 'available' and 0 <= now - observed < DEFAULT_MAX_AGE_S:
             entry = old
@@ -946,9 +951,7 @@ def position_instruments(paths: WorkspacePaths, profile: AccountProfile,
                 entry = {**old, 'data_status': 'stale'}
             else:
                 entry = {'type': spec.instrument_types[0] if len(spec.instrument_types) == 1 else 'unknown', **fresh}
-        if entry.get('type') == 'prediction_outcome':
-            entry.setdefault('quantity_unit', 'shares')
-        instruments[pos.market] = entry
+        instruments[pos.market] = {**spec.instrument_defaults, **entry}
     return instruments
 
 

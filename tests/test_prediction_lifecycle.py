@@ -88,6 +88,21 @@ def test_fee_rpc_failure_does_not_block_sending_cancel(monkeypatch, tmp_path):
     assert ack.raw['settlement_pending'] is True
 
 
+def test_operator_disable_preserves_poll_and_cancel_but_not_new_orders(monkeypatch, tmp_path):
+    from nerya.core import yaml_io
+    conn, calls = sdk_connector(monkeypatch, tmp_path)
+    existing = conn.place_order(market=TOKEN_ID, side='buy', order_type='limit', size=10, price=.5, client_order_id='existing')
+    client = conn._sdk()
+    client.cancel_order = lambda payload: {'canceled': [payload.orderID]}
+    monkeypatch.setattr(conn, '_sdk', lambda: client)
+    yaml_io.dump(tmp_path/'nerya.yml', {'modules': {'prediction_market':'disabled'}})
+    with pytest.raises(TradingError, match='module_disabled'):
+        conn.place_order(market=TOKEN_ID, side='buy', order_type='limit', size=10, price=.5, client_order_id='new')
+    assert conn.get_order_by_client_id(market=TOKEN_ID, client_order_id='existing').filled == 4
+    assert conn.cancel_order(market=TOKEN_ID, order_id=existing.order_id).filled == 4
+    assert len([call for call in calls if call[0] == 'post']) == 1
+
+
 @pytest.mark.parametrize('stamp', [None, 'bad', True, -1, '1', '9999999999999'])
 def test_invalid_book_time_rejected_before_signing(monkeypatch, tmp_path, stamp):
     conn, calls = sdk_connector(monkeypatch, tmp_path)

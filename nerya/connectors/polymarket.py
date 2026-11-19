@@ -37,6 +37,7 @@ from .base import Balance, CEXConnectorBase, OrderAck, Ticker
 from .cex_base import CEXCredentials
 from .http import HttpTransport, UrllibHttp
 from .prediction_markets import market_outcomes, instrument_metadata
+from .module_policy import require_module
 
 
 CLOB_URL = "https://clob.polymarket.com"
@@ -150,6 +151,7 @@ class PolymarketConnector(CEXConnectorBase):
 
     def get_market_metadata(self, market: str, *, refresh=False) -> dict[str, Any]:
         """Resolve a complete protocol identity using only public metadata."""
+        require_module(self.workspace, self.kind)
         key = market.split(':', 1)[-1].strip()
         if not refresh and key in self._market_cache:
             return self._market_cache[key]
@@ -177,6 +179,7 @@ class PolymarketConnector(CEXConnectorBase):
 
     # --------------------------------------------------------- public reads
     def get_ticker(self, market: str) -> Ticker:
+        require_module(self.workspace, self.kind)
         token_id, meta = self._resolve_token(market)
         book_raw = self._get(self.clob_url, "book", params={"token_id": token_id})
         bids = (book_raw or {}).get("bids") or []  # type: ignore[union-attr]
@@ -197,6 +200,7 @@ class PolymarketConnector(CEXConnectorBase):
         )
 
     def get_order_book(self, market: str) -> dict[str, Any]:
+        require_module(self.workspace, self.kind)
         token_id, _meta = self._resolve_token(market)
         book = self._get(self.clob_url, "book", params={"token_id": token_id})
         if not isinstance(book, dict):
@@ -204,10 +208,7 @@ class PolymarketConnector(CEXConnectorBase):
         bids = _sorted_levels(book.get("bids") or [], reverse=True)
         asks = _sorted_levels(book.get("asks") or [])
         tick = book.get('tick_size')
-        step = None
-        if tick is not None:
-            try:step = str(_sdk_module().share_step(tick))
-            except ImportError:pass  # Public reads remain available without the optional signer package.
+        step = public_share_step(tick)
         return {
             "market": market, "token_id": token_id,
             "bid": bids[0][0] if bids else 0.0,
@@ -220,6 +221,7 @@ class PolymarketConnector(CEXConnectorBase):
         }
 
     def list_markets(self,*,limit=20,offset=0):
+        require_module(self.workspace, self.kind)
         rows=self._get(self.gamma_url,'markets',params={'active':'true','closed':'false','limit':min(100,max(1,int(limit))),'offset':int(offset)})
         if not isinstance(rows,list):raise TradingError('invalid prediction market discovery response')
         out=[]
@@ -236,6 +238,7 @@ class PolymarketConnector(CEXConnectorBase):
         The API provides price samples, not traded OHLCV. Each row has
         O=H=L=C and zero unavailable volume; the data facade labels this.
         """
+        require_module(self.workspace, self.kind)
         token_id, _meta = self._resolve_token(market)
         seconds=_interval_seconds(interval)
         end_s=int(end)//1000 if end is not None else int(time.time())
@@ -329,6 +332,7 @@ class PolymarketConnector(CEXConnectorBase):
         return self._sdk().signed_order_hash(signed)
 
     def get_balances(self):
+        require_module(self.workspace, self.kind)
         sdk=_sdk_module()
         raw=self._sdk().get_balance_allowance(sdk.BalanceAllowanceParams(asset_type=sdk.AssetType.COLLATERAL))
         total=_decimal(raw.get('balance'),allow_zero=True)/1_000_000
@@ -391,11 +395,13 @@ class PolymarketConnector(CEXConnectorBase):
         return reserved
 
     def get_positions_value(self):
+        require_module(self.workspace, self.kind)
         from .prediction_data import portfolio_value
         owner=self.funder or self._sdk().signer_address
         return portfolio_value(self._get, self.data_url, owner)
 
     def get_positions(self, *, status='OPEN', max_pages=100):
+        require_module(self.workspace, self.kind)
         from .prediction_data import positions
         owner = self.funder or self._sdk().signer_address
         return positions(self._get, self.data_url, owner, status=status, max_pages=max_pages)
@@ -426,6 +432,7 @@ class PolymarketConnector(CEXConnectorBase):
         if prior:
             token=(prior.get('spec') or {}).get('token')
         else:
+            require_module(self.workspace, self.kind)
             meta=self.get_market_metadata(market,refresh=True)
             token=meta['asset_id']
         spec=dict(market=market,token=token,side=side,size=float(size),price=price,order_type=order_type,time_in_force=time_in_force,
@@ -597,6 +604,16 @@ class PolymarketConnector(CEXConnectorBase):
             return OrderAck(order_id=order_id,client_order_id='',status='new',market=market,
                             side=str(current.get('side','')).lower(),filled=0,
                             raw={'cancel_confirmed':True,'settlement_pending':True,'fee_status':'unverified'})
+
+def public_share_step(tick):
+    # Pinned CLOB rounding contract, verified against the signing SDK in tests.
+    # Unknown ticks are not executable until their precision is verified.
+    try:
+        valid = Decimal(str(tick)) in {Decimal(t) for t in ('0.1', '0.01', '0.005', '0.0025', '0.001', '0.0001')}
+    except InvalidOperation:
+        valid = False
+    return '0.01' if valid else None
+
 
 def _interval_seconds(interval):
     units={'m':60,'h':3600,'d':86400,'w':604800}

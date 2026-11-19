@@ -16,7 +16,7 @@ async function fixture(page: Page, locale: string, state: "normal" | "empty" | "
   const rows = spot ? [{ ...position, market: "BTCUSDT", instrument: undefined }] : state === "normal" ? [position, { ...position, position_id: "unknown", market: `${market}1`, mark_price: null,
     market_value_usd: null, notional_usd: null, unrealized_pnl_usd: null,
     instrument: { type: "prediction_outcome", data_status: "unavailable" } }] : [];
-  const account = { id: "prediction-fixture", kind: spot ? "cex" : "prediction_market", mode: "shadow", equity_usd: 250,
+  const account = { id: "prediction-fixture", kind: spot ? "cex" : "prediction_market", pnl_scope: spot ? "account" : "strategy", mode: "shadow", equity_usd: 250,
     cash_usd: 125, available_usd: 100, locked_usd: 25, trade_count: 1, fees_paid_usd: null,
     fees_status: "unknown", live_trading_enabled: false, positions: Object.fromEntries(rows.map(row => [row.market, row])) };
   await page.route("**/api/**", async route => {

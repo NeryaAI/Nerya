@@ -262,8 +262,10 @@ def _account_summary(
     open_positions_payload: list[dict] = []
     instruments = position_instruments(paths, profile, snapshot)
     from ..trading.portfolio import _position_book_rows, _marks_by_market, decorate_instrument
+    from ..connectors.provider_spec import get_registry
+    spec = get_registry(paths.root).find(profile.venue)
     for row in _position_book_rows(open_positions, _marks_by_market(open_positions, snapshot), paths=paths).values():
-        open_positions_payload.append(decorate_instrument(row, snapshot, kind=profile.kind, instruments=instruments))
+        open_positions_payload.append(decorate_instrument(row, snapshot, defaults=spec.instrument_defaults if spec else None, instruments=instruments))
     open_protections = protections.list_active(account_id=profile.id)
     active_executors = orchestrator.list_active(account_id=profile.id)
     try:

@@ -62,7 +62,7 @@ export function PortfolioDesk({ accounts, positions, loaded, positionsError, sum
       <div className="flex min-w-0 flex-wrap items-center gap-3"><h2>{i18nCopy(zh, "copy.components_finance_PortfolioDesk.008")}</h2>{account.mode === "paper" || account.mode === "live" ? <ModePill mode={account.mode} /> : <span className={styles.note}>{account.mode || (i18nCopy(zh, "copy.components_finance_PortfolioDesk.009"))}</span>}</div>
       <ChoiceSelect aria-label={i18nCopy(zh, "copy.components_finance_PortfolioDesk.010")} value={account.id} onValueChange={setSelected}>{accounts.map((a) => <option key={a.id} value={a.id}>{a.id} · {a.mode === "paper" ? (i18nCopy(zh, "copy.components_finance_PortfolioDesk.011")) : a.mode === "live" ? (i18nCopy(zh, "copy.components_finance_PortfolioDesk.012")) : a.mode}</option>)}</ChoiceSelect>
     </div>
-    <p className={styles.note}>{account.kind === "prediction_market" ? tp("strategyScope") : i18nCopy(zh, "copy.components_finance_PortfolioDesk.013")}</p>
+    <p className={styles.note}>{account.pnl_scope === "strategy" ? tp("strategyScope") : i18nCopy(zh, "copy.components_finance_PortfolioDesk.013")}</p>
     {summaryError ? <p role="status" className="pt-2 text-xs text-warn">{i18nCopy(zh, "copy.components_finance_PortfolioDesk.014")}</p> : null}
     <dl className={styles.metrics} data-testid="account-metrics">{[
       [i18nCopy(zh, "copy.components_finance_PortfolioDesk.015"), account.equity_usd, false],
@@ -70,7 +70,7 @@ export function PortfolioDesk({ accounts, positions, loaded, positionsError, sum
       [i18nCopy(zh, "copy.components_finance_PortfolioDesk.017"), unrealized, true],
       [i18nCopy(zh, "copy.components_finance_PortfolioDesk.018"), account.fees_paid_usd, false],
     ].map(([label, value, signed]) => <div key={String(label)}><dt>{label}</dt><dd className={signed ? financeTone(value) : undefined}>{financeMoney(value, locale, Boolean(signed))}</dd></div>)}</dl>
-    {account.kind === "prediction_market" ? <details className="mb-4 text-xs" data-testid="prediction-cash-details"><summary className="cursor-pointer">{tp("cashDetails")}</summary>
+    {account.pnl_scope === "strategy" ? <details className="mb-4 text-xs" data-testid="prediction-cash-details"><summary className="cursor-pointer">{tp("cashDetails")}</summary>
       <dl className="mt-2 flex flex-wrap gap-6"><div><dt>{tp("available")}</dt><dd>{financeMoney(account.available_usd, locale)}</dd></div><div><dt>{tp("locked")}</dt><dd>{financeMoney(account.locked_usd, locale)}</dd></div></dl>
       {account.fees_status === "unknown" ? <p className="mt-2 text-[color:var(--text-muted)]">{tp("unknownFees")}</p> : null}
     </details> : null}

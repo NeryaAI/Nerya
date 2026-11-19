@@ -55,7 +55,7 @@ def test_position_marks_distinguish_zero_from_unavailable(mark, value, pnl):
 def test_metadata_failure_keeps_strategy_identity_and_marks_stale():
     market = 'POLYMARKET:'+TOKEN_ID
     row = {'market': market, 'size_base': 10}
-    decorate_instrument(row, None, kind='prediction_market')
+    decorate_instrument(row, None, defaults={'type': 'prediction_outcome', 'quantity_unit': 'shares'})
     assert row['market'] == market and row['instrument']['data_status'] == 'unavailable'
     snap = AccountSnapshot('s', 'a', time.time()-3600, 'live', 100, meta={'instruments': {
         market: {'type': 'prediction_outcome', 'label': 'Event', 'outcome': 'No', 'data_status': 'available'}}})
@@ -67,7 +67,7 @@ def test_metadata_failure_keeps_strategy_identity_and_marks_stale():
 @pytest.mark.parametrize('value',[-4,0,None])
 def test_prediction_pnl_uses_local_strategy_marks_not_account_snapshot(value):
     from nerya.trading.portfolio import _summary_unrealized_usd
-    summary={'accounts':[{'kind':'prediction_market','snapshot':{'unrealized_pnl_usd':999},
+    summary={'accounts':[{'pnl_scope':'strategy','snapshot':{'unrealized_pnl_usd':999},
                           'positions':{'outcome':{'unrealized_pnl_usd':value}}}]}
     assert _summary_unrealized_usd(summary)==value
 
@@ -131,6 +131,13 @@ def test_new_position_display_reads_public_metadata_without_changing_snapshot(tm
     assert row['shares'][0]['strategy_id'] == 's'
     assert reads == [market]  # Both pages reuse the bounded public display cache.
     assert snapshot.nav_usd == 1000 and snapshot.meta == {}
+    # Turning the module off takes precedence even over a warm public cache.
+    snapshot.meta['instruments'] = {market: row['instrument']}
+    yaml_io.dump(cfg.paths.config, {'modules': {'prediction_market': 'disabled'}})
+    disabled = get_portfolio_summary(cfg.paths)['accounts'][0]['positions'][market]
+    assert disabled['instrument']['data_status'] == ('stale' if available else 'unavailable')
+    assert disabled['instrument']['quantity_unit'] == 'shares'
+    assert reads == [market]
 
 
 @pytest.mark.parametrize('mark,nav', [(0, 995.99), (.5, 1000.99)])

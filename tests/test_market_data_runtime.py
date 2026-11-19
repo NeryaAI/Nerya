@@ -579,7 +579,7 @@ def test_native_market_data_lists_venue_symbols_in_one_call(tmp_path, monkeypatc
     cfg = _config(tmp_path)
     monkeypatch.setattr(
         "nerya.skills.builtin.markets.scripts.list_symbols.run",
-        lambda *, venue: {
+        lambda *, venue, workspace: {
             "venue": venue,
             "count": 2,
             "symbols": [

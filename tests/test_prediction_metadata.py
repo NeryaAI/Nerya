@@ -57,7 +57,7 @@ def test_retired_asset_is_not_substituted_with_the_same_outcomes_new_id():
 
 
 def test_prediction_skill_uses_registry_aliases_and_selected_connector(monkeypatch):
-    from nerya.skills.builtin.adapter.scripts import inspect_prediction
+    from nerya.skills.builtin.prediction_market.scripts import inspect_prediction
     conn = PolymarketConnector(transport=FakePolymarketHttp(), clob_url='https://clob.test')
     created = []
     def build(config, **kwargs):

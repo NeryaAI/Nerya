@@ -435,6 +435,10 @@ def test_paper_prediction_plan_never_constructs_private_sdk(tmp_path,monkeypatch
     path=cfg.paths.strategy('s1')/'strategy.yml';doc=yaml_io.load(path);doc['markets']=[market];yaml_io.dump(path,doc)
     path=cfg.paths.strategy('s1')/'limits.yml';doc=yaml_io.load(path);doc.update(allowed_markets=[market],approval_threshold_usd=0);yaml_io.dump(path,doc)
     monkeypatch.setattr(PolymarketConnector,'_sdk',lambda self:pytest.fail('paper touched private SDK'))
-    result=submit_trade_plan(cfg,TradePlan(strategy_id='s1',account_id='paper_main',market=market,action='open_position',side='long',
-        sizing=SizingPolicy(method='fixed_usd',fixed_usd=5),confidence=1,source='strategy_runtime'),market_snapshot={'price':.5,'age_s':0})
+    plan=TradePlan(strategy_id='s1',account_id='paper_main',market=market,action='open_position',side='long',
+        sizing=SizingPolicy(method='fixed_usd',fixed_usd=5),confidence=1,source='strategy_runtime')
+    result=submit_trade_plan(cfg,plan,market_snapshot={'price':.5,'age_s':0})
     assert result['status']=='filled',result
+    yaml_io.dump(cfg.paths.config, {'modules': {'prediction_market': 'disabled'}})
+    with pytest.raises(TradingError, match='module_disabled'):
+        submit_trade_plan(cfg,plan,market_snapshot={'price':.5,'age_s':0})

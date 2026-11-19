@@ -1,6 +1,6 @@
 # Prediction strategies: public reads, share sizing and execution modes
 
-Use this before drafting a prediction-market strategy. Read the adapter Skill's
+Use this before drafting a prediction-market strategy. Read this Skill's
 `references/prediction-markets.md` for protocol identity and live-order limits.
 These interfaces are installed SDK contracts; source inspection is unnecessary.
 Work in small saved edits. Once a draft exists, make the next tool call a
@@ -21,7 +21,7 @@ selected outcome and decimal asset id, and save the market in editable parameter
 Public ticker/history support is declared by `public_ticker` / `public_klines`;
 missing trading credentials do not block these reads or paper authoring.
 
-For full identity/book constraints use adapter's `scripts/inspect_prediction.py`.
+For full identity/book constraints use this Skill's `scripts/inspect_prediction.py`.
 Pass one JSON payload through `--json`, for example
 `{"provider":"polymarket","market":"<discovered market id>","depth":3}`.
 The script's compact `stdout_json.notes` retains identity, state, bid/ask/minimum/step/tick/time. Its full `book`
@@ -32,7 +32,7 @@ without a separate provider literal; the inspection script resolves its
 provider through the registry.
 If a compacted discovery list already shows a suitable outcome, use that row.
 For omitted rows or inspection details, follow the saved-file recovery contract in
-adapter's `references/prediction-markets.md`; custom Agent allowlists also
+this Skill's `references/prediction-markets.md`; custom Agent allowlists also
 need `read_file` for that evidence recovery.
 
 ## Save a strategy that can execute the requested paper trades
@@ -147,11 +147,11 @@ receipt = ctx.trading.submit_intent(
 ```
 
 Call only in the corresponding signal branch. Preserve the full receipt and
-the pending-operation fence from `references/script-sdk.md`; submitted and
+the pending-operation fence from strategy_author’s `references/script-sdk.md`; submitted and
 pending approval are not fills. `ctx.result.hold(reason=...)` and
 `ctx.result.error(message=..., kind="data_error")` are real result builders.
 Use `execution_result(ctx, receipt)` from the canonical
-`templates/strategy_execution.py.j2` helper to return the actual trading status
+strategy_author’s `templates/strategy_execution.py.j2` helper to return the actual trading status
 and complete receipt. Reuse it when already in the candidate; otherwise copy
 the helper through the normal candidate file tools. The authored-strategy
 validator accepts its explicit `StrategyResult` / `StrategyResultStatus`
@@ -164,12 +164,12 @@ Observe `ctx.trading.execution_status(receipt)` before another submission.
   subagents and no model calls in the trading tick. The authoring conversation
   itself uses a model; that is separate from strategy execution.
 - Script-owned Agent confirmation: retain script mode, declare the confirmation
-  role, and follow `references/trend_follow_subagent.md` for `ctx.subagents.run`
+  role, and follow strategy_author’s `references/trend_follow_subagent.md` for `ctx.subagents.run`
   and its `output` envelope. Adapt the signal to the requested book rules;
   borrowing the confirmation contract does not require an EMA strategy. Check
   the real model verdict, then let the script enforce budget and submit.
 - Agent executor: use the existing Agent strategy scaffold and
-  `references/workflows.md`. Its entrypoint returns `StrategyAgentTask` at the
+  strategy_author’s `references/workflows.md`. Its entrypoint returns `StrategyAgentTask` at the
   top level and dispatches the operator's rules. Put decision/trading in the
   Agent task, not a hidden custom trading script or a precomputed answer.
   The Agent must be able to read the actual book minimum/step, not infer them

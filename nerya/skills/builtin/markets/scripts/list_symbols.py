@@ -38,20 +38,23 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Any
 
 
-def run(*, venue: str) -> dict[str, Any]:
+def run(*, venue: str, workspace=None) -> dict[str, Any]:
     if not venue:
         return {"error": "venue is required", "symbols": [], "count": 0}
     venue = venue.lower()
-    if venue in ('polymarket','polymarket_v2','pm'):
-        from nerya.connectors.polymarket import PolymarketConnector
+    from nerya.connectors.provider_spec import get_registry
+    registry = get_registry(workspace or Path.cwd())
+    spec = registry.find(venue)
+    if spec and spec.supports.get('public_discovery'):
         try:
-            symbols=PolymarketConnector().list_markets(limit=20)
-            return {'venue':'polymarket','symbols':symbols,'count':len(symbols)}
+            symbols = registry.build({'venue': spec.id, 'live': False}).list_markets(limit=20)
+            return {'venue':spec.id,'symbols':symbols,'count':len(symbols)}
         except Exception as exc:
-            return {'venue':'polymarket','symbols':[],'count':0,'error':str(exc)}
+            return {'venue':spec.id,'symbols':[],'count':0,'error':str(exc)}
 
     try:
         import ccxt  # type: ignore

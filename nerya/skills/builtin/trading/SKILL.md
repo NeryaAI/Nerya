@@ -17,11 +17,7 @@ to Byreal or infer LP support from a swap router's name.
 
 Use only after fresh market/account context exists. Live trading still
 requires runtime flags and approval gates.
-For prediction orders, load adapter's `references/prediction-markets.md` before
-sizing: share-sized BUY supports resting limits; immediate BUY budget semantics
-cannot preserve a requested share cap. Retain the requested intent on rejection.
-For prediction strategies in Agent mode, follow strategy_author's
-`references/prediction-strategies.md` to run once and check the admitted task and fills.
+For prediction orders, sizing or fills, load `adapter.prediction_market`.
 
 ## Flow
 

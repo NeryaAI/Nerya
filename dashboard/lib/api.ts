@@ -232,6 +232,7 @@ export type PortfolioSummary = {
     id: string;
     mode: string;
     kind?: string;
+    pnl_scope?: 'strategy' | 'account';
     live_trading_enabled: boolean;
     cash_usd: number | null;
     equity_usd: number | null;

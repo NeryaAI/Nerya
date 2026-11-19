@@ -62,8 +62,7 @@ actually failed, and then move on or state the limitation.
 
 For wallet/DEX/prediction-market integration failures or adding a provider, load
 `adapter` to inspect the exact binding and public execution contract.
-For prediction outcomes, also load adapter's `references/prediction-markets.md`
-before interpreting ids, sampled history or resolution state.
+For prediction outcomes, load `adapter.prediction_market` to interpret IDs, samples and state.
 
 Use a bundled script only for a capability the native tools do not expose and
 only when the operator explicitly requests it; `script_run` may require

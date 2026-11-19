@@ -1,7 +1,6 @@
 ## SDK essentials for finite script strategies
 
-For prediction outcomes, order books or limit orders, read
-`references/prediction-strategies.md` for the exact call shapes and policy fields.
+For prediction outcomes, load `adapter.prediction_market` for share sizing and policy fields.
 
 The candle/spot examples below do not implement protocol supply/withdraw. For
 Aave, copy `templates/aave_supply.py.j2` to candidate-local `aave_supply.py`,

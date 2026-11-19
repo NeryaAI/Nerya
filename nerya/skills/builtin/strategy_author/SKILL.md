@@ -8,9 +8,7 @@ author: Nerya
 
 # Strategy Author
 
-For prediction markets or order-book-based limit strategies, first read
-`references/prediction-strategies.md` for public reads, exact SDK calls and
-the draft policy fields needed for authorized paper execution.
+For prediction outcome strategies, load `adapter.prediction_market` before drafting.
 
 ## Create the candidate first
 

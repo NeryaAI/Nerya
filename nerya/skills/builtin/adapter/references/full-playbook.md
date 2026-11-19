@@ -6,7 +6,7 @@ activate a provider merely to inspect its public capabilities.
 1. Inspect with `connector_list` / `connector_view`, or the read-only
    `scripts/inspect_adapter.py` helper for a wallet binding.
 2. Read the relevant contract: [wallet/external process](contract.md),
-   [provider implementations](providers.md), or [prediction markets](prediction-markets.md).
+   [provider implementations](providers.md), or load the `adapter.prediction_market` Skill.
    CEX integrations extend `ExchangeProviderSpec` and the shared CCXT adapter.
 3. Test explicit units, token/market identity, unsupported capabilities, quote
    expiry, minimum received amounts and failure responses using local fixtures.
